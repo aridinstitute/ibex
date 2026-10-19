@@ -31,6 +31,9 @@ pub struct FindPersonsByName {
     pub name: Name,
 }
 
+#[derive(Debug, Clone)]
+pub struct ListPersons;
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DeletedPerson {
     pub id: PersonId,
@@ -40,6 +43,7 @@ pub(crate) struct Created(pub Person);
 pub(crate) struct Fetched(pub Person);
 pub(crate) struct Updated(pub Person);
 pub(crate) struct Found(pub Vec<Person>);
+pub(crate) struct Listed(pub Vec<Person>);
 
 impl From<Created> for Outcome {
     fn from(Created(person): Created) -> Self {
@@ -68,6 +72,12 @@ impl From<DeletedPerson> for Outcome {
 impl From<Found> for Outcome {
     fn from(Found(people): Found) -> Self {
         Outcome::FindPersonsByName(people)
+    }
+}
+
+impl From<Listed> for Outcome {
+    fn from(Listed(people): Listed) -> Self {
+        Outcome::ListPersons(people)
     }
 }
 
@@ -187,5 +197,16 @@ impl Handler for FindPersonsByName {
         let people = state.store().find_persons_by_name(&self.name).await?;
         ev.set(event::PERSON_DISPLAY, self.name.display());
         Ok(Found(people))
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for ListPersons {
+    const NAME: &'static str = "list_persons";
+    type Output = Listed;
+
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<Listed, CommandError> {
+        let people = state.store().list_persons().await?;
+        Ok(Listed(people))
     }
 }

@@ -92,6 +92,10 @@ impl Store for HangStore {
     async fn find_persons_by_name(&self, _name: &Name) -> Result<Vec<Person>, StoreError> {
         std::future::pending().await
     }
+
+    async fn list_persons(&self) -> Result<Vec<Person>, StoreError> {
+        std::future::pending().await
+    }
 }
 
 struct NoopWaker;

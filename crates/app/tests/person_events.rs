@@ -1,7 +1,7 @@
 #![cfg(feature = "testing")]
 
 use oeuvre_app::command::{
-    CreatePerson, DeletePerson, FindPersonsByName, GetPerson, UpdatePerson,
+    CreatePerson, DeletePerson, FindPersonsByName, GetPerson, ListPersons, UpdatePerson,
 };
 use oeuvre_app::testing::{MemorySink, MemoryStore};
 use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
@@ -241,6 +241,50 @@ async fn alias_round_trip_and_find_by_primary_or_alias() {
     assert_eq!(promoted.aliases[0].display(), "Mark Twain");
 
     assert_eq!(sink.take().len(), 4);
+}
+
+#[tokio::test]
+async fn list_persons_returns_all() {
+    let sink = MemorySink::new();
+    let state = AppState::builder(MemoryStore::new())
+        .surface(Surface::Test)
+        .sink(sink.clone())
+        .build();
+
+    let a_name = Name::try_new(Some("Jane"), Some("Doe"), None::<&str>).unwrap();
+    let b_name = Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap();
+    let Outcome::CreatePerson(a) = state
+        .execute(Command::CreatePerson(CreatePerson {
+            name: a_name,
+            aliases: vec![],
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreatePerson");
+    };
+    let Outcome::CreatePerson(b) = state
+        .execute(Command::CreatePerson(CreatePerson {
+            name: b_name,
+            aliases: vec![],
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreatePerson");
+    };
+
+    let Outcome::ListPersons(listed) = state
+        .execute(Command::ListPersons(ListPersons))
+        .await
+        .unwrap()
+    else {
+        panic!("expected ListPersons");
+    };
+    assert_eq!(listed.len(), 2);
+    let ids: Vec<_> = listed.iter().map(|p| p.id).collect();
+    assert!(ids.contains(&a.id));
+    assert!(ids.contains(&b.id));
 }
 
 #[tokio::test]
