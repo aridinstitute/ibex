@@ -15,5 +15,11 @@ surrealdb = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
+oeuvre-app = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+
+[[bench]]
+name = "person_crud"
+harness = false
