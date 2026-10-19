@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use oeuvre_core::{Store, StoreError, StoreHealth};
+use oeuvre_core::{Name, Person, PersonId, Store, StoreError, StoreHealth};
 
 use crate::event::{EventSink, FinishedEvent};
 
@@ -29,6 +30,74 @@ impl EventSink for MemorySink {
     }
 }
 
+/// Full [`Store`] for person + health tests.
+pub struct MemoryStore {
+    people: Mutex<HashMap<PersonId, Person>>,
+}
+
+impl MemoryStore {
+    pub fn new() -> Self {
+        Self {
+            people: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl Store for MemoryStore {
+    async fn ping(&self) -> Result<StoreHealth, StoreError> {
+        Ok(StoreHealth {
+            backend: "memory",
+            ok: true,
+        })
+    }
+
+    async fn create_person(&self, name: Name) -> Result<Person, StoreError> {
+        let person = Person {
+            id: PersonId::generate(),
+            name,
+        };
+        self.people
+            .lock()
+            .expect("MemoryStore lock")
+            .insert(person.id, person.clone());
+        Ok(person)
+    }
+
+    async fn get_person(&self, id: PersonId) -> Result<Person, StoreError> {
+        self.people
+            .lock()
+            .expect("MemoryStore lock")
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| StoreError::not_found(format!("person {id}")))
+    }
+
+    async fn update_person(&self, id: PersonId, name: Name) -> Result<Person, StoreError> {
+        let mut people = self.people.lock().expect("MemoryStore lock");
+        let person = people
+            .get_mut(&id)
+            .ok_or_else(|| StoreError::not_found(format!("person {id}")))?;
+        person.name = name;
+        Ok(person.clone())
+    }
+
+    async fn delete_person(&self, id: PersonId) -> Result<(), StoreError> {
+        self.people
+            .lock()
+            .expect("MemoryStore lock")
+            .remove(&id)
+            .map(|_| ())
+            .ok_or_else(|| StoreError::not_found(format!("person {id}")))
+    }
+}
+
 pub struct StubStore {
     health: Result<StoreHealth, String>,
 }
@@ -50,6 +119,10 @@ impl StubStore {
     }
 }
 
+fn unsupported(op: &str) -> StoreError {
+    StoreError::new(format!("{op} not supported by StubStore"))
+}
+
 #[async_trait::async_trait]
 impl Store for StubStore {
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
@@ -57,5 +130,21 @@ impl Store for StubStore {
             Ok(h) => Ok(h.clone()),
             Err(msg) => Err(StoreError::new(msg.clone())),
         }
+    }
+
+    async fn create_person(&self, _name: Name) -> Result<Person, StoreError> {
+        Err(unsupported("create_person"))
+    }
+
+    async fn get_person(&self, _id: PersonId) -> Result<Person, StoreError> {
+        Err(unsupported("get_person"))
+    }
+
+    async fn update_person(&self, _id: PersonId, _name: Name) -> Result<Person, StoreError> {
+        Err(unsupported("update_person"))
+    }
+
+    async fn delete_person(&self, _id: PersonId) -> Result<(), StoreError> {
+        Err(unsupported("delete_person"))
     }
 }

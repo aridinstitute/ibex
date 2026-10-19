@@ -1,8 +1,12 @@
 mod health;
+mod person;
 
 pub use health::{Health, HealthReport};
+pub use person::{
+    CreatePerson, DeletePerson, DeletedPerson, GetPerson, UpdatePerson,
+};
 
-use oeuvre_core::StoreError;
+use oeuvre_core::{Person, StoreError};
 
 use crate::event::Event;
 use crate::AppState;
@@ -12,6 +16,10 @@ use crate::AppState;
 #[derive(Debug, Clone)]
 pub enum Command {
     Health(Health),
+    CreatePerson(CreatePerson),
+    GetPerson(GetPerson),
+    UpdatePerson(UpdatePerson),
+    DeletePerson(DeletePerson),
 }
 
 /// The result of a successful command. One variant per [`Command`] variant.
@@ -19,6 +27,10 @@ pub enum Command {
 #[serde(tag = "command", content = "result", rename_all = "snake_case")]
 pub enum Outcome {
     Health(HealthReport),
+    CreatePerson(Person),
+    GetPerson(Person),
+    UpdatePerson(Person),
+    DeletePerson(DeletedPerson),
 }
 
 /// A command plus per-call transport context.
@@ -53,6 +65,10 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Command::Health(_) => Health::NAME,
+            Command::CreatePerson(_) => CreatePerson::NAME,
+            Command::GetPerson(_) => GetPerson::NAME,
+            Command::UpdatePerson(_) => UpdatePerson::NAME,
+            Command::DeletePerson(_) => DeletePerson::NAME,
         }
     }
 }
@@ -81,6 +97,10 @@ pub(crate) async fn dispatch(
 ) -> Result<Outcome, CommandError> {
     match cmd {
         Command::Health(c) => drive(c, state, ev).await,
+        Command::CreatePerson(c) => drive(c, state, ev).await,
+        Command::GetPerson(c) => drive(c, state, ev).await,
+        Command::UpdatePerson(c) => drive(c, state, ev).await,
+        Command::DeletePerson(c) => drive(c, state, ev).await,
     }
 }
 
