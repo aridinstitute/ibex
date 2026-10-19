@@ -3,6 +3,7 @@ use std::path::Path;
 use oeuvre_core::{Name, Person, PersonId, Store, StoreError, StoreHealth};
 use serde::{Deserialize, Serialize};
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
+use surrealdb::sql::Thing;
 use surrealdb::Surreal;
 
 const NS: &str = "oeuvre";
@@ -17,6 +18,12 @@ pub struct SurrealStore {
 struct PersonDoc {
     name: Name,
     aliases: Vec<Name>,
+    name_keys: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersonIdRow {
+    id: Thing,
 }
 
 impl SurrealStore {
@@ -25,21 +32,53 @@ impl SurrealStore {
             .await
             .map_err(map_err)?;
         db.use_ns(NS).use_db(DB).await.map_err(map_err)?;
-        Ok(Self { db })
+        let store = Self { db };
+        store.ensure_schema().await?;
+        Ok(store)
     }
 
     pub async fn open_memory() -> Result<Self, StoreError> {
         let db = Surreal::new::<Mem>(()).await.map_err(map_err)?;
         db.use_ns(NS).use_db(DB).await.map_err(map_err)?;
-        Ok(Self { db })
+        let store = Self { db };
+        store.ensure_schema().await?;
+        Ok(store)
+    }
+
+    async fn ensure_schema(&self) -> Result<(), StoreError> {
+        // Best-effort NONUNIQUE index. Mem engines may reject DEFINE; find still
+        // uses CONTAINS over name_keys.
+        let _ = self
+            .db
+            .query(
+                "DEFINE INDEX IF NOT EXISTS person_name_keys ON TABLE person FIELDS name_keys",
+            )
+            .await;
+        Ok(())
     }
 
     fn person_key(id: PersonId) -> (String, String) {
         (PERSON_TABLE.to_owned(), id.to_string())
     }
 
+    fn doc_from_person(person: &Person) -> PersonDoc {
+        PersonDoc {
+            name: person.name.clone(),
+            aliases: person.aliases.clone(),
+            name_keys: person
+                .name_keys()
+                .map(|k| k.as_str().to_owned())
+                .collect(),
+        }
+    }
+
     fn from_doc(id: PersonId, doc: PersonDoc) -> Result<Person, StoreError> {
         Person::try_new(id, doc.name, doc.aliases).map_err(StoreError::from)
+    }
+
+    fn thing_to_person_id(thing: &Thing) -> Result<PersonId, StoreError> {
+        PersonId::parse(&thing.id.to_string())
+            .map_err(|e| StoreError::new(format!("invalid person id in store: {e}")))
     }
 }
 
@@ -71,10 +110,7 @@ impl Store for SurrealStore {
         let created: Option<PersonDoc> = self
             .db
             .create(key)
-            .content(PersonDoc {
-                name: person.name.clone(),
-                aliases: person.aliases.clone(),
-            })
+            .content(Self::doc_from_person(&person))
             .await
             .map_err(map_err)?;
         if created.is_none() {
@@ -103,14 +139,12 @@ impl Store for SurrealStore {
         name: Name,
         aliases: Vec<Name>,
     ) -> Result<Person, StoreError> {
+        let _existing = self.get_person(id).await?;
         let person = Person::try_new(id, name, aliases)?;
         let updated: Option<PersonDoc> = self
             .db
             .update(Self::person_key(id))
-            .content(PersonDoc {
-                name: person.name.clone(),
-                aliases: person.aliases.clone(),
-            })
+            .content(Self::doc_from_person(&person))
             .await
             .map_err(map_err)?;
         match updated {
@@ -131,8 +165,21 @@ impl Store for SurrealStore {
         }
     }
 
-    async fn find_persons_by_name(&self, _name: &Name) -> Result<Vec<Person>, StoreError> {
-        Ok(Vec::new())
+    async fn find_persons_by_name(&self, name: &Name) -> Result<Vec<Person>, StoreError> {
+        let key = name.key().as_str().to_owned();
+        let mut response = self
+            .db
+            .query("SELECT id FROM person WHERE name_keys CONTAINS $key")
+            .bind(("key", key))
+            .await
+            .map_err(map_err)?;
+        let rows: Vec<PersonIdRow> = response.take(0).map_err(map_err)?;
+        let mut people = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = Self::thing_to_person_id(&row.id)?;
+            people.push(self.get_person(id).await?);
+        }
+        Ok(people)
     }
 }
 
@@ -208,5 +255,47 @@ mod tests {
             .unwrap_err()
             .is_not_found());
         assert!(store.delete_person(id).await.unwrap_err().is_not_found());
+    }
+
+    #[tokio::test]
+    async fn create_with_aliases_finds_by_alias_and_primary() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let primary = Name::try_new(Some("Mark"), Some("Twain"), None::<&str>).unwrap();
+        let alias = Name::try_new(Some("Samuel"), Some("Clemens"), None::<&str>).unwrap();
+
+        let person = store
+            .create_person(primary.clone(), vec![alias.clone()])
+            .await
+            .unwrap();
+        assert_eq!(person.aliases, vec![alias.clone()]);
+
+        let by_primary = store.find_persons_by_name(&primary).await.unwrap();
+        assert_eq!(by_primary.len(), 1);
+        assert_eq!(by_primary[0].id, person.id);
+
+        let by_alias = store.find_persons_by_name(&alias).await.unwrap();
+        assert_eq!(by_alias.len(), 1);
+        assert_eq!(by_alias[0].id, person.id);
+        assert_eq!(by_alias[0].aliases, vec![alias]);
+    }
+
+    #[tokio::test]
+    async fn find_returns_two_people_with_same_name() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let shared = Name::try_new(Some("John"), Some("Smith"), None::<&str>).unwrap();
+        let a = store
+            .create_person(shared.clone(), vec![])
+            .await
+            .unwrap();
+        let b = store
+            .create_person(shared.clone(), vec![])
+            .await
+            .unwrap();
+
+        let hits = store.find_persons_by_name(&shared).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        let ids: Vec<_> = hits.iter().map(|p| p.id).collect();
+        assert!(ids.contains(&a.id));
+        assert!(ids.contains(&b.id));
     }
 }
