@@ -30,7 +30,6 @@ impl EventSink for MemorySink {
     }
 }
 
-/// Full [`Store`] for person + health tests.
 pub struct MemoryStore {
     people: Mutex<HashMap<PersonId, Person>>,
 }

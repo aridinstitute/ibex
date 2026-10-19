@@ -1,8 +1,5 @@
-//! Person identity and structured personal names.
-
 use std::fmt;
 
-/// Trimmed non-empty string. Empty or whitespace-only input is rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NonEmptyStr(String);
 
@@ -27,15 +24,12 @@ impl AsRef<str> for NonEmptyStr {
     }
 }
 
-/// Failure to form a [`Name`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum NameError {
     #[error("name requires a non-empty first or last")]
     Empty,
 }
 
-/// Structured personal name. At least one of first or last is present after `try_new`.
-///
 /// Mononyms (Augustine) live in `last` — the primary indexing / sort slot in bibliography
 /// convention.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -46,8 +40,6 @@ pub struct Name {
 }
 
 impl Name {
-    /// Parse at the domain boundary. Trims; empty strings become `None`.
-    /// Requires at least one of first or last; suffix alone is invalid.
     pub fn try_new(
         first: Option<impl AsRef<str>>,
         last: Option<impl AsRef<str>>,
@@ -120,12 +112,10 @@ impl fmt::Display for Name {
     }
 }
 
-/// Opaque person identity. Not interchangeable with other ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PersonId(uuid::Uuid);
 
 impl PersonId {
-    /// Allocated by store implementors on create. Not for shells to invent casually.
     pub fn generate() -> Self {
         Self(uuid::Uuid::now_v7())
     }
@@ -145,7 +135,6 @@ impl fmt::Display for PersonId {
     }
 }
 
-/// Stored person record. Commands return this; store is sole writer.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Person {
     pub id: PersonId,
