@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/app",
     "crates/adapter-surreal",
 ]
 
@@ -14,6 +15,7 @@ authors = ["Kaden"]
 
 [workspace.dependencies]
 oeuvre-core = { path = "crates/core" }
+oeuvre-app = { path = "crates/app" }
 oeuvre-adapter-surreal = { path = "crates/adapter-surreal" }
 
 async-trait = "0.1"
