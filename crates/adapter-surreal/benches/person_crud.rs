@@ -21,7 +21,10 @@ fn people_seed(n: usize) -> Vec<Name> {
 async fn seed_store(store: &dyn Store, names: &[Name]) -> Vec<PersonId> {
     let mut ids = Vec::with_capacity(names.len());
     for name in names {
-        let person = store.create_person(name.clone()).await.expect("create");
+        let person = store
+            .create_person(name.clone(), vec![])
+            .await
+            .expect("create");
         ids.push(person.id);
     }
     ids
@@ -40,7 +43,7 @@ fn bench_person_crud(c: &mut Criterion) {
                     let store = MemoryStore::new();
                     for i in 0..n as u64 {
                         let person = store
-                            .create_person(sample_name(i))
+                            .create_person(sample_name(i), vec![])
                             .await
                             .expect("create");
                         black_box(person);
@@ -55,7 +58,7 @@ fn bench_person_crud(c: &mut Criterion) {
                     let store = SurrealStore::open_memory().await.expect("open");
                     for i in 0..n as u64 {
                         let person = store
-                            .create_person(sample_name(i))
+                            .create_person(sample_name(i), vec![])
                             .await
                             .expect("create");
                         black_box(person);
@@ -100,7 +103,7 @@ fn bench_person_crud(c: &mut Criterion) {
                 rt.block_on(async {
                     for (i, id) in ids.iter().enumerate() {
                         let person = store
-                            .update_person(*id, sample_name(i as u64 + 10_000))
+                            .update_person(*id, sample_name(i as u64 + 10_000), vec![])
                             .await
                             .expect("update");
                         black_box(person);
@@ -117,7 +120,7 @@ fn bench_person_crud(c: &mut Criterion) {
                 rt.block_on(async {
                     for (i, id) in ids.iter().enumerate() {
                         let person = store
-                            .update_person(*id, sample_name(i as u64 + 10_000))
+                            .update_person(*id, sample_name(i as u64 + 10_000), vec![])
                             .await
                             .expect("update");
                         black_box(person);

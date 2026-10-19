@@ -5,5 +5,5 @@
 mod person;
 mod store;
 
-pub use person::{Name, NameError, NonEmptyStr, Person, PersonId};
+pub use person::{Name, NameError, NameKey, NonEmptyStr, Person, PersonError, PersonId};
 pub use store::{Store, StoreError, StoreHealth};

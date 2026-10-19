@@ -15,7 +15,10 @@ async fn person_crud_round_trip() {
 
     let name = Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap();
     let Outcome::CreatePerson(created) = state
-        .execute(Command::CreatePerson(CreatePerson { name }))
+        .execute(Command::CreatePerson(CreatePerson {
+            name,
+            aliases: vec![],
+        }))
         .await
         .unwrap()
     else {
@@ -39,6 +42,7 @@ async fn person_crud_round_trip() {
         .execute(Command::UpdatePerson(UpdatePerson {
             id: created.id,
             name: updated_name,
+            aliases: vec![],
         }))
         .await
         .unwrap()
@@ -101,7 +105,10 @@ async fn person_create_emits_exactly_one_ok_event() {
 
     let name = Name::try_new(Some("Jane"), Some("Doe"), Some("Jr.")).unwrap();
     let Outcome::CreatePerson(person) = state
-        .execute(Command::CreatePerson(CreatePerson { name }))
+        .execute(Command::CreatePerson(CreatePerson {
+            name,
+            aliases: vec![],
+        }))
         .await
         .unwrap()
     else {
@@ -134,7 +141,10 @@ async fn each_person_command_emits_exactly_one_event() {
 
     let name = Name::try_new(Some("Jane"), Some("Doe"), None::<&str>).unwrap();
     let Outcome::CreatePerson(created) = state
-        .execute(Command::CreatePerson(CreatePerson { name }))
+        .execute(Command::CreatePerson(CreatePerson {
+            name,
+            aliases: vec![],
+        }))
         .await
         .unwrap()
     else {
@@ -153,6 +163,7 @@ async fn each_person_command_emits_exactly_one_event() {
         .execute(Command::UpdatePerson(UpdatePerson {
             id: created.id,
             name: updated,
+            aliases: vec![],
         }))
         .await
         .unwrap();
