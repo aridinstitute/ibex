@@ -64,7 +64,11 @@ impl Store for HangStore {
         std::future::pending().await
     }
 
-    async fn create_person(&self, _name: Name) -> Result<Person, StoreError> {
+    async fn create_person(
+        &self,
+        _name: Name,
+        _aliases: Vec<Name>,
+    ) -> Result<Person, StoreError> {
         std::future::pending().await
     }
 
@@ -72,11 +76,20 @@ impl Store for HangStore {
         std::future::pending().await
     }
 
-    async fn update_person(&self, _id: PersonId, _name: Name) -> Result<Person, StoreError> {
+    async fn update_person(
+        &self,
+        _id: PersonId,
+        _name: Name,
+        _aliases: Vec<Name>,
+    ) -> Result<Person, StoreError> {
         std::future::pending().await
     }
 
     async fn delete_person(&self, _id: PersonId) -> Result<(), StoreError> {
+        std::future::pending().await
+    }
+
+    async fn find_persons_by_name(&self, _name: &Name) -> Result<Vec<Person>, StoreError> {
         std::future::pending().await
     }
 }

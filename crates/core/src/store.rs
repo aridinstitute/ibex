@@ -1,6 +1,6 @@
 //! Storage port. Adapters implement this; commands call it through `AppState`.
 
-use crate::{Name, Person, PersonId};
+use crate::{Name, Person, PersonError, PersonId};
 
 /// Storage backend. Grows one method per capability a command needs.
 #[async_trait::async_trait]
@@ -8,17 +8,30 @@ pub trait Store: Send + Sync + 'static {
     /// Cheap liveness probe. Must not mutate state.
     async fn ping(&self) -> Result<StoreHealth, StoreError>;
 
-    /// Insert a new person. Store allocates [`PersonId`].
-    async fn create_person(&self, name: Name) -> Result<Person, StoreError>;
+    /// Insert a new person. Store allocates [`PersonId`], then [`Person::try_new`].
+    async fn create_person(
+        &self,
+        name: Name,
+        aliases: Vec<Name>,
+    ) -> Result<Person, StoreError>;
 
     /// Fetch by id. Missing → [`StoreError::not_found`].
     async fn get_person(&self, id: PersonId) -> Result<Person, StoreError>;
 
-    /// Replace name for an existing id. Missing → not-found.
-    async fn update_person(&self, id: PersonId, name: Name) -> Result<Person, StoreError>;
+    /// Replace primary name and aliases in one write. Missing → not-found.
+    async fn update_person(
+        &self,
+        id: PersonId,
+        name: Name,
+        aliases: Vec<Name>,
+    ) -> Result<Person, StoreError>;
 
     /// Remove by id. Missing → not-found.
     async fn delete_person(&self, id: PersonId) -> Result<(), StoreError>;
+
+    /// Non-unique lookup. Matches primary or any alias via [`Name::key`].
+    /// Empty vec when none match.
+    async fn find_persons_by_name(&self, name: &Name) -> Result<Vec<Person>, StoreError>;
 }
 
 /// Result of [`Store::ping`].
@@ -32,6 +45,7 @@ pub struct StoreHealth {
 enum StoreErrorKind {
     Other,
     NotFound,
+    Invalid,
 }
 
 /// Failure from a store operation.
@@ -57,7 +71,24 @@ impl StoreError {
         }
     }
 
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: StoreErrorKind::Invalid,
+        }
+    }
+
     pub fn is_not_found(&self) -> bool {
         self.kind == StoreErrorKind::NotFound
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        self.kind == StoreErrorKind::Invalid
+    }
+}
+
+impl From<PersonError> for StoreError {
+    fn from(err: PersonError) -> Self {
+        StoreError::invalid(err.to_string())
     }
 }

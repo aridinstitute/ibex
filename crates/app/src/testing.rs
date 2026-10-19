@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use oeuvre_core::{Name, Person, PersonId, Store, StoreError, StoreHealth};
+use oeuvre_core::{Name, NameKey, Person, PersonId, Store, StoreError, StoreHealth};
 
 use crate::event::{EventSink, FinishedEvent};
 
@@ -30,14 +30,50 @@ impl EventSink for MemorySink {
     }
 }
 
+struct PeopleState {
+    by_id: HashMap<PersonId, Person>,
+    by_name: HashMap<NameKey, HashSet<PersonId>>,
+}
+
+impl PeopleState {
+    fn new() -> Self {
+        Self {
+            by_id: HashMap::new(),
+            by_name: HashMap::new(),
+        }
+    }
+
+    fn reindex_person(&mut self, before: Option<&Person>, after: Option<&Person>) {
+        if let Some(before) = before {
+            for key in before.name_keys() {
+                let empty = match self.by_name.get_mut(&key) {
+                    Some(ids) => {
+                        ids.remove(&before.id);
+                        ids.is_empty()
+                    }
+                    None => false,
+                };
+                if empty {
+                    self.by_name.remove(&key);
+                }
+            }
+        }
+        if let Some(after) = after {
+            for key in after.name_keys() {
+                self.by_name.entry(key).or_default().insert(after.id);
+            }
+        }
+    }
+}
+
 pub struct MemoryStore {
-    people: Mutex<HashMap<PersonId, Person>>,
+    people: Mutex<PeopleState>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self {
-            people: Mutex::new(HashMap::new()),
+            people: Mutex::new(PeopleState::new()),
         }
     }
 }
@@ -57,15 +93,15 @@ impl Store for MemoryStore {
         })
     }
 
-    async fn create_person(&self, name: Name) -> Result<Person, StoreError> {
-        let person = Person {
-            id: PersonId::generate(),
-            name,
-        };
-        self.people
-            .lock()
-            .expect("MemoryStore lock")
-            .insert(person.id, person.clone());
+    async fn create_person(
+        &self,
+        name: Name,
+        aliases: Vec<Name>,
+    ) -> Result<Person, StoreError> {
+        let person = Person::try_new(PersonId::generate(), name, aliases)?;
+        let mut state = self.people.lock().expect("MemoryStore lock");
+        state.by_id.insert(person.id, person.clone());
+        state.reindex_person(None, Some(&person));
         Ok(person)
     }
 
@@ -73,27 +109,50 @@ impl Store for MemoryStore {
         self.people
             .lock()
             .expect("MemoryStore lock")
+            .by_id
             .get(&id)
             .cloned()
             .ok_or_else(|| StoreError::not_found(format!("person {id}")))
     }
 
-    async fn update_person(&self, id: PersonId, name: Name) -> Result<Person, StoreError> {
-        let mut people = self.people.lock().expect("MemoryStore lock");
-        let person = people
-            .get_mut(&id)
+    async fn update_person(
+        &self,
+        id: PersonId,
+        name: Name,
+        aliases: Vec<Name>,
+    ) -> Result<Person, StoreError> {
+        let mut state = self.people.lock().expect("MemoryStore lock");
+        let before = state
+            .by_id
+            .get(&id)
+            .cloned()
             .ok_or_else(|| StoreError::not_found(format!("person {id}")))?;
-        person.name = name;
-        Ok(person.clone())
+        let person = Person::try_new(id, name, aliases)?;
+        state.by_id.insert(id, person.clone());
+        state.reindex_person(Some(&before), Some(&person));
+        Ok(person)
     }
 
     async fn delete_person(&self, id: PersonId) -> Result<(), StoreError> {
-        self.people
-            .lock()
-            .expect("MemoryStore lock")
+        let mut state = self.people.lock().expect("MemoryStore lock");
+        let before = state
+            .by_id
             .remove(&id)
-            .map(|_| ())
-            .ok_or_else(|| StoreError::not_found(format!("person {id}")))
+            .ok_or_else(|| StoreError::not_found(format!("person {id}")))?;
+        state.reindex_person(Some(&before), None);
+        Ok(())
+    }
+
+    async fn find_persons_by_name(&self, name: &Name) -> Result<Vec<Person>, StoreError> {
+        let state = self.people.lock().expect("MemoryStore lock");
+        let key = name.key();
+        let Some(ids) = state.by_name.get(&key) else {
+            return Ok(Vec::new());
+        };
+        Ok(ids
+            .iter()
+            .filter_map(|id| state.by_id.get(id).cloned())
+            .collect())
     }
 }
 
@@ -131,7 +190,11 @@ impl Store for StubStore {
         }
     }
 
-    async fn create_person(&self, _name: Name) -> Result<Person, StoreError> {
+    async fn create_person(
+        &self,
+        _name: Name,
+        _aliases: Vec<Name>,
+    ) -> Result<Person, StoreError> {
         Err(unsupported("create_person"))
     }
 
@@ -139,11 +202,20 @@ impl Store for StubStore {
         Err(unsupported("get_person"))
     }
 
-    async fn update_person(&self, _id: PersonId, _name: Name) -> Result<Person, StoreError> {
+    async fn update_person(
+        &self,
+        _id: PersonId,
+        _name: Name,
+        _aliases: Vec<Name>,
+    ) -> Result<Person, StoreError> {
         Err(unsupported("update_person"))
     }
 
     async fn delete_person(&self, _id: PersonId) -> Result<(), StoreError> {
         Err(unsupported("delete_person"))
+    }
+
+    async fn find_persons_by_name(&self, _name: &Name) -> Result<Vec<Person>, StoreError> {
+        Err(unsupported("find_persons_by_name"))
     }
 }

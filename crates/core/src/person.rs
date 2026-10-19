@@ -88,6 +88,35 @@ impl Name {
         }
         out
     }
+
+    pub fn key(&self) -> NameKey {
+        NameKey::from_name(self)
+    }
+}
+
+/// Index identity for a structured [`Name`].
+///
+/// Wire form is ASCII-lowercased `last|first|suffix` (missing part → empty).
+/// Not the display string — formatting must not change which people a lookup hits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NameKey(String);
+
+impl NameKey {
+    pub fn from_name(name: &Name) -> Self {
+        fn part(p: Option<&str>) -> String {
+            p.unwrap_or("").to_ascii_lowercase()
+        }
+        Self(format!(
+            "{}|{}|{}",
+            part(name.last()),
+            part(name.first()),
+            part(name.suffix())
+        ))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 fn normalize_part(
@@ -135,10 +164,45 @@ impl fmt::Display for PersonId {
     }
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum PersonError {
+    #[error("alias must not equal the primary name")]
+    AliasDuplicatesPrimary,
+    #[error("duplicate alias")]
+    DuplicateAlias,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Person {
     pub id: PersonId,
     pub name: Name,
+    pub aliases: Vec<Name>,
+}
+
+impl Person {
+    pub fn try_new(
+        id: PersonId,
+        name: Name,
+        aliases: Vec<Name>,
+    ) -> Result<Self, PersonError> {
+        for (i, alias) in aliases.iter().enumerate() {
+            if alias == &name {
+                return Err(PersonError::AliasDuplicatesPrimary);
+            }
+            if aliases[..i].contains(alias) {
+                return Err(PersonError::DuplicateAlias);
+            }
+        }
+        Ok(Self { id, name, aliases })
+    }
+
+    pub fn indexed_names(&self) -> impl Iterator<Item = &Name> {
+        std::iter::once(&self.name).chain(self.aliases.iter())
+    }
+
+    pub fn name_keys(&self) -> impl Iterator<Item = NameKey> + '_ {
+        self.indexed_names().map(Name::key)
+    }
 }
 
 #[cfg(test)]
@@ -206,5 +270,56 @@ mod tests {
     #[test]
     fn person_id_parse_rejects_garbage() {
         assert!(PersonId::parse("not-a-ulid").is_err());
+    }
+
+    #[test]
+    fn name_key_stable_across_display_formatting() {
+        let a = Name::try_new(Some("Mark"), Some("Twain"), None::<&str>).unwrap();
+        let b = Name::try_new(Some("MARK"), Some("TWAIN"), None::<&str>).unwrap();
+        assert_eq!(a.key(), b.key());
+        assert_eq!(a.key().as_str(), "twain|mark|");
+    }
+
+    #[test]
+    fn name_key_mononym_in_last() {
+        let name = Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap();
+        assert_eq!(name.key().as_str(), "augustine||");
+    }
+
+    #[test]
+    fn name_key_includes_suffix() {
+        let name = Name::try_new(Some("Jane"), Some("Doe"), Some("Jr.")).unwrap();
+        assert_eq!(name.key().as_str(), "doe|jane|jr.");
+    }
+
+    #[test]
+    fn person_try_new_rejects_alias_equal_primary() {
+        let name = Name::try_new(Some("Mark"), Some("Twain"), None::<&str>).unwrap();
+        let err = Person::try_new(PersonId::generate(), name.clone(), vec![name]).unwrap_err();
+        assert_eq!(err, PersonError::AliasDuplicatesPrimary);
+    }
+
+    #[test]
+    fn person_try_new_rejects_duplicate_aliases() {
+        let primary = Name::try_new(Some("Samuel"), Some("Clemens"), None::<&str>).unwrap();
+        let alias = Name::try_new(Some("Mark"), Some("Twain"), None::<&str>).unwrap();
+        let err = Person::try_new(
+            PersonId::generate(),
+            primary,
+            vec![alias.clone(), alias],
+        )
+        .unwrap_err();
+        assert_eq!(err, PersonError::DuplicateAlias);
+    }
+
+    #[test]
+    fn person_indexed_names_primary_then_aliases() {
+        let primary = Name::try_new(Some("Samuel"), Some("Clemens"), None::<&str>).unwrap();
+        let alias = Name::try_new(Some("Mark"), Some("Twain"), None::<&str>).unwrap();
+        let person = Person::try_new(PersonId::generate(), primary.clone(), vec![alias.clone()])
+            .unwrap();
+        let names: Vec<_> = person.indexed_names().cloned().collect();
+        assert_eq!(names, vec![primary, alias]);
+        assert_eq!(person.name_keys().count(), 2);
     }
 }
