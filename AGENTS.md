@@ -8,7 +8,8 @@ Oeuvre is a citation manager built for speed and agentic research (CLI + MCP). I
 
 | Crate | Path | Role |
 |-------|------|------|
-| `oeuvre-core` | `crates/core` | Domain types and traits |
+| `oeuvre-core` | `crates/core` | Domain types and storage traits |
+| `oeuvre-app` | `crates/app` | AppState, commands, and wide-event logging |
 | `oeuvre-adapter-surreal` | `crates/adapter-surreal` | SurrealDB storage adapter |
 
 See `README.md` and `docs/` for product context.

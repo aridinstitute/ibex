@@ -73,7 +73,7 @@ impl AppState {
         let result = command::dispatch(self, call.command, guard.event_mut())
             .instrument(span)
             .await;
-        guard.finish(result.as_ref().map(|_| ()).map_err(|e| e));
+        guard.finish(result.as_ref().map(|_| ()));
         result
     }
 

@@ -3,13 +3,11 @@
 use oeuvre_core::{Store, StoreError, StoreHealth};
 
 /// SurrealDB-backed store. Client wiring lands in a later change.
-pub struct SurrealStore {
-    // Reserved for `surrealdb::Surreal<Any>` once the dependency is added.
-}
+pub struct SurrealStore;
 
 impl SurrealStore {
     pub async fn open(_path: &std::path::Path) -> Result<Self, StoreError> {
-        Ok(Self {})
+        Ok(Self)
     }
 }
 
