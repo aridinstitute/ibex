@@ -113,18 +113,18 @@ impl fmt::Display for Name {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct PersonId(uuid::Uuid);
+pub struct PersonId(ulid::Ulid);
 
 impl PersonId {
     pub fn generate() -> Self {
-        Self(uuid::Uuid::now_v7())
+        Self(ulid::Ulid::generate())
     }
 
-    pub fn parse(s: &str) -> Result<Self, uuid::Error> {
-        Ok(Self(uuid::Uuid::parse_str(s)?))
+    pub fn parse(s: &str) -> Result<Self, ulid::DecodeError> {
+        Ok(Self(ulid::Ulid::from_string(s)?))
     }
 
-    pub fn as_uuid(self) -> uuid::Uuid {
+    pub fn as_ulid(self) -> ulid::Ulid {
         self.0
     }
 }
@@ -200,11 +200,11 @@ mod tests {
         let id = PersonId::generate();
         let parsed = PersonId::parse(&id.to_string()).unwrap();
         assert_eq!(parsed, id);
-        assert_eq!(parsed.as_uuid(), id.as_uuid());
+        assert_eq!(parsed.as_ulid(), id.as_ulid());
     }
 
     #[test]
     fn person_id_parse_rejects_garbage() {
-        assert!(PersonId::parse("not-a-uuid").is_err());
+        assert!(PersonId::parse("not-a-ulid").is_err());
     }
 }
