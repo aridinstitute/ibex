@@ -18,7 +18,6 @@ pub struct NameFlags {
     pub suffix: Option<String>,
 }
 
-/// Optional normalized name parts for list filtering. Empty filter = no constraint.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NamePartFilter {
     first: Option<String>,
@@ -40,7 +39,6 @@ impl NameFlags {
         .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    /// Flags if any were passed; otherwise prompt interactively. Add/update only.
     pub fn resolve_for_write(self) -> Result<Name> {
         if self.any_set() {
             self.into_name()
@@ -49,7 +47,6 @@ impl NameFlags {
         }
     }
 
-    /// List only. Never prompts. Empty / whitespace parts drop out like [`Name`].
     pub fn into_filter(self) -> NamePartFilter {
         NamePartFilter {
             first: normalize_flag(self.first),
