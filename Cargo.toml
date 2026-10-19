@@ -25,3 +25,5 @@ thiserror = "2"
 tracing = "0.1"
 ulid = { version = "3", features = ["serde"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+surrealdb = { version = "2.3", default-features = false, features = ["kv-mem", "kv-surrealkv"] }
+tempfile = "3"

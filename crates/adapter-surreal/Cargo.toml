@@ -10,3 +10,10 @@ repository.workspace = true
 [dependencies]
 oeuvre-core = { workspace = true }
 async-trait = { workspace = true }
+serde = { workspace = true }
+surrealdb = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
