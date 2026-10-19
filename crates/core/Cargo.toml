@@ -8,3 +8,5 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
+thiserror = { workspace = true }

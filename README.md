@@ -6,8 +6,9 @@ CLI and MCP for automation.
 
 ## Crates
 
-| Crate                    | Path                     | Role                      |
-|--------------------------|--------------------------|---------------------------|
-| `oeuvre-core`            | `crates/core`            | Domain types and traits   |
-| `oeuvre-adapter-surreal` | `crates/adapter-surreal` | SurrealDB storage adapter |
+| Crate                    | Path                     | Role                                         |
+|--------------------------|--------------------------|----------------------------------------------|
+| `oeuvre-core`            | `crates/core`            | Domain types and storage traits              |
+| `oeuvre-app`             | `crates/app`             | AppState, commands, and wide-event logging   |
+| `oeuvre-adapter-surreal` | `crates/adapter-surreal` | SurrealDB storage adapter                    |
 

@@ -9,3 +9,4 @@ repository.workspace = true
 
 [dependencies]
 oeuvre-core = { workspace = true }
+async-trait = { workspace = true }
