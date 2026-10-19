@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::event::{self, WideEvent};
+use crate::event::{self, Event};
 use crate::{AppState, CommandError, Handler, Outcome};
 
 /// No inputs. Proves AppState → dispatch → store → wide event → sink.
@@ -29,7 +29,7 @@ impl Handler for Health {
     async fn run(
         self,
         state: &AppState,
-        ev: &mut WideEvent,
+        ev: &mut Event,
     ) -> Result<HealthReport, CommandError> {
         let t = Instant::now();
         let probe = state.store().ping().await;

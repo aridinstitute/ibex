@@ -6,7 +6,7 @@ use tracing::Instrument;
 
 use crate::command::{self, Call, CommandError, Outcome};
 use crate::event::{
-    self, EventSink, ExecutionId, JsonLinesSink, Status, WideEvent,
+    self, EventSink, ExecutionId, JsonLinesSink, Status, Event,
 };
 
 /// Which shell is driving. Stamped on every wide event as `surface`.
@@ -121,14 +121,14 @@ impl AppStateBuilder {
 /// Owns the in-flight event for one execution. Emits exactly once.
 struct EmitGuard<'a> {
     inner: &'a Inner,
-    event: Option<WideEvent>,
+    event: Option<Event>,
     started: Instant,
     command: &'static str,
 }
 
 impl<'a> EmitGuard<'a> {
     fn open(inner: &'a Inner, command: &'static str, request_id: Option<String>) -> Self {
-        let mut event = WideEvent::new(ExecutionId::new_v7(), command);
+        let mut event = Event::new(ExecutionId::new_v7(), command);
         event.set(event::SURFACE, inner.surface);
         event.set(event::APP_VERSION, inner.version);
         if let Some(id) = request_id {
@@ -153,7 +153,7 @@ impl<'a> EmitGuard<'a> {
         self.command
     }
 
-    fn event_mut(&mut self) -> &mut WideEvent {
+    fn event_mut(&mut self) -> &mut Event {
         self.event
             .as_mut()
             .expect("EmitGuard event present before emit")

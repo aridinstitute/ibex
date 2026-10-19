@@ -101,14 +101,14 @@ impl From<ExecutionId> for FieldValue {
 }
 
 /// In-flight event for one execution. Only `EmitGuard` creates/finishes it.
-pub(crate) struct WideEvent {
+pub(crate) struct Event {
     id: ExecutionId,
     command: &'static str,
     ts_unix_ms: u64,
     fields: Vec<(Key, FieldValue)>,
 }
 
-impl WideEvent {
+impl Event {
     pub(crate) fn new(id: ExecutionId, command: &'static str) -> Self {
         let ts_unix_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -4,7 +4,7 @@ pub use health::{Health, HealthReport};
 
 use oeuvre_core::StoreError;
 
-use crate::event::WideEvent;
+use crate::event::Event;
 use crate::AppState;
 
 /// Every operation Oeuvre supports. Closed set; shells enumerate this.
@@ -64,12 +64,12 @@ pub(crate) trait Handler: Sized + Send {
     type Output: Into<Outcome>;
 
     /// Record input dimensions before `run`, so they land even if `run` fails early.
-    fn annotate(&self, _ev: &mut WideEvent) {}
+    fn annotate(&self, _ev: &mut Event) {}
 
     async fn run(
         self,
         state: &AppState,
-        ev: &mut WideEvent,
+        ev: &mut Event,
     ) -> Result<Self::Output, CommandError>;
 }
 
@@ -77,7 +77,7 @@ pub(crate) trait Handler: Sized + Send {
 pub(crate) async fn dispatch(
     state: &AppState,
     cmd: Command,
-    ev: &mut WideEvent,
+    ev: &mut Event,
 ) -> Result<Outcome, CommandError> {
     match cmd {
         Command::Health(c) => drive(c, state, ev).await,
@@ -87,7 +87,7 @@ pub(crate) async fn dispatch(
 async fn drive<H: Handler>(
     h: H,
     state: &AppState,
-    ev: &mut WideEvent,
+    ev: &mut Event,
 ) -> Result<Outcome, CommandError> {
     h.annotate(ev);
     h.run(state, ev).await.map(Into::into)
