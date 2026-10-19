@@ -10,6 +10,7 @@ use oeuvre_app::testing::{MemorySink, StubStore};
 use oeuvre_app::{
     AppState, Command, CommandError, FieldValue, Outcome, Status, Store, StoreError, StoreHealth,
 };
+use oeuvre_core::{Name, Person, PersonId};
 
 #[tokio::test]
 async fn health_emits_exactly_one_ok_event() {
@@ -18,7 +19,9 @@ async fn health_emits_exactly_one_ok_event() {
         .sink(sink.clone())
         .build();
 
-    let Outcome::Health(report) = state.execute(Command::Health(Health)).await.unwrap();
+    let Outcome::Health(report) = state.execute(Command::Health(Health)).await.unwrap() else {
+        panic!("expected Health");
+    };
     assert!(report.store_ok);
     assert_eq!(report.store_backend, "stub");
 
@@ -58,6 +61,22 @@ struct HangStore;
 #[async_trait::async_trait]
 impl Store for HangStore {
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn create_person(&self, _name: Name) -> Result<Person, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn get_person(&self, _id: PersonId) -> Result<Person, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn update_person(&self, _id: PersonId, _name: Name) -> Result<Person, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn delete_person(&self, _id: PersonId) -> Result<(), StoreError> {
         std::future::pending().await
     }
 }

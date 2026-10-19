@@ -24,6 +24,8 @@ pub(crate) const APP_UPTIME_MS: Key = Key::new("app.uptime_ms");
 pub(crate) const STORE_BACKEND: Key = Key::new("store.backend");
 pub(crate) const STORE_OK: Key = Key::new("store.ok");
 pub(crate) const STORE_LATENCY_US: Key = Key::new("store.latency_us");
+pub(crate) const PERSON_ID: Key = Key::new("person.id");
+pub(crate) const PERSON_DISPLAY: Key = Key::new("person.display");
 
 #[cfg(test)]
 mod tests {
@@ -41,6 +43,8 @@ mod tests {
         STORE_BACKEND,
         STORE_OK,
         STORE_LATENCY_US,
+        PERSON_ID,
+        PERSON_DISPLAY,
     ];
 
     #[test]

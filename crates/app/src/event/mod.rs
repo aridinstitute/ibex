@@ -3,8 +3,8 @@ mod sink;
 
 pub(crate) use keys::Key;
 pub(crate) use keys::{
-    APP_UPTIME_MS, APP_VERSION, DURATION_US, ERROR_KIND, ERROR_MESSAGE, REQUEST_ID, STATUS,
-    STORE_BACKEND, STORE_LATENCY_US, STORE_OK, SURFACE,
+    APP_UPTIME_MS, APP_VERSION, DURATION_US, ERROR_KIND, ERROR_MESSAGE, PERSON_DISPLAY,
+    PERSON_ID, REQUEST_ID, STATUS, STORE_BACKEND, STORE_LATENCY_US, STORE_OK, SURFACE,
 };
 pub use sink::JsonLinesSink;
 
@@ -13,13 +13,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::Surface;
 
-/// UUIDv7: time-ordered, so execution ids sort with wall-clock time.
+/// ULID: time-ordered, so execution ids sort with wall-clock time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
-pub struct ExecutionId(uuid::Uuid);
+pub struct ExecutionId(ulid::Ulid);
 
 impl ExecutionId {
-    pub(crate) fn new_v7() -> Self {
-        Self(uuid::Uuid::now_v7())
+    pub(crate) fn generate() -> Self {
+        Self(ulid::Ulid::generate())
     }
 }
 

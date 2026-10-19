@@ -10,3 +10,16 @@ repository.workspace = true
 [dependencies]
 oeuvre-core = { workspace = true }
 async-trait = { workspace = true }
+serde = { workspace = true }
+surrealdb = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+oeuvre-app = { workspace = true, features = ["testing"] }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+
+[[bench]]
+name = "person_crud"
+harness = false

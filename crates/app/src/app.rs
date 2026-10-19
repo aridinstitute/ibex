@@ -128,7 +128,7 @@ struct EmitGuard<'a> {
 
 impl<'a> EmitGuard<'a> {
     fn open(inner: &'a Inner, command: &'static str, request_id: Option<String>) -> Self {
-        let mut event = Event::new(ExecutionId::new_v7(), command);
+        let mut event = Event::new(ExecutionId::generate(), command);
         event.set(event::SURFACE, inner.surface);
         event.set(event::APP_VERSION, inner.version);
         if let Some(id) = request_id {
