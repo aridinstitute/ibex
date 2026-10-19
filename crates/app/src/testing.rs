@@ -57,11 +57,12 @@ impl Store for MemoryStore {
         })
     }
 
-    async fn create_person(&self, name: Name) -> Result<Person, StoreError> {
-        let person = Person {
-            id: PersonId::generate(),
-            name,
-        };
+    async fn create_person(
+        &self,
+        name: Name,
+        aliases: Vec<Name>,
+    ) -> Result<Person, StoreError> {
+        let person = Person::try_new(PersonId::generate(), name, aliases)?;
         self.people
             .lock()
             .expect("MemoryStore lock")
@@ -78,13 +79,19 @@ impl Store for MemoryStore {
             .ok_or_else(|| StoreError::not_found(format!("person {id}")))
     }
 
-    async fn update_person(&self, id: PersonId, name: Name) -> Result<Person, StoreError> {
+    async fn update_person(
+        &self,
+        id: PersonId,
+        name: Name,
+        aliases: Vec<Name>,
+    ) -> Result<Person, StoreError> {
         let mut people = self.people.lock().expect("MemoryStore lock");
-        let person = people
-            .get_mut(&id)
-            .ok_or_else(|| StoreError::not_found(format!("person {id}")))?;
-        person.name = name;
-        Ok(person.clone())
+        if !people.contains_key(&id) {
+            return Err(StoreError::not_found(format!("person {id}")));
+        }
+        let person = Person::try_new(id, name, aliases)?;
+        people.insert(id, person.clone());
+        Ok(person)
     }
 
     async fn delete_person(&self, id: PersonId) -> Result<(), StoreError> {
@@ -94,6 +101,10 @@ impl Store for MemoryStore {
             .remove(&id)
             .map(|_| ())
             .ok_or_else(|| StoreError::not_found(format!("person {id}")))
+    }
+
+    async fn find_persons_by_name(&self, _name: &Name) -> Result<Vec<Person>, StoreError> {
+        Ok(Vec::new())
     }
 }
 
@@ -131,7 +142,11 @@ impl Store for StubStore {
         }
     }
 
-    async fn create_person(&self, _name: Name) -> Result<Person, StoreError> {
+    async fn create_person(
+        &self,
+        _name: Name,
+        _aliases: Vec<Name>,
+    ) -> Result<Person, StoreError> {
         Err(unsupported("create_person"))
     }
 
@@ -139,11 +154,20 @@ impl Store for StubStore {
         Err(unsupported("get_person"))
     }
 
-    async fn update_person(&self, _id: PersonId, _name: Name) -> Result<Person, StoreError> {
+    async fn update_person(
+        &self,
+        _id: PersonId,
+        _name: Name,
+        _aliases: Vec<Name>,
+    ) -> Result<Person, StoreError> {
         Err(unsupported("update_person"))
     }
 
     async fn delete_person(&self, _id: PersonId) -> Result<(), StoreError> {
         Err(unsupported("delete_person"))
+    }
+
+    async fn find_persons_by_name(&self, _name: &Name) -> Result<Vec<Person>, StoreError> {
+        Err(unsupported("find_persons_by_name"))
     }
 }

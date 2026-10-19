@@ -6,6 +6,7 @@ use crate::{AppState, CommandError, Handler, Outcome};
 #[derive(Debug, Clone)]
 pub struct CreatePerson {
     pub name: Name,
+    pub aliases: Vec<Name>,
 }
 
 #[derive(Debug, Clone)]
@@ -17,6 +18,7 @@ pub struct GetPerson {
 pub struct UpdatePerson {
     pub id: PersonId,
     pub name: Name,
+    pub aliases: Vec<Name>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +62,16 @@ impl From<DeletedPerson> for Outcome {
 fn map_store_err(err: StoreError, id: PersonId) -> CommandError {
     if err.is_not_found() {
         CommandError::NotFound(id.to_string())
+    } else if err.is_invalid() {
+        CommandError::Invalid(err.message.clone())
+    } else {
+        CommandError::Store(err)
+    }
+}
+
+fn map_create_err(err: StoreError) -> CommandError {
+    if err.is_invalid() {
+        CommandError::Invalid(err.message.clone())
     } else {
         CommandError::Store(err)
     }
@@ -75,7 +87,11 @@ impl Handler for CreatePerson {
     }
 
     async fn run(self, state: &AppState, ev: &mut Event) -> Result<Created, CommandError> {
-        let person = state.store().create_person(self.name).await?;
+        let person = state
+            .store()
+            .create_person(self.name, self.aliases)
+            .await
+            .map_err(map_create_err)?;
         ev.set(event::PERSON_ID, person.id.to_string());
         ev.set(event::PERSON_DISPLAY, person.name.display());
         Ok(Created(person))
@@ -115,7 +131,7 @@ impl Handler for UpdatePerson {
     async fn run(self, state: &AppState, ev: &mut Event) -> Result<Updated, CommandError> {
         let person = state
             .store()
-            .update_person(self.id, self.name)
+            .update_person(self.id, self.name, self.aliases)
             .await
             .map_err(|e| map_store_err(e, self.id))?;
         ev.set(event::PERSON_DISPLAY, person.name.display());

@@ -16,6 +16,7 @@ pub struct SurrealStore {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersonDoc {
     name: Name,
+    aliases: Vec<Name>,
 }
 
 impl SurrealStore {
@@ -36,6 +37,10 @@ impl SurrealStore {
     fn person_key(id: PersonId) -> (String, String) {
         (PERSON_TABLE.to_owned(), id.to_string())
     }
+
+    fn from_doc(id: PersonId, doc: PersonDoc) -> Result<Person, StoreError> {
+        Person::try_new(id, doc.name, doc.aliases).map_err(StoreError::from)
+    }
 }
 
 fn map_err(err: surrealdb::Error) -> StoreError {
@@ -55,13 +60,21 @@ impl Store for SurrealStore {
         })
     }
 
-    async fn create_person(&self, name: Name) -> Result<Person, StoreError> {
+    async fn create_person(
+        &self,
+        name: Name,
+        aliases: Vec<Name>,
+    ) -> Result<Person, StoreError> {
         let id = PersonId::generate();
+        let person = Person::try_new(id, name, aliases)?;
         let key = Self::person_key(id);
         let created: Option<PersonDoc> = self
             .db
             .create(key)
-            .content(PersonDoc { name: name.clone() })
+            .content(PersonDoc {
+                name: person.name.clone(),
+                aliases: person.aliases.clone(),
+            })
             .await
             .map_err(map_err)?;
         if created.is_none() {
@@ -69,7 +82,7 @@ impl Store for SurrealStore {
                 "create_person returned empty for {id}"
             )));
         }
-        Ok(Person { id, name })
+        Ok(person)
     }
 
     async fn get_person(&self, id: PersonId) -> Result<Person, StoreError> {
@@ -79,23 +92,29 @@ impl Store for SurrealStore {
             .await
             .map_err(map_err)?;
         match row {
-            Some(doc) => Ok(Person {
-                id,
-                name: doc.name,
-            }),
+            Some(doc) => Self::from_doc(id, doc),
             None => Err(StoreError::not_found(format!("person {id}"))),
         }
     }
 
-    async fn update_person(&self, id: PersonId, name: Name) -> Result<Person, StoreError> {
+    async fn update_person(
+        &self,
+        id: PersonId,
+        name: Name,
+        aliases: Vec<Name>,
+    ) -> Result<Person, StoreError> {
+        let person = Person::try_new(id, name, aliases)?;
         let updated: Option<PersonDoc> = self
             .db
             .update(Self::person_key(id))
-            .content(PersonDoc { name: name.clone() })
+            .content(PersonDoc {
+                name: person.name.clone(),
+                aliases: person.aliases.clone(),
+            })
             .await
             .map_err(map_err)?;
         match updated {
-            Some(_) => Ok(Person { id, name }),
+            Some(_) => Ok(person),
             None => Err(StoreError::not_found(format!("person {id}"))),
         }
     }
@@ -111,6 +130,10 @@ impl Store for SurrealStore {
             None => Err(StoreError::not_found(format!("person {id}"))),
         }
     }
+
+    async fn find_persons_by_name(&self, _name: &Name) -> Result<Vec<Person>, StoreError> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]
@@ -123,7 +146,7 @@ mod tests {
         let store = SurrealStore::open_memory().await.unwrap();
 
         let name = Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap();
-        let created = store.create_person(name.clone()).await.unwrap();
+        let created = store.create_person(name.clone(), vec![]).await.unwrap();
         assert_eq!(created.name.display(), "Augustine");
 
         let got = store.get_person(created.id).await.unwrap();
@@ -133,7 +156,7 @@ mod tests {
         let updated_name =
             Name::try_new(Some("Aurelius"), Some("Augustine"), None::<&str>).unwrap();
         let updated = store
-            .update_person(created.id, updated_name.clone())
+            .update_person(created.id, updated_name.clone(), vec![])
             .await
             .unwrap();
         assert_eq!(updated.name, updated_name);
@@ -149,7 +172,7 @@ mod tests {
         let store = SurrealStore::open(dir.path()).await.unwrap();
 
         let name = Name::try_new(Some("Jane"), Some("Doe"), Some("Jr.")).unwrap();
-        let created = store.create_person(name).await.unwrap();
+        let created = store.create_person(name, vec![]).await.unwrap();
         assert_eq!(created.name.display(), "Jane Doe, Jr.");
 
         let got = store.get_person(created.id).await.unwrap();
@@ -178,7 +201,8 @@ mod tests {
         assert!(store
             .update_person(
                 id,
-                Name::try_new(None::<&str>, Some("X"), None::<&str>).unwrap()
+                Name::try_new(None::<&str>, Some("X"), None::<&str>).unwrap(),
+                vec![],
             )
             .await
             .unwrap_err()
