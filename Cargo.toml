@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/adapter-surreal",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/kaden/oeuvre"
+authors = ["Kaden"]
+
+[workspace.dependencies]
+oeuvre-core = { path = "crates/core" }
+oeuvre-adapter-surreal = { path = "crates/adapter-surreal" }

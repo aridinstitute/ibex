@@ -1,0 +1,1 @@
+//! Oeuvre core domain library.
