@@ -26,6 +26,11 @@ pub struct DeletePerson {
     pub id: PersonId,
 }
 
+#[derive(Debug, Clone)]
+pub struct FindPersonsByName {
+    pub name: Name,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DeletedPerson {
     pub id: PersonId,
@@ -34,6 +39,7 @@ pub struct DeletedPerson {
 pub(crate) struct Created(pub Person);
 pub(crate) struct Fetched(pub Person);
 pub(crate) struct Updated(pub Person);
+pub(crate) struct Found(pub Vec<Person>);
 
 impl From<Created> for Outcome {
     fn from(Created(person): Created) -> Self {
@@ -56,6 +62,12 @@ impl From<Updated> for Outcome {
 impl From<DeletedPerson> for Outcome {
     fn from(d: DeletedPerson) -> Self {
         Outcome::DeletePerson(d)
+    }
+}
+
+impl From<Found> for Outcome {
+    fn from(Found(people): Found) -> Self {
+        Outcome::FindPersonsByName(people)
     }
 }
 
@@ -159,5 +171,21 @@ impl Handler for DeletePerson {
             .await
             .map_err(|e| map_store_err(e, self.id))?;
         Ok(DeletedPerson { id: self.id })
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for FindPersonsByName {
+    const NAME: &'static str = "find_persons_by_name";
+    type Output = Found;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::PERSON_DISPLAY, self.name.display());
+    }
+
+    async fn run(self, state: &AppState, ev: &mut Event) -> Result<Found, CommandError> {
+        let people = state.store().find_persons_by_name(&self.name).await?;
+        ev.set(event::PERSON_DISPLAY, self.name.display());
+        Ok(Found(people))
     }
 }
