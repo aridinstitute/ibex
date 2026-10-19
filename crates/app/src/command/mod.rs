@@ -3,7 +3,7 @@ mod person;
 
 pub use health::{Health, HealthReport};
 pub use person::{
-    CreatePerson, DeletePerson, DeletedPerson, GetPerson, UpdatePerson,
+    CreatePerson, DeletePerson, DeletedPerson, FindPersonsByName, GetPerson, UpdatePerson,
 };
 
 use oeuvre_core::{Person, StoreError};
@@ -20,6 +20,7 @@ pub enum Command {
     GetPerson(GetPerson),
     UpdatePerson(UpdatePerson),
     DeletePerson(DeletePerson),
+    FindPersonsByName(FindPersonsByName),
 }
 
 /// The result of a successful command. One variant per [`Command`] variant.
@@ -31,6 +32,7 @@ pub enum Outcome {
     GetPerson(Person),
     UpdatePerson(Person),
     DeletePerson(DeletedPerson),
+    FindPersonsByName(Vec<Person>),
 }
 
 /// A command plus per-call transport context.
@@ -69,6 +71,7 @@ impl Command {
             Command::GetPerson(_) => GetPerson::NAME,
             Command::UpdatePerson(_) => UpdatePerson::NAME,
             Command::DeletePerson(_) => DeletePerson::NAME,
+            Command::FindPersonsByName(_) => FindPersonsByName::NAME,
         }
     }
 }
@@ -101,6 +104,7 @@ pub(crate) async fn dispatch(
         Command::GetPerson(c) => drive(c, state, ev).await,
         Command::UpdatePerson(c) => drive(c, state, ev).await,
         Command::DeletePerson(c) => drive(c, state, ev).await,
+        Command::FindPersonsByName(c) => drive(c, state, ev).await,
     }
 }
 
