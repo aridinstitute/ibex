@@ -1,6 +1,6 @@
 //! Library grid: resource summary rows, one page at a time.
 
-use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableState};
+use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -9,6 +9,7 @@ use gpui_kit::*;
 use oeuvre_core::{ResourceId, ResourcePage, ResourceSummary};
 
 use crate::db::DbWorker;
+use crate::detail::{render_panel, DetailFetch, DetailView};
 use crate::kind::{kind_icon, kind_label};
 
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
@@ -49,6 +50,15 @@ impl LibraryDelegate {
 
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// The id backing a row, so selection events can drive id-keyed fetches.
+    pub fn row_id(&self, row_ix: usize) -> Option<ResourceId> {
+        self.rows.get(row_ix).map(|row| row.id)
+    }
+
+    pub fn worker(&self) -> &DbWorker {
+        &self.worker
     }
 }
 
@@ -201,13 +211,97 @@ impl TableDelegate for LibraryDelegate {
     }
 }
 
+gpui_kit::actions!([ToggleDetailPanel]);
+
 pub struct LibraryApp {
     table: Entity<TableState<LibraryDelegate>>,
+    detail_open: bool,
+    /// Row selection, tracked here so the panel shows one resource exactly
+    /// as long as its row stays selected.
+    selected: Option<ResourceId>,
+    /// Detail for the selected resource, keyed by id: a late reply from a
+    /// superseded selection is dropped instead of flashing into the panel.
+    detail: Option<(ResourceId, DetailFetch)>,
 }
 
 impl LibraryApp {
-    pub fn new(table: Entity<TableState<LibraryDelegate>>) -> Self {
-        Self { table }
+    pub fn new(
+        table: Entity<TableState<LibraryDelegate>>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.subscribe_in(&table, window, |this, _table, event: &TableEvent, window, cx| {
+            match event {
+                TableEvent::SelectRow(row_ix) => this.select_row(*row_ix, window, cx),
+                TableEvent::ClearSelection => this.clear_selection(cx),
+                _ => {}
+            }
+        })
+        .detach();
+        Self {
+            table,
+            detail_open: false,
+            selected: None,
+            detail: None,
+        }
+    }
+
+    fn select_row(&mut self, row_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.table.read(cx).delegate().row_id(row_ix) else {
+            return;
+        };
+        self.selected = Some(id);
+        if self.detail.as_ref().is_some_and(|(loaded, _)| *loaded == id) {
+            cx.notify();
+            return;
+        }
+        self.detail = Some((id, DetailFetch::Loading));
+        cx.notify();
+
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let reply = worker.resource_detail(id).await;
+            _ = app.update_in(window, |app, _window, cx| {
+                // A newer selection wins; a stale reply is dropped.
+                if app.selected == Some(id) {
+                    app.detail = Some((
+                        id,
+                        match reply {
+                            Ok(detail) => DetailFetch::Loaded(Box::new(detail)),
+                            Err(error) => DetailFetch::Failed(error),
+                        },
+                    ));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.selected = None;
+        cx.notify();
+    }
+
+    fn toggle_detail_panel(&mut self, cx: &mut Context<Self>) {
+        // The detail is fetched on selection whether or not the panel shows,
+        // so opening it never waits on a fetch.
+        self.detail_open = !self.detail_open;
+        cx.notify();
+    }
+
+    fn detail_view(&self) -> DetailView<'_> {
+        match (self.selected, self.detail.as_ref()) {
+            (Some(id), Some((loaded, fetch))) if *loaded == id => match fetch {
+                DetailFetch::Loading => DetailView::Loading,
+                DetailFetch::Loaded(detail) => DetailView::Fields(detail),
+                DetailFetch::Failed(error) => DetailView::Failed(error),
+            },
+            // select_row always starts a fetch, so this only covers the gap
+            // between the two statements; the panel just shows loading.
+            (Some(_), _) => DetailView::Loading,
+            (None, _) => DetailView::Empty,
+        }
     }
 }
 
@@ -218,11 +312,25 @@ impl Render for LibraryApp {
 
         v_flex()
             .size_full()
+            // `]` toggles the detail panel; the context must cover the
+            // focused table, which renders below this root.
+            .key_context("LibraryApp")
+            .on_action(cx.listener(|this, _: &ToggleDetailPanel, _window, cx| {
+                this.toggle_detail_panel(cx);
+            }))
             .child(
-                DataTable::new(&self.table)
-                    .with_size(Size::XSmall)
-                    .bordered(false)
-                    .stripe(true),
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        DataTable::new(&self.table)
+                            .with_size(Size::XSmall)
+                            .bordered(false)
+                            .stripe(true),
+                    )
+                    .when(self.detail_open, |el| {
+                        el.child(render_panel(self.detail_view(), cx))
+                    }),
             )
             .when_some(error, |el, error| {
                 el.child(

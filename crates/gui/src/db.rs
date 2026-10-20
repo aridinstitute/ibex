@@ -1,9 +1,9 @@
 //! Store access for the UI: one OS thread owns a tokio runtime and serves
 //! page requests over channels, so gpui's executor never runs Surreal I/O.
 
-use oeuvre_app::command::ListResourcesPage;
+use oeuvre_app::command::{GetResourceDetail, ListResourcesPage};
 use oeuvre_app::{AppState, Command, Outcome};
-use oeuvre_core::{ResourceId, ResourcePage};
+use oeuvre_core::{ResourceDetail, ResourceId, ResourcePage};
 use tokio::sync::oneshot;
 
 pub enum DbRequest {
@@ -11,6 +11,10 @@ pub enum DbRequest {
         before: Option<ResourceId>,
         limit: u32,
         reply: oneshot::Sender<Result<ResourcePage, String>>,
+    },
+    GetDetail {
+        id: ResourceId,
+        reply: oneshot::Sender<Result<ResourceDetail, String>>,
     },
 }
 
@@ -55,6 +59,21 @@ impl DbWorker {
                                     });
                                 let _ = reply.send(result);
                             }
+                            DbRequest::GetDetail { id, reply } => {
+                                let result = state
+                                    .execute(Command::GetResourceDetail(GetResourceDetail {
+                                        id,
+                                    }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::GetResourceDetail(detail) => Ok(detail),
+                                        _ => Err(
+                                            "unexpected outcome from get_resource_detail".into(),
+                                        ),
+                                    });
+                                let _ = reply.send(result);
+                            }
                         }
                     }
                 });
@@ -76,6 +95,16 @@ impl DbWorker {
                 limit,
                 reply: tx,
             })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    /// Fetch the fully-resolved detail for one resource, for the panel.
+    pub async fn resource_detail(&self, id: ResourceId) -> Result<ResourceDetail, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::GetDetail { id, reply: tx })
             .map_err(|_| "db worker stopped".to_string())?;
         rx.await
             .map_err(|_| "db worker dropped the request".to_string())?
@@ -106,6 +135,7 @@ mod tests {
     use super::*;
     use oeuvre_app::Surface;
     use oeuvre_app::testing::MemoryStore;
+    use oeuvre_core::published_label_from;
 
     #[tokio::test]
     async fn worker_walks_pages() {
@@ -131,5 +161,33 @@ mod tests {
         }
         assert_eq!(walked, 8);
         assert!(pages >= 3);
+    }
+
+    #[tokio::test]
+    async fn worker_fetches_resource_detail() {
+        let store = MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        let state = AppState::builder(store).surface(Surface::Test).build();
+        let worker = DbWorker::spawn(state);
+
+        let page = worker.list_page(None, 8).await.unwrap();
+        // Containers can sort anywhere within the same ULID millisecond, so
+        // pick a seeded item; those always have authors.
+        let row = page
+            .rows
+            .iter()
+            .find(|row| !row.kind.is_container())
+            .expect("seeded library has non-container items");
+        let detail = worker.resource_detail(row.id).await.unwrap();
+        assert_eq!(detail.id, row.id);
+        assert_eq!(detail.kind, row.kind);
+        assert_eq!(detail.title.as_str(), row.title.as_str());
+        // Summary and detail are different projections of one resource, so
+        // the resolved detail must agree with the summary on shared fields.
+        assert!(!detail.creators.is_empty());
+        assert_eq!(
+            published_label_from(detail.published.as_ref()),
+            row.published_label
+        );
     }
 }

@@ -1,4 +1,5 @@
 mod db;
+mod detail;
 mod kind;
 mod library;
 
@@ -16,7 +17,7 @@ use gpui_kit::{AppContext as _, *};
 
 use crate::db::DbWorker;
 use crate::kind::AppAssets;
-use crate::library::{LibraryApp, LibraryDelegate, PAGE_SIZE};
+use crate::library::{LibraryApp, LibraryDelegate, ToggleDetailPanel, PAGE_SIZE};
 
 #[derive(Debug, Parser)]
 #[command(name = "ovr-gui", version, about = "Oeuvre library GUI")]
@@ -56,6 +57,11 @@ fn run() -> Result<()> {
         // Root sets the window rem size from this, so every rem-based size
         // in the kit shrinks with it.
         Theme::global_mut(cx).font_size = px(12.);
+        cx.bind_keys([KeyBinding::new(
+            "]",
+            ToggleDetailPanel,
+            Some("LibraryApp"),
+        )]);
         if let Err(err) = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -76,7 +82,12 @@ fn run() -> Result<()> {
                         .col_movable(false)
                         .sortable(false)
                 });
-                cx.new(|_| LibraryApp::new(table))
+                // Key bindings dispatch along the focus path, so the table
+                // must hold focus from the first frame for `]` to work
+                // before any click.
+                let focus_handle = table.focus_handle(cx);
+                window.focus(&focus_handle, cx);
+                cx.new(|cx| LibraryApp::new(table, window, cx))
             },
         ) {
             eprintln!("error: failed to open window: {err}");
