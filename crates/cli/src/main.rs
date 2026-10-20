@@ -1,5 +1,6 @@
 mod name;
 mod person;
+mod resource;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -10,6 +11,7 @@ use oeuvre_adapter_surreal::SurrealStore;
 use oeuvre_app::{AppState, CommandError, ErrorKind, Surface};
 
 use crate::person::PersonCmd;
+use crate::resource::ResourceCmd;
 
 #[derive(Debug, Parser)]
 #[command(name = "ovr", version, about = "Oeuvre citation manager")]
@@ -26,6 +28,8 @@ struct Cli {
 enum Commands {
     /// Manage people in the library.
     Person(PersonCmd),
+    /// Manage resources in the library.
+    Resource(ResourceCmd),
 }
 
 #[tokio::main]
@@ -56,6 +60,7 @@ async fn run() -> Result<()> {
 
     match cli.command {
         Commands::Person(cmd) => person::run(&state, cmd).await?,
+        Commands::Resource(cmd) => resource::run(&state, cmd).await?,
     }
     Ok(())
 }
@@ -73,4 +78,21 @@ fn exit_for(kind: ErrorKind) -> ExitCode {
         ErrorKind::Store => 4,
         ErrorKind::Internal => 1,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resource::ResourceAction;
+
+    #[test]
+    fn parses_resource_list() {
+        let cli = Cli::try_parse_from(["ovr", "resource", "list"]).expect("valid args");
+        assert!(matches!(
+            cli.command,
+            Commands::Resource(ResourceCmd {
+                action: ResourceAction::List
+            })
+        ));
+    }
 }
