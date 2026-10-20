@@ -8,10 +8,12 @@ pub use person::{
     CreatePerson, DeletePerson, DeletedPerson, FindPersonsByName, GetPerson, ListPersons,
     UpdatePerson,
 };
-pub use resource::{CreateResource, GetResource, ListResources, ListResourcesPage};
+pub use resource::{CreateResource, GetResource, GetResourceDetail, ListResources, ListResourcesPage};
 pub use series::CreateSeries;
 
-use oeuvre_core::{Person, Resource, ResourcePage, ResourceSummary, Series, StoreError};
+use oeuvre_core::{
+    Person, Resource, ResourceDetail, ResourcePage, ResourceSummary, Series, StoreError,
+};
 
 use crate::event::Event;
 use crate::AppState;
@@ -30,6 +32,7 @@ pub enum Command {
     CreateSeries(CreateSeries),
     CreateResource(CreateResource),
     GetResource(GetResource),
+    GetResourceDetail(GetResourceDetail),
     ListResources(ListResources),
     ListResourcesPage(ListResourcesPage),
 }
@@ -48,6 +51,7 @@ pub enum Outcome {
     CreateSeries(Series),
     CreateResource(Resource),
     GetResource(Resource),
+    GetResourceDetail(ResourceDetail),
     ListResources(Vec<ResourceSummary>),
     ListResourcesPage(ResourcePage),
 }
@@ -93,6 +97,7 @@ impl Command {
             Command::CreateSeries(_) => CreateSeries::NAME,
             Command::CreateResource(_) => CreateResource::NAME,
             Command::GetResource(_) => GetResource::NAME,
+            Command::GetResourceDetail(_) => GetResourceDetail::NAME,
             Command::ListResources(_) => ListResources::NAME,
             Command::ListResourcesPage(_) => ListResourcesPage::NAME,
         }
@@ -132,6 +137,7 @@ pub(crate) async fn dispatch(
         Command::CreateSeries(c) => drive(c, state, ev).await,
         Command::CreateResource(c) => drive(c, state, ev).await,
         Command::GetResource(c) => drive(c, state, ev).await,
+        Command::GetResourceDetail(c) => drive(c, state, ev).await,
         Command::ListResources(c) => drive(c, state, ev).await,
         Command::ListResourcesPage(c) => drive(c, state, ev).await,
     }

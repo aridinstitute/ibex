@@ -1,6 +1,8 @@
+use std::collections::HashMap;
+
 use oeuvre_core::{
-    NewResource, PersonId, Resource, ResourceError, ResourceId, ResourcePage, ResourceSummary,
-    SeriesId, StoreError,
+    creator_label_name, detail_creator_groups, NewResource, PersonId, Resource, ResourceDetail,
+    ResourceError, ResourceId, ResourcePage, ResourceSummary, SeriesId, StoreError,
 };
 
 use crate::event::{self, Event};
@@ -17,6 +19,11 @@ pub struct GetResource {
 }
 
 #[derive(Debug, Clone)]
+pub struct GetResourceDetail {
+    pub id: ResourceId,
+}
+
+#[derive(Debug, Clone)]
 pub struct ListResources;
 
 #[derive(Debug, Clone)]
@@ -29,6 +36,7 @@ pub struct ListResourcesPage {
 
 pub(crate) struct Created(pub Resource);
 pub(crate) struct Fetched(pub Resource);
+pub(crate) struct FetchedDetail(pub ResourceDetail);
 pub(crate) struct Listed(pub Vec<ResourceSummary>);
 pub(crate) struct ListedPage(pub ResourcePage);
 
@@ -41,6 +49,12 @@ impl From<Created> for Outcome {
 impl From<Fetched> for Outcome {
     fn from(Fetched(resource): Fetched) -> Self {
         Outcome::GetResource(resource)
+    }
+}
+
+impl From<FetchedDetail> for Outcome {
+    fn from(FetchedDetail(detail): FetchedDetail) -> Self {
+        Outcome::GetResourceDetail(detail)
     }
 }
 
@@ -170,6 +184,86 @@ impl Handler for GetResource {
         ev.set(event::RESOURCE_KIND, resource.kind.as_str());
         ev.set(event::RESOURCE_TITLE, resource.title.as_str().to_owned());
         Ok(Fetched(resource))
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for GetResourceDetail {
+    const NAME: &'static str = "get_resource_detail";
+    type Output = FetchedDetail;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::RESOURCE_ID, self.id.to_string());
+    }
+
+    async fn run(self, state: &AppState, ev: &mut Event) -> Result<FetchedDetail, CommandError> {
+        let resource = state
+            .store()
+            .get_resource(self.id)
+            .await
+            .map_err(|e| map_resource_lookup(e, self.id))?;
+        ev.set(event::RESOURCE_KIND, resource.kind.as_str());
+        ev.set(event::RESOURCE_TITLE, resource.title.as_str().to_owned());
+
+        // One person lookup per distinct id: a person may fill several roles,
+        // and credited_as belongs to the creator slot, not the person, so
+        // labels are composed per slot from the cached names.
+        let mut people: HashMap<PersonId, oeuvre_core::Name> = HashMap::new();
+        for creator in &resource.creators {
+            if people.contains_key(&creator.person_id) {
+                continue;
+            }
+            let person = state
+                .store()
+                .get_person(creator.person_id)
+                .await
+                .map_err(|e| map_person_lookup(e, creator.person_id))?;
+            people.insert(creator.person_id, person.name);
+        }
+
+        // Detail views name the container and series rather than their ids,
+        // so resolve both here where a missing row still maps to the id the
+        // caller asked about.
+        let container_title = match resource.parent_id {
+            Some(parent_id) => {
+                let parent = state
+                    .store()
+                    .get_resource(parent_id)
+                    .await
+                    .map_err(|e| map_resource_lookup(e, parent_id))?;
+                Some(parent.title)
+            }
+            None => None,
+        };
+        let series_title = match resource.series_id {
+            Some(series_id) => {
+                let series = state
+                    .store()
+                    .get_series(series_id)
+                    .await
+                    .map_err(|e| map_series_lookup(e, series_id))?;
+                Some(series.title)
+            }
+            None => None,
+        };
+
+        Ok(FetchedDetail(ResourceDetail {
+            id: resource.id,
+            kind: resource.kind,
+            title: resource.title,
+            creators: detail_creator_groups(&resource.creators, |creator| {
+                creator_label_name(
+                    creator.credited_as.as_ref(),
+                    people.get(&creator.person_id).expect("person fetched above"),
+                )
+            }),
+            publisher: resource.publisher,
+            published: resource.published,
+            accessed: resource.accessed,
+            container_title,
+            series_title,
+            series_number: resource.series_number,
+        }))
     }
 }
 
