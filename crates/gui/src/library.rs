@@ -15,12 +15,16 @@ use crate::kind::{kind_icon, kind_label};
 /// enough that the demo library spans several pages.
 pub const PAGE_SIZE: u32 = 50;
 
-const COL_TITLE: usize = 0;
-const COL_CREATORS: usize = 1;
-const COL_PUBLISHED: usize = 2;
-const COLUMNS: usize = 3;
+const COL_KIND: usize = 0;
+const COL_TITLE: usize = 1;
+const COL_CREATORS: usize = 2;
+const COL_PUBLISHED: usize = 3;
+const COLUMNS: usize = 4;
 
 const CELL_TEXT_SIZE: Pixels = px(13.);
+/// Header labels are one step below the cell text: the table default is 9px
+/// (`text_xs` at the 12px rem), which reads as an afterthought.
+const HEADER_TEXT_SIZE: Pixels = px(11.);
 
 pub struct LibraryDelegate {
     worker: DbWorker,
@@ -59,6 +63,10 @@ impl TableDelegate for LibraryDelegate {
 
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
         match col_ix {
+            COL_KIND => Column::new("kind", "")
+                .width(px(28.))
+                .resizable(false)
+                .text_center(),
             COL_TITLE => Column::new("title", "Title").width(px(620.)).min_width(px(160.)),
             COL_CREATORS => Column::new("creators", "Authors").width(px(260.)).min_width(px(80.)),
             COL_PUBLISHED => Column::new("published", "Published").width(px(80.)).min_width(px(50.)),
@@ -66,6 +74,26 @@ impl TableDelegate for LibraryDelegate {
         }
     }
 
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        // The default header cell is a full-height block div, so its label
+        // sits at the top of the header row. Center it vertically, and center
+        // the kind column horizontally to match its cells.
+        let header = h_flex()
+            .size_full()
+            .items_center()
+            .text_size(HEADER_TEXT_SIZE);
+        let header = if col_ix == COL_KIND {
+            header.justify_center()
+        } else {
+            header
+        };
+        header.child(self.column(col_ix, cx).name.clone())
+    }
     fn render_td(
         &mut self,
         row_ix: usize,
@@ -86,19 +114,22 @@ impl TableDelegate for LibraryDelegate {
         };
         let muted = cx.theme().muted_foreground;
         match col_ix {
-            COL_TITLE => {
+            COL_KIND => {
                 let label: SharedString = kind_label(row.kind).into();
-                cell.gap_1p5()
-                    .child(
-                        div()
-                            .id(("kind", row_ix))
-                            .flex_shrink_0()
-                            .text_color(muted)
-                            .child(Icon::new(kind_icon(row.kind)).with_size(Size::Small))
-                            .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx)),
-                    )
-                    .child(div().min_w_0().truncate().child(row.title.as_str().to_owned()))
+                cell.justify_center().child(
+                    div()
+                        .id(("kind", row_ix))
+                        .text_color(muted)
+                        .child(Icon::new(kind_icon(row.kind)).with_size(Size::Small))
+                        .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx)),
+                )
             }
+            COL_TITLE => cell.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(row.title.as_str().to_owned()),
+            ),
             COL_CREATORS => cell.text_color(muted).child(
                 div()
                     .min_w_0()
@@ -115,6 +146,7 @@ impl TableDelegate for LibraryDelegate {
             return String::new();
         };
         match col_ix {
+            COL_KIND => kind_label(row.kind),
             COL_TITLE => row.title.as_str().to_owned(),
             COL_CREATORS => row.creators_label.clone(),
             _ => row
