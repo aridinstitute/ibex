@@ -15,3 +15,8 @@ Cargo.lock
 *.db
 *.surql
 /data/
+
+# Local agent tooling / notes
+/.agents/
+/docs/
+/skills-lock.json
