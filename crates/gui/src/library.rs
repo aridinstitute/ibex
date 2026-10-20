@@ -181,7 +181,9 @@ impl TableDelegate for LibraryDelegate {
             _ => None,
         };
         // Double-click steps the cycle; a single click keeps flowing to the
-        // table's column selection.
+        // table's column selection. The label keeps its place and the marker
+        // claims the header's right edge, where the kit puts its own sort
+        // icon, so the column's state reads at a glance even on wide cells.
         header
             .id(("th-sort", col_ix))
             .on_click(cx.listener(move |table, event: &ClickEvent, window, cx| {
@@ -196,11 +198,12 @@ impl TableDelegate for LibraryDelegate {
                     .delegate_mut()
                     .request_sort(field, selected_id, window, cx);
             }))
+            .when(direction.is_some(), |el| el.justify_between())
+            .child(name)
             .when_some(
                 direction.map(|direction| sort_marker(direction, cx)),
                 |el, marker| el.child(marker),
             )
-            .child(name)
             .into_any_element()
     }
     fn render_td(
