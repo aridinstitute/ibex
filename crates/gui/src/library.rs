@@ -1,43 +1,44 @@
-//! Library list: resource summary rows, one page at a time.
+//! Library grid: resource summary rows, one page at a time.
 
-use gpui_kit::component::list::{List, ListDelegate, ListItem, ListState};
-use gpui_kit::component::{ActiveTheme as _, IndexPath, h_flex, v_flex};
+use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableState};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use oeuvre_core::{ResourceId, ResourcePage, ResourceSummary};
 
 use crate::db::DbWorker;
+use crate::kind::{kind_icon, kind_label};
 
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
 /// enough that the demo library spans several pages.
 pub const PAGE_SIZE: u32 = 50;
 
+const COL_TITLE: usize = 0;
+const COL_CREATORS: usize = 1;
+const COL_PUBLISHED: usize = 2;
+const COLUMNS: usize = 3;
+
 pub struct LibraryDelegate {
     worker: DbWorker,
     rows: Vec<ResourceSummary>,
-    selected: Option<IndexPath>,
     loading: bool,
     next_before: Option<ResourceId>,
     error: Option<String>,
 }
 
 impl LibraryDelegate {
-    /// Start from a first page fetched before the window opens, so the list
+    /// Start from a first page fetched before the window opens, so the grid
     /// never renders an empty bootstrap state.
     pub fn new(worker: DbWorker, first: ResourcePage) -> Self {
         Self {
             worker,
             rows: first.rows,
-            selected: None,
             loading: false,
             next_before: first.next_before,
             error: None,
         }
-    }
-
-    pub fn count(&self) -> usize {
-        self.rows.len()
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -45,89 +46,84 @@ impl LibraryDelegate {
     }
 }
 
-impl ListDelegate for LibraryDelegate {
-    type Item = ListItem;
+impl TableDelegate for LibraryDelegate {
+    fn columns_count(&self, _cx: &App) -> usize {
+        COLUMNS
+    }
 
-    fn items_count(&self, _section: usize, _cx: &App) -> usize {
+    fn rows_count(&self, _cx: &App) -> usize {
         self.rows.len()
     }
 
-    fn render_item(
-        &mut self,
-        ix: IndexPath,
-        _window: &mut Window,
-        cx: &mut Context<ListState<Self>>,
-    ) -> Option<ListItem> {
-        let row = self.rows.get(ix.row)?;
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let border = theme.border;
-
-        Some(
-            ListItem::new(ix)
-                .selected(self.selected == Some(ix))
-                .accessibility_label(format!(
-                    "{} {}",
-                    row.title.as_str(),
-                    row.creators_label
-                ))
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .w_full()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .px_1()
-                                .rounded_sm()
-                                .text_xs()
-                                .border_1()
-                                .border_color(border)
-                                .text_color(muted)
-                                .child(row.kind.as_str()),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .overflow_x_hidden()
-                                .child(row.title.as_str().to_owned()),
-                        )
-                        .when(!row.creators_label.is_empty(), |el| {
-                            el.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .overflow_x_hidden()
-                                    .text_color(muted)
-                                    .child(row.creators_label.clone()),
-                            )
-                        })
-                        .when_some(row.published_label.clone(), |el, year| {
-                            el.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_color(muted)
-                                    .child(year.as_str().to_owned()),
-                            )
-                        }),
-                ),
-        )
+    fn column(&self, col_ix: usize, _cx: &App) -> Column {
+        match col_ix {
+            COL_TITLE => Column::new("title", "Title").width(px(620.)).min_width(px(160.)),
+            COL_CREATORS => Column::new("creators", "Authors").width(px(260.)).min_width(px(80.)),
+            COL_PUBLISHED => Column::new("published", "Published").width(px(80.)).min_width(px(50.)),
+            _ => unreachable!("columns_count is {COLUMNS}"),
+        }
     }
 
-    fn set_selected_index(
+    fn render_td(
         &mut self,
-        ix: Option<IndexPath>,
+        row_ix: usize,
+        col_ix: usize,
         _window: &mut Window,
-        cx: &mut Context<ListState<Self>>,
-    ) {
-        self.selected = ix;
-        cx.notify();
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let Some(row) = self.rows.get(row_ix) else {
+            return div().into_any_element();
+        };
+        let muted = cx.theme().muted_foreground;
+        match col_ix {
+            COL_TITLE => {
+                let label: SharedString = kind_label(row.kind).into();
+                h_flex()
+                    .gap_1p5()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .id(("kind", row_ix))
+                            .flex_shrink_0()
+                            .text_color(muted)
+                            .child(Icon::new(kind_icon(row.kind)).with_size(Size::Small))
+                            .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx)),
+                    )
+                    .child(div().min_w_0().truncate().child(row.title.as_str().to_owned()))
+                    .into_any_element()
+            }
+            COL_CREATORS => div()
+                .truncate()
+                .text_color(muted)
+                .child(row.creators_label.clone())
+                .into_any_element(),
+            _ => div()
+                .text_color(muted)
+                .children(row.published_label.as_ref().map(|p| p.as_str().to_owned()))
+                .into_any_element(),
+        }
+    }
+
+    fn cell_text(&self, row_ix: usize, col_ix: usize, _cx: &App) -> String {
+        let Some(row) = self.rows.get(row_ix) else {
+            return String::new();
+        };
+        match col_ix {
+            COL_TITLE => row.title.as_str().to_owned(),
+            COL_CREATORS => row.creators_label.clone(),
+            _ => row
+                .published_label
+                .as_ref()
+                .map(|p| p.as_str().to_owned())
+                .unwrap_or_default(),
+        }
     }
 
     fn loading(&self, _cx: &App) -> bool {
-        self.loading
+        // The grid swaps every row for a skeleton while this is true, so a
+        // background page fetch must not report it once rows are showing.
+        self.rows.is_empty() && self.loading
     }
 
     fn has_more(&self, _cx: &App) -> bool {
@@ -138,8 +134,8 @@ impl ListDelegate for LibraryDelegate {
         10
     }
 
-    fn load_more(&mut self, window: &mut Window, cx: &mut Context<ListState<Self>>) {
-        // The list fires load_more repeatedly near the bottom, so loading
+    fn load_more(&mut self, window: &mut Window, cx: &mut Context<TableState<Self>>) {
+        // The grid fires load_more repeatedly near the bottom, so loading
         // acts as the lock and a None cursor marks the end.
         if self.loading || self.next_before.is_none() {
             return;
@@ -148,12 +144,11 @@ impl ListDelegate for LibraryDelegate {
         self.error = None;
         let worker = self.worker.clone();
         let before = self.next_before;
-        cx.notify();
 
-        cx.spawn_in(window, async move |view, window| {
+        cx.spawn_in(window, async move |table, window| {
             let page = worker.list_page(before, PAGE_SIZE).await;
-            _ = view.update_in(window, |view, _window, cx| {
-                let delegate = view.delegate_mut();
+            _ = table.update_in(window, |table, _window, cx| {
+                let delegate = table.delegate_mut();
                 delegate.loading = false;
                 match page {
                     Ok(page) => {
@@ -170,51 +165,36 @@ impl ListDelegate for LibraryDelegate {
 }
 
 pub struct LibraryApp {
-    list: Entity<ListState<LibraryDelegate>>,
+    table: Entity<TableState<LibraryDelegate>>,
 }
 
 impl LibraryApp {
-    pub fn new(list: Entity<ListState<LibraryDelegate>>) -> Self {
-        Self { list }
+    pub fn new(table: Entity<TableState<LibraryDelegate>>) -> Self {
+        Self { table }
     }
 }
 
 impl Render for LibraryApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let delegate = self.list.read(cx).delegate();
-        let count = delegate.count();
-        let error = delegate.error().map(str::to_owned);
-        let theme = cx.theme();
+        let error = self.table.read(cx).delegate().error().map(str::to_owned);
+        let danger = cx.theme().danger;
 
         v_flex()
             .size_full()
-            .p_3()
-            .gap_2()
             .child(
-                h_flex()
-                    .items_baseline()
-                    .gap_2()
-                    .flex_shrink_0()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Oeuvre"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child(format!("{count} resources")),
-                    ),
+                DataTable::new(&self.table)
+                    .with_size(Size::XSmall)
+                    .bordered(false)
+                    .stripe(true),
             )
-            .child(List::new(&self.list).flex_1().w_full().min_h_0())
             .when_some(error, |el, error| {
                 el.child(
                     div()
                         .flex_shrink_0()
+                        .px_2()
+                        .py_1()
                         .text_xs()
-                        .text_color(theme.danger)
+                        .text_color(danger)
                         .child(error),
                 )
             })

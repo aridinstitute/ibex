@@ -1,4 +1,5 @@
 mod db;
+mod kind;
 mod library;
 
 use std::path::PathBuf;
@@ -9,10 +10,12 @@ use clap::Parser;
 use oeuvre_adapter_surreal::SurrealStore;
 use oeuvre_app::{AppState, Surface};
 
-use gpui_kit::component::list::ListState;
+use gpui_kit::component::Theme;
+use gpui_kit::component::table::TableState;
 use gpui_kit::{AppContext as _, *};
 
 use crate::db::DbWorker;
+use crate::kind::AppAssets;
 use crate::library::{LibraryApp, LibraryDelegate, PAGE_SIZE};
 
 #[derive(Debug, Parser)]
@@ -42,14 +45,17 @@ fn run() -> Result<()> {
     let state = setup_state(&args)?;
     let worker = DbWorker::spawn(state);
 
-    // Fetch the first page before the window opens so the list renders full
+    // Fetch the first page before the window opens so the grid renders full
     // immediately; scrolling drives every later page.
     let first = worker
         .list_page_blocking(None, PAGE_SIZE)
         .map_err(|e| anyhow::anyhow!("load first page: {e}"))?;
 
-    gpui_kit::application().run(move |cx| {
+    gpui_kit::application().with_assets(AppAssets).run(move |cx| {
         gpui_kit::init(cx);
+        // Root sets the window rem size from this, so every rem-based size
+        // in the kit shrinks with it.
+        Theme::global_mut(cx).font_size = px(12.);
         if let Err(err) = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -65,8 +71,12 @@ fn run() -> Result<()> {
             cx,
             |window, cx| {
                 let delegate = LibraryDelegate::new(worker, first);
-                let list = cx.new(|cx| ListState::new(delegate, window, cx));
-                cx.new(|_| LibraryApp::new(list))
+                let table = cx.new(|cx| {
+                    TableState::new(delegate, window, cx)
+                        .col_movable(false)
+                        .sortable(false)
+                });
+                cx.new(|_| LibraryApp::new(table))
             },
         ) {
             eprintln!("error: failed to open window: {err}");
