@@ -223,23 +223,10 @@ pub fn published_label_from(published: Option<&BibliographicDate>) -> Option<Non
     published.map(format_published_label)
 }
 
-/// Civil UTC year from Unix millis (Howard Hinnant `civil_from_days`, year only).
 fn utc_year_from_millis(ms: i64) -> i32 {
-    let days = ms.div_euclid(86_400_000);
-    // Days since civil 0000-03-01.
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    if month <= 2 {
-        (y + 1) as i32
-    } else {
-        y as i32
-    }
+    time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1_000))
+        .expect("bibliographic instant within OffsetDateTime range")
+        .year()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -781,11 +768,13 @@ mod tests {
         assert_eq!(format_published_label(&date).as_str(), "Summer 397");
     }
 
+    const UNIX_MS_2021_01_01_UTC: i64 = 1_609_459_200_000;
+
     #[test]
     fn format_published_label_falls_back_to_utc_year() {
-        // 2021-01-01T00:00:00Z
         let date =
-            BibliographicDate::try_new(UtcMillis::from_unix_ms(1_609_459_200_000), None).unwrap();
+            BibliographicDate::try_new(UtcMillis::from_unix_ms(UNIX_MS_2021_01_01_UTC), None)
+                .unwrap();
         assert_eq!(format_published_label(&date).as_str(), "2021");
         assert_eq!(
             published_label_from(Some(&date))

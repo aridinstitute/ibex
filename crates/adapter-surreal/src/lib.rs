@@ -556,6 +556,8 @@ mod tests {
         UtcMillis,
     };
 
+    const UNIX_MS_2021_01_01_UTC: i64 = 1_609_459_200_000;
+
     #[tokio::test]
     async fn person_crud_round_trip_memory() {
         let store = SurrealStore::open_memory().await.unwrap();
@@ -837,8 +839,11 @@ mod tests {
                 ],
                 publisher: Some("Medieval Academy".into()),
                 published: Some(
-                    BibliographicDate::try_new(UtcMillis::from_unix_ms(1_609_459_200_000), None)
-                        .unwrap(),
+                    BibliographicDate::try_new(
+                        UtcMillis::from_unix_ms(UNIX_MS_2021_01_01_UTC),
+                        None,
+                    )
+                    .unwrap(),
                 ),
                 accessed: None,
                 parent_id: Some(journal.id),

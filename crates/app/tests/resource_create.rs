@@ -10,6 +10,8 @@ use oeuvre_core::{
     PersonId, ResourceId, ResourceKind, UtcMillis,
 };
 
+const UNIX_MS_2021_01_01_UTC: i64 = 1_609_459_200_000;
+
 async fn seed_author(state: &AppState) -> PersonId {
     let name = Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap();
     let Outcome::CreatePerson(author) = state
@@ -586,7 +588,7 @@ async fn list_resources_returns_summaries_ordered_newest_first() {
                 publisher: Some("Medieval Academy".into()),
                 published: Some(
                     BibliographicDate::try_new(
-                        UtcMillis::from_unix_ms(1_609_459_200_000),
+                        UtcMillis::from_unix_ms(UNIX_MS_2021_01_01_UTC),
                         None,
                     )
                     .unwrap(),
