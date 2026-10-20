@@ -198,6 +198,41 @@ pub struct ResourcePage {
     pub next_before: Option<ResourceId>,
 }
 
+/// Field a sorted library listing orders by.
+///
+/// Order keys, shared by every adapter:
+/// - [`ResourceSort::Title`] — case-insensitive text order.
+/// - [`ResourceSort::PrimaryCreator`] — the first creator in bibliography
+///   order keys on its family name ([`primary_creator_sort_key`]).
+/// - [`ResourceSort::Published`] — the chronological instant, never the
+///   display label ("Summer 397" has no order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ResourceSort {
+    Title,
+    PrimaryCreator,
+    Published,
+}
+
+/// Direction of a [`ResourceSort`]. Descending is the exact key-reversal of
+/// ascending: rows without the sort field move to the other end, and ties
+/// stay newest-first in both directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+/// One window of a sorted library listing from
+/// [`Store::list_resources_sorted_page`]: `limit` rows at a 0-based offset
+/// into the ordered list. The database query owns the ordering.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SortedResourcePage {
+    pub rows: Vec<ResourceSummary>,
+    /// Offset of the following page when more rows may exist; `None` at the
+    /// end of the ordered list.
+    pub next_offset: Option<u64>,
+}
+
 /// Creators of one role for a [`ResourceDetail`]: every credited name,
 /// bibliography order. Names stay a list; a shell stacks or joins them at
 /// display time (summaries truncate with `"et al."`; details show them all).
@@ -261,6 +296,27 @@ pub fn creator_label_name(credited_as: Option<&NonEmptyStr>, name: &Name) -> Str
     }
 }
 
+/// Sort key for a creator: the family name a library listing orders by.
+///
+/// `credited_as` keys on its last word ("A. Lovelace" → "lovelace");
+/// otherwise the person's `last` name — mononyms live there — else `first`.
+/// Lowercased, so display case never reorders rows.
+pub fn primary_creator_sort_key(credited_as: Option<&NonEmptyStr>, name: &Name) -> String {
+    match credited_as {
+        Some(credited) => credited
+            .as_str()
+            .split_whitespace()
+            .next_back()
+            .unwrap_or(credited.as_str())
+            .to_lowercase(),
+        None => name
+            .last()
+            .or_else(|| name.first())
+            .expect("a Name carries a first or last name")
+            .to_lowercase(),
+    }
+}
+
 /// Format creator display names for a summary row.
 ///
 /// - `[]` → `""`
@@ -275,7 +331,6 @@ pub fn format_creators_label<S: AsRef<str>>(names: &[S]) -> String {
         _ => format!("{} et al.", names[0].as_ref()),
     }
 }
-
 
 /// Prefer fuzzy [`BibliographicDate::display`]; else UTC calendar year of the instant.
 pub fn format_published_label(published: &BibliographicDate) -> NonEmptyStr {
@@ -378,10 +433,7 @@ pub struct Resource {
     pub series_number: Option<NonEmptyStr>,
 }
 
-fn validate_creators(
-    kind: ResourceKind,
-    creators: &[Creator],
-) -> Result<(), ResourceError> {
+fn validate_creators(kind: ResourceKind, creators: &[Creator]) -> Result<(), ResourceError> {
     if creators.is_empty() && !kind.is_container() {
         return Err(ResourceError::EmptyCreators);
     }
@@ -575,7 +627,10 @@ mod tests {
         assert_eq!(resource.creators[0].person_id, a);
         assert_eq!(resource.creators[1].order, 1);
         assert_eq!(
-            resource.creators[1].credited_as.as_ref().map(NonEmptyStr::as_str),
+            resource.creators[1]
+                .credited_as
+                .as_ref()
+                .map(NonEmptyStr::as_str),
             Some("ed.")
         );
     }
@@ -614,8 +669,7 @@ mod tests {
                 credited_as: None,
             },
         ];
-        let resource =
-            Resource::try_new(ResourceId::generate(), new_book(creators, None)).unwrap();
+        let resource = Resource::try_new(ResourceId::generate(), new_book(creators, None)).unwrap();
         assert_eq!(resource.creators.len(), 2);
     }
 
@@ -760,9 +814,11 @@ mod tests {
 
     #[test]
     fn accept_parent_checks_expected_kind() {
-        assert!(ResourceKind::PodcastEpisode
-            .accept_parent(ResourceKind::Podcast)
-            .is_ok());
+        assert!(
+            ResourceKind::PodcastEpisode
+                .accept_parent(ResourceKind::Podcast)
+                .is_ok()
+        );
         assert_eq!(
             ResourceKind::PodcastEpisode.accept_parent(ResourceKind::Blog),
             Err(ResourceError::ParentKindMismatch)
@@ -807,14 +863,8 @@ mod tests {
             format_creators_label(&["Augustine", "Chadwick"]),
             "Augustine; Chadwick"
         );
-        assert_eq!(
-            format_creators_label(&["A", "B", "C"]),
-            "A et al."
-        );
-        assert_eq!(
-            format_creators_label(&["A", "B", "C", "D"]),
-            "A et al."
-        );
+        assert_eq!(format_creators_label(&["A", "B", "C"]), "A et al.");
+        assert_eq!(format_creators_label(&["A", "B", "C", "D"]), "A et al.");
     }
 
     #[test]
@@ -847,6 +897,35 @@ mod tests {
         assert_eq!(
             creator_label_name(Some(&title("St. Augustine")), &name),
             "St. Augustine"
+        );
+    }
+
+    #[test]
+    fn primary_creator_sort_key_keys_on_family_name() {
+        let lovelace = Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap();
+        assert_eq!(primary_creator_sort_key(None, &lovelace), "lovelace");
+        // Mononyms live in `last`, the primary sort slot.
+        let augustine = Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap();
+        assert_eq!(primary_creator_sort_key(None, &augustine), "augustine");
+        // A first-only name keys on the given name.
+        let first_only = Name::try_new(Some("Cher"), None::<&str>, None::<&str>).unwrap();
+        assert_eq!(primary_creator_sort_key(None, &first_only), "cher");
+        // Display case never reorders rows, and a suffix is not a family name.
+        let suffixed = Name::try_new(Some("GRACE"), Some("HOPPER"), Some("Jr.")).unwrap();
+        assert_eq!(primary_creator_sort_key(None, &suffixed), "hopper");
+    }
+
+    #[test]
+    fn primary_creator_sort_key_credited_string_keys_on_its_last_word() {
+        let lovelace = Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap();
+        assert_eq!(
+            primary_creator_sort_key(Some(&title("A. Lovelace")), &lovelace),
+            "lovelace"
+        );
+        // The credited string wins even when it disagrees with the name.
+        assert_eq!(
+            primary_creator_sort_key(Some(&title("Countess of Lovelace")), &lovelace),
+            "lovelace"
         );
     }
 
