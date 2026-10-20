@@ -3,7 +3,9 @@
 //! Store-port tests for `list_resources_sorted_page`: the order contract a
 //! shell page may rely on, independent of which adapter serves it.
 
-use oeuvre_app::testing::MemoryStore;
+use oeuvre_app::command::{CreatePerson, CreateResource, ListResourcesSortedPage};
+use oeuvre_app::testing::{MemorySink, MemoryStore};
+use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
 use oeuvre_core::{
     BibliographicDate, CreatorRole, CreatorSpec, Name, NewResource, NonEmptyStr, PersonId,
     ResourceId, ResourceKind, ResourceSort, SortDirection, Store, UtcMillis,
@@ -290,4 +292,174 @@ async fn offset_past_the_end_yields_an_empty_page() {
         .expect("page past the end");
     assert!(page.rows.is_empty());
     assert_eq!(page.next_offset, None);
+}
+
+// --- Command seam --------------------------------------------------------
+
+fn state_with_sink(sink: &MemorySink) -> AppState {
+    AppState::builder(MemoryStore::new())
+        .surface(Surface::Test)
+        .sink(sink.clone())
+        .build()
+}
+
+async fn seed_author(state: &AppState) -> PersonId {
+    let name = Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap();
+    let Outcome::CreatePerson(author) = state
+        .execute(Command::CreatePerson(CreatePerson {
+            name,
+            aliases: vec![],
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreatePerson");
+    };
+    author.id
+}
+
+async fn create_book(state: &AppState, author_id: PersonId, title: &str) {
+    let Outcome::CreateResource(_) = state
+        .execute(Command::CreateResource(CreateResource {
+            new: NewResource {
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new(title).expect("titles are non-empty"),
+                creators: vec![CreatorSpec {
+                    person_id: author_id,
+                    role: CreatorRole::Author,
+                    credited_as: None,
+                }],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            },
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreateResource");
+    };
+}
+
+fn sorted_page_call(
+    sort: ResourceSort,
+    direction: SortDirection,
+    offset: u64,
+    limit: u32,
+) -> Command {
+    Command::ListResourcesSortedPage(ListResourcesSortedPage {
+        sort,
+        direction,
+        offset,
+        limit,
+    })
+}
+
+#[tokio::test]
+async fn sorted_pages_walk_the_library_through_the_command() {
+    let sink = MemorySink::new();
+    let state = state_with_sink(&sink);
+
+    let author_id = seed_author(&state).await;
+    for title in ["alpha waves", "Beta modes", "charlie nodes"] {
+        create_book(&state, author_id, title).await;
+    }
+    let _ = sink.take();
+
+    let Outcome::ListResourcesSortedPage(first) = state
+        .execute(sorted_page_call(
+            ResourceSort::Title,
+            SortDirection::Ascending,
+            0,
+            2,
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("expected ListResourcesSortedPage");
+    };
+    assert_eq!(titles(&first), ["alpha waves", "Beta modes"]);
+    assert_eq!(first.next_offset, Some(2));
+
+    let Outcome::ListResourcesSortedPage(second) = state
+        .execute(sorted_page_call(
+            ResourceSort::Title,
+            SortDirection::Ascending,
+            2,
+            2,
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("expected ListResourcesSortedPage");
+    };
+    assert_eq!(titles(&second), ["charlie nodes"]);
+    assert_eq!(second.next_offset, None);
+}
+
+#[tokio::test]
+async fn sorted_page_command_emits_wide_event_fields() {
+    let sink = MemorySink::new();
+    let state = state_with_sink(&sink);
+
+    let author_id = seed_author(&state).await;
+    for title in ["alpha waves", "Beta modes", "charlie nodes"] {
+        create_book(&state, author_id, title).await;
+    }
+    let _ = sink.take();
+
+    let Outcome::ListResourcesSortedPage(_) = state
+        .execute(sorted_page_call(
+            ResourceSort::PrimaryCreator,
+            SortDirection::Descending,
+            2,
+            2,
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("expected ListResourcesSortedPage");
+    };
+
+    let events = sink.take();
+    assert_eq!(events.len(), 1);
+    let ev = &events[0];
+    assert_eq!(ev.command(), "list_resources_sorted_page");
+    assert_eq!(ev.status(), Status::Ok);
+    assert_eq!(
+        ev.get("resource.sort_field"),
+        Some(&FieldValue::from("primaryCreator"))
+    );
+    assert_eq!(
+        ev.get("resource.sort_direction"),
+        Some(&FieldValue::from("descending"))
+    );
+    assert_eq!(ev.get("resource.page_offset"), Some(&FieldValue::from(2u64)));
+    assert_eq!(
+        ev.get("resource.page_limit"),
+        Some(&FieldValue::from(2u32))
+    );
+}
+
+#[tokio::test]
+async fn sorted_page_zero_limit_is_invalid() {
+    let sink = MemorySink::new();
+    let state = state_with_sink(&sink);
+
+    let err = state
+        .execute(sorted_page_call(ResourceSort::Title, SortDirection::Ascending, 0, 0))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CommandError::Invalid(_)));
+
+    let events = sink.take();
+    assert_eq!(events.len(), 1);
+    let ev = &events[0];
+    assert_eq!(ev.status(), Status::Error);
+    assert_eq!(ev.get("error.kind"), Some(&FieldValue::from("invalid")));
+    // Input dimensions land on the event even though the run failed early.
+    assert_eq!(ev.get("resource.sort_field"), Some(&FieldValue::from("title")));
 }

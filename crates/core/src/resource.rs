@@ -222,6 +222,25 @@ pub enum SortDirection {
     Descending,
 }
 
+impl ResourceSort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Title => "title",
+            Self::PrimaryCreator => "primaryCreator",
+            Self::Published => "published",
+        }
+    }
+}
+
+impl SortDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ascending => "ascending",
+            Self::Descending => "descending",
+        }
+    }
+}
+
 /// One window of a sorted library listing from
 /// [`Store::list_resources_sorted_page`]: `limit` rows at a 0-based offset
 /// into the ordered list. The database query owns the ordering.
