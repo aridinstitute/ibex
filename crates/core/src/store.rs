@@ -2,7 +2,7 @@
 
 use crate::{
     Name, NewResource, NewSeries, Person, PersonError, PersonId, Resource, ResourceError,
-    ResourceId, Series, SeriesError, SeriesId,
+    ResourceId, Series, SeriesId,
 };
 
 /// Storage backend. Grows one method per capability a command needs.
@@ -122,8 +122,3 @@ impl From<ResourceError> for StoreError {
     }
 }
 
-impl From<SeriesError> for StoreError {
-    fn from(err: SeriesError) -> Self {
-        StoreError::invalid(err.to_string())
-    }
-}

@@ -70,7 +70,6 @@ impl PeopleState {
     }
 }
 
-/// Persisted resource row — creators intentionally absent.
 struct ResourceRow {
     kind: ResourceKind,
     title: NonEmptyStr,
@@ -191,7 +190,7 @@ impl Store for MemoryStore {
     }
 
     async fn create_series(&self, new: NewSeries) -> Result<Series, StoreError> {
-        let series = Series::try_new(SeriesId::generate(), new)?;
+        let series = Series::try_new(SeriesId::generate(), new);
         self.series
             .lock()
             .expect("MemoryStore lock")

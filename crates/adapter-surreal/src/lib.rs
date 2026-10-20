@@ -35,7 +35,6 @@ struct SeriesDoc {
     title: NonEmptyStr,
 }
 
-/// Persisted resource row — creators intentionally absent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ResourceDoc {
     kind: ResourceKind,
@@ -97,7 +96,6 @@ impl SurrealStore {
             .db
             .query("DEFINE TABLE IF NOT EXISTS resource SCHEMALESS")
             .await;
-        // RELATION may be unsupported on some embedded builds; RELATE still works.
         let _ = self
             .db
             .query(
@@ -168,16 +166,6 @@ impl SurrealStore {
                 .as_ref()
                 .map(|s| s.as_str().to_owned()),
         }
-    }
-
-    async fn delete_resource_best_effort(&self, id: ResourceId) {
-        let _: Result<Option<ResourceDoc>, _> = self.db.delete(Self::resource_key(id)).await;
-        let resource_thing = Thing::from((RESOURCE_TABLE.to_owned(), id.to_string()));
-        let _ = self
-            .db
-            .query("DELETE created WHERE out = $resource")
-            .bind(("resource", resource_thing))
-            .await;
     }
 
     async fn load_creators_from_edges(
@@ -334,7 +322,7 @@ impl Store for SurrealStore {
 
     async fn create_series(&self, new: NewSeries) -> Result<Series, StoreError> {
         let id = SeriesId::generate();
-        let series = Series::try_new(id, new)?;
+        let series = Series::try_new(id, new);
         let created: Option<SeriesDoc> = self
             .db
             .create(Self::series_key(id))
@@ -370,45 +358,62 @@ impl Store for SurrealStore {
         let id = ResourceId::generate();
         let resource = Resource::try_new(id, new)?;
 
-        let created: Option<ResourceDoc> = self
-            .db
-            .create(Self::resource_key(id))
-            .content(Self::resource_doc_from(&resource))
+        self.db
+            .query("BEGIN TRANSACTION")
             .await
             .map_err(map_err)?;
-        if created.is_none() {
-            return Err(StoreError::new(format!(
-                "create_resource returned empty for {id}"
-            )));
-        }
 
-        for creator in &resource.creators {
-            let credited = creator
-                .credited_as
-                .as_ref()
-                .map(|s| s.as_str().to_owned());
-            let from = Thing::from((PERSON_TABLE.to_owned(), creator.person_id.to_string()));
-            let to = Thing::from((RESOURCE_TABLE.to_owned(), id.to_string()));
-            let result = self
+        let persist = async {
+            let created: Option<ResourceDoc> = self
                 .db
-                .query(
-                    "RELATE $from -> created -> $to \
-                     SET role = $role, order = $order, credited_as = $credited",
-                )
-                .bind(("from", from))
-                .bind(("to", to))
-                .bind(("role", creator.role))
-                .bind(("order", creator.order))
-                .bind(("credited", credited))
-                .await;
+                .create(Self::resource_key(id))
+                .content(Self::resource_doc_from(&resource))
+                .await
+                .map_err(map_err)?;
+            if created.is_none() {
+                return Err(StoreError::new(format!(
+                    "create_resource returned empty for {id}"
+                )));
+            }
 
-            if let Err(err) = result {
-                self.delete_resource_best_effort(id).await;
-                return Err(map_err(err));
+            for creator in &resource.creators {
+                let credited = creator
+                    .credited_as
+                    .as_ref()
+                    .map(|s| s.as_str().to_owned());
+                let from =
+                    Thing::from((PERSON_TABLE.to_owned(), creator.person_id.to_string()));
+                let to = Thing::from((RESOURCE_TABLE.to_owned(), id.to_string()));
+                self.db
+                    .query(
+                        "RELATE $from -> created -> $to \
+                         SET role = $role, order = $order, credited_as = $credited",
+                    )
+                    .bind(("from", from))
+                    .bind(("to", to))
+                    .bind(("role", creator.role))
+                    .bind(("order", creator.order))
+                    .bind(("credited", credited))
+                    .await
+                    .map_err(map_err)?;
+            }
+            Ok(())
+        }
+        .await;
+
+        match persist {
+            Ok(()) => {
+                self.db
+                    .query("COMMIT TRANSACTION")
+                    .await
+                    .map_err(map_err)?;
+                Ok(resource)
+            }
+            Err(err) => {
+                let _ = self.db.query("CANCEL TRANSACTION").await;
+                Err(err)
             }
         }
-
-        Ok(resource)
     }
 
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError> {

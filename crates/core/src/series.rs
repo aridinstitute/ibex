@@ -36,17 +36,12 @@ pub struct Series {
     pub title: NonEmptyStr,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum SeriesError {
-    // Title emptiness lives in NonEmptyStr; reserved for future invariants.
-}
-
 impl Series {
-    pub fn try_new(id: SeriesId, new: NewSeries) -> Result<Self, SeriesError> {
-        Ok(Self {
+    pub fn try_new(id: SeriesId, new: NewSeries) -> Self {
+        Self {
             id,
             title: new.title,
-        })
+        }
     }
 }
 
@@ -70,8 +65,7 @@ mod tests {
             NewSeries {
                 title: title.clone(),
             },
-        )
-        .unwrap();
+        );
         assert_eq!(series.title, title);
     }
 }

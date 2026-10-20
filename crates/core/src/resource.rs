@@ -184,8 +184,7 @@ pub enum CreatorRole {
     Director,
 }
 
-/// Write-side creator link. Order is the index in `NewResource.creators`.
-/// Never stored on the resource document — becomes a `created` edge.
+/// Write-side creator link for [`NewResource`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CreatorSpec {
     pub person_id: PersonId,
@@ -193,7 +192,7 @@ pub struct CreatorSpec {
     pub credited_as: Option<NonEmptyStr>,
 }
 
-/// Read-side projection of one `created` edge.
+/// Credited person on a [`Resource`], with bibliography order.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Creator {
     pub person_id: PersonId,
@@ -247,7 +246,6 @@ pub struct Resource {
     pub id: ResourceId,
     pub kind: ResourceKind,
     pub title: NonEmptyStr,
-    /// Projection only. Source of truth is edges in the store.
     pub creators: Vec<Creator>,
     pub publisher: Option<String>,
     pub published: Option<BibliographicDate>,

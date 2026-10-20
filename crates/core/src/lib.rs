@@ -12,5 +12,5 @@ pub use resource::{
     BibliographicDate, Creator, CreatorRole, CreatorSpec, NewResource, ParentRule, Resource,
     ResourceError, ResourceId, ResourceKind, UtcMillis,
 };
-pub use series::{NewSeries, Series, SeriesError, SeriesId};
+pub use series::{NewSeries, Series, SeriesId};
 pub use store::{Store, StoreError, StoreHealth};
