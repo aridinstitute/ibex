@@ -2,11 +2,11 @@
 
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, Size, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use oeuvre_core::{ResourceId, ResourcePage, ResourceSummary};
+use oeuvre_core::{ResourceId, ResourcePage, ResourceSort, ResourceSummary, SortDirection};
 
 use crate::db::DbWorker;
 use crate::detail::{render_panel, DetailFetch, DetailView};
@@ -27,11 +27,21 @@ const CELL_TEXT_SIZE: Pixels = px(13.);
 /// (`text_xs` at the 12px rem), which reads as an afterthought.
 const HEADER_TEXT_SIZE: Pixels = px(11.);
 
+/// Continuation for the next scroll page, keyed to the listing mode: the
+/// newest-first listing walks id cursors, a sorted listing walks offsets.
+#[derive(Debug, Clone, Copy)]
+enum PageCursor {
+    NewestFirst(Option<ResourceId>),
+    Sorted(Option<u64>),
+}
+
 pub struct LibraryDelegate {
     worker: DbWorker,
     rows: Vec<ResourceSummary>,
     loading: bool,
-    next_before: Option<ResourceId>,
+    next: PageCursor,
+    /// Column sort driving the listing; `None` is the newest-first default.
+    sort: Option<(ResourceSort, SortDirection)>,
     error: Option<String>,
 }
 
@@ -43,9 +53,67 @@ impl LibraryDelegate {
             worker,
             rows: first.rows,
             loading: false,
-            next_before: first.next_before,
+            next: PageCursor::NewestFirst(first.next_before),
+            sort: None,
             error: None,
         }
+    }
+
+    /// Apply a double-clicked header's next cycle state (see [`next_sort`]).
+    /// A changed order reloads the grid from the top of the new listing, and
+    /// the row highlight follows the selected resource by id once the first
+    /// page lands.
+    fn request_sort(
+        &mut self,
+        field: ResourceSort,
+        selected_id: Option<ResourceId>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        // One reload in flight is enough: a double-click during the fetch
+        // lands on the completed order instead of stacking requests.
+        if self.loading {
+            return;
+        }
+        self.sort = next_sort(self.sort, field);
+        self.loading = true;
+        self.error = None;
+        let worker = self.worker.clone();
+        let sort = self.sort;
+        cx.spawn_in(window, async move |table, window| {
+            let reply = match sort {
+                Some((field, direction)) => worker
+                    .list_sorted_page(field, direction, 0, PAGE_SIZE)
+                    .await
+                    .map(|page| (page.rows, PageCursor::Sorted(page.next_offset))),
+                None => worker
+                    .list_page(None, PAGE_SIZE)
+                    .await
+                    .map(|page| (page.rows, PageCursor::NewestFirst(page.next_before))),
+            };
+            _ = table.update_in(window, |table, _window, cx| {
+                let delegate = table.delegate_mut();
+                delegate.loading = false;
+                match reply {
+                    Ok((rows, next)) => {
+                        delegate.rows = rows;
+                        delegate.next = next;
+                    }
+                    Err(err) => delegate.error = Some(err),
+                }
+                // The highlight follows the selected resource to its new
+                // row; a resource outside the first page loses it and the
+                // detail panel returns to empty.
+                let selected_ix = selected_id
+                    .and_then(|id| table.delegate().rows.iter().position(|row| row.id == id));
+                match selected_ix {
+                    Some(ix) => table.set_selected_row(ix, cx),
+                    None => table.clear_selection(cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -102,7 +170,38 @@ impl TableDelegate for LibraryDelegate {
         } else {
             header
         };
-        header.child(self.column(col_ix, cx).name.clone())
+        let name = self.column(col_ix, cx).name.clone();
+        let Some(field) = sort_field_for_col(col_ix) else {
+            return header.child(name).into_any_element();
+        };
+        // Which direction of this column's cycle currently drives the order;
+        // `None` leaves the header without a marker.
+        let direction = match self.sort {
+            Some((active, direction)) if active == field => Some(direction),
+            _ => None,
+        };
+        // Double-click steps the cycle; a single click keeps flowing to the
+        // table's column selection.
+        header
+            .id(("th-sort", col_ix))
+            .on_click(cx.listener(move |table, event: &ClickEvent, window, cx| {
+                if event.click_count() != 2 {
+                    return;
+                }
+                // The second click drives the sort, not another selection.
+                cx.stop_propagation();
+                let selected_id =
+                    table.selected_row().and_then(|ix| table.delegate().row_id(ix));
+                table
+                    .delegate_mut()
+                    .request_sort(field, selected_id, window, cx);
+            }))
+            .when_some(
+                direction.map(|direction| sort_marker(direction, cx)),
+                |el, marker| el.child(marker),
+            )
+            .child(name)
+            .into_any_element()
     }
     fn render_td(
         &mut self,
@@ -174,7 +273,11 @@ impl TableDelegate for LibraryDelegate {
     }
 
     fn has_more(&self, _cx: &App) -> bool {
-        !self.loading && self.next_before.is_some()
+        !self.loading
+            && match self.next {
+                PageCursor::NewestFirst(next) => next.is_some(),
+                PageCursor::Sorted(next) => next.is_some(),
+            }
     }
 
     fn load_more_threshold(&self) -> usize {
@@ -183,32 +286,99 @@ impl TableDelegate for LibraryDelegate {
 
     fn load_more(&mut self, window: &mut Window, cx: &mut Context<TableState<Self>>) {
         // The grid fires load_more repeatedly near the bottom, so loading
-        // acts as the lock and a None cursor marks the end.
-        if self.loading || self.next_before.is_none() {
+        // acts as the lock and an exhausted cursor marks the end.
+        if self.loading
+            || !matches!(
+                self.next,
+                PageCursor::NewestFirst(Some(_)) | PageCursor::Sorted(Some(_))
+            )
+        {
             return;
         }
         self.loading = true;
         self.error = None;
         let worker = self.worker.clone();
-        let before = self.next_before;
-
-        cx.spawn_in(window, async move |table, window| {
-            let page = worker.list_page(before, PAGE_SIZE).await;
-            _ = table.update_in(window, |table, _window, cx| {
-                let delegate = table.delegate_mut();
-                delegate.loading = false;
-                match page {
-                    Ok(page) => {
-                        delegate.rows.extend(page.rows);
-                        delegate.next_before = page.next_before;
-                    }
-                    Err(err) => delegate.error = Some(err),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        match (self.sort, self.next) {
+            (None, PageCursor::NewestFirst(Some(before))) => {
+                cx.spawn_in(window, async move |table, window| {
+                    let page = worker.list_page(Some(before), PAGE_SIZE).await;
+                    _ = table.update_in(window, |table, _window, cx| {
+                        let delegate = table.delegate_mut();
+                        delegate.loading = false;
+                        match page {
+                            Ok(page) => {
+                                delegate.rows.extend(page.rows);
+                                delegate.next = PageCursor::NewestFirst(page.next_before);
+                            }
+                            Err(err) => delegate.error = Some(err),
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            (Some((field, direction)), PageCursor::Sorted(Some(offset))) => {
+                cx.spawn_in(window, async move |table, window| {
+                    let page = worker.list_sorted_page(field, direction, offset, PAGE_SIZE).await;
+                    _ = table.update_in(window, |table, _window, cx| {
+                        let delegate = table.delegate_mut();
+                        delegate.loading = false;
+                        match page {
+                            Ok(page) => {
+                                delegate.rows.extend(page.rows);
+                                delegate.next = PageCursor::Sorted(page.next_offset);
+                            }
+                            Err(err) => delegate.error = Some(err),
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            // Cursor mode and sort stay in lockstep (request_sort swaps
+            // both); a mismatch is a state bug, so release the lock and
+            // stop rather than wedge future loads.
+            _ => self.loading = false,
+        }
     }
+}
+
+/// Column that double-click cycles, by header index; `None` for the kind
+/// column, whose icon header stays inert.
+fn sort_field_for_col(col_ix: usize) -> Option<ResourceSort> {
+    match col_ix {
+        COL_TITLE => Some(ResourceSort::Title),
+        COL_CREATORS => Some(ResourceSort::PrimaryCreator),
+        COL_PUBLISHED => Some(ResourceSort::Published),
+        _ => None,
+    }
+}
+
+/// One header's three-state cycle: newest-first → ascending → descending →
+/// back to newest-first. Double-clicking a different column always restarts
+/// that column ascending.
+fn next_sort(
+    current: Option<(ResourceSort, SortDirection)>,
+    field: ResourceSort,
+) -> Option<(ResourceSort, SortDirection)> {
+    match current {
+        Some((active, SortDirection::Ascending)) if active == field => {
+            Some((field, SortDirection::Descending))
+        }
+        Some((active, SortDirection::Descending)) if active == field => None,
+        _ => Some((field, SortDirection::Ascending)),
+    }
+}
+
+/// Small direction marker beside the header label of the column that
+/// currently drives the order.
+fn sort_marker(direction: SortDirection, cx: &App) -> Icon {
+    Icon::new(match direction {
+        SortDirection::Ascending => IconName::SortAscending,
+        SortDirection::Descending => IconName::SortDescending,
+    })
+    .with_size(Size::Small)
+    .text_color(cx.theme().muted_foreground)
 }
 
 gpui_kit::actions!([ToggleDetailPanel]);
@@ -347,5 +517,51 @@ impl Render for LibraryApp {
                         .child(error),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod sort_cycle_tests {
+    // No `use super::*`: the glob would re-import gpui's `test` proc
+    // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
+    use super::{next_sort, sort_field_for_col, COL_CREATORS, COL_KIND, COL_PUBLISHED, COL_TITLE};
+    use oeuvre_core::{ResourceSort, SortDirection};
+
+    #[test]
+    fn one_header_cycles_ascending_descending_then_reverts() {
+        let field = ResourceSort::Title;
+        let asc = next_sort(None, field);
+        assert_eq!(asc, Some((field, SortDirection::Ascending)));
+        let desc = next_sort(asc, field);
+        assert_eq!(desc, Some((field, SortDirection::Descending)));
+        let reverted = next_sort(desc, field);
+        assert_eq!(reverted, None);
+    }
+
+    #[test]
+    fn switching_columns_restarts_ascending() {
+        for current in [
+            Some((ResourceSort::Title, SortDirection::Ascending)),
+            Some((ResourceSort::Title, SortDirection::Descending)),
+        ] {
+            assert_eq!(
+                next_sort(current, ResourceSort::PrimaryCreator),
+                Some((ResourceSort::PrimaryCreator, SortDirection::Ascending))
+            );
+        }
+    }
+
+    #[test]
+    fn header_columns_map_to_sort_fields() {
+        assert_eq!(sort_field_for_col(COL_TITLE), Some(ResourceSort::Title));
+        assert_eq!(
+            sort_field_for_col(COL_CREATORS),
+            Some(ResourceSort::PrimaryCreator)
+        );
+        assert_eq!(
+            sort_field_for_col(COL_PUBLISHED),
+            Some(ResourceSort::Published)
+        );
+        assert_eq!(sort_field_for_col(COL_KIND), None);
     }
 }

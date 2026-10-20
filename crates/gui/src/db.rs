@@ -1,9 +1,11 @@
 //! Store access for the UI: one OS thread owns a tokio runtime and serves
 //! page requests over channels, so gpui's executor never runs Surreal I/O.
 
-use oeuvre_app::command::{GetResourceDetail, ListResourcesPage};
+use oeuvre_app::command::{GetResourceDetail, ListResourcesPage, ListResourcesSortedPage};
 use oeuvre_app::{AppState, Command, Outcome};
-use oeuvre_core::{ResourceDetail, ResourceId, ResourcePage};
+use oeuvre_core::{
+    ResourceDetail, ResourceId, ResourcePage, ResourceSort, SortDirection, SortedResourcePage,
+};
 use tokio::sync::oneshot;
 
 pub enum DbRequest {
@@ -11,6 +13,13 @@ pub enum DbRequest {
         before: Option<ResourceId>,
         limit: u32,
         reply: oneshot::Sender<Result<ResourcePage, String>>,
+    },
+    ListSortedPage {
+        sort: ResourceSort,
+        direction: SortDirection,
+        offset: u64,
+        limit: u32,
+        reply: oneshot::Sender<Result<SortedResourcePage, String>>,
     },
     GetDetail {
         id: ResourceId,
@@ -59,6 +68,33 @@ impl DbWorker {
                                     });
                                 let _ = reply.send(result);
                             }
+                            DbRequest::ListSortedPage {
+                                sort,
+                                direction,
+                                offset,
+                                limit,
+                                reply,
+                            } => {
+                                let result = state
+                                    .execute(Command::ListResourcesSortedPage(
+                                        ListResourcesSortedPage {
+                                            sort,
+                                            direction,
+                                            offset,
+                                            limit,
+                                        },
+                                    ))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::ListResourcesSortedPage(page) => Ok(page),
+                                        _ => Err(
+                                            "unexpected outcome from list_resources_sorted_page"
+                                                .into(),
+                                        ),
+                                    });
+                                let _ = reply.send(result);
+                            }
                             DbRequest::GetDetail { id, reply } => {
                                 let result = state
                                     .execute(Command::GetResourceDetail(GetResourceDetail {
@@ -92,6 +128,29 @@ impl DbWorker {
         self.tx
             .send(DbRequest::ListPage {
                 before,
+                limit,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    /// Request one offset window of a database-sorted listing and wait for
+    /// the reply off the UI thread.
+    pub async fn list_sorted_page(
+        &self,
+        sort: ResourceSort,
+        direction: SortDirection,
+        offset: u64,
+        limit: u32,
+    ) -> Result<SortedResourcePage, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::ListSortedPage {
+                sort,
+                direction,
+                offset,
                 limit,
                 reply: tx,
             })
@@ -190,4 +249,47 @@ mod tests {
             row.published_label
         );
     }
+    #[tokio::test]
+    async fn worker_walks_sorted_pages() {
+        let store = MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        let state = AppState::builder(store).surface(Surface::Test).build();
+        let worker = DbWorker::spawn(state);
+
+        // 5 demo rows plus 3 containers: pages of 3 must tile 8 exactly,
+        // and the database query must hand back title order across pages.
+        let mut offset = 0u64;
+        let mut walked: Vec<oeuvre_core::ResourceSummary> = Vec::new();
+        loop {
+            let page = worker
+                .list_sorted_page(
+                    oeuvre_core::ResourceSort::Title,
+                    oeuvre_core::SortDirection::Ascending,
+                    offset,
+                    3,
+                )
+                .await
+                .unwrap();
+            assert!(page.rows.len() <= 3);
+            walked.extend(page.rows);
+            match page.next_offset {
+                // A full page leaves the exact next offset, so the walk
+                // never lands on an empty trailing page.
+                Some(next) => {
+                    assert_eq!(next, offset + 3);
+                    offset = next;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(walked.len(), 8);
+        let titles: Vec<String> = walked
+            .iter()
+            .map(|row| row.title.as_str().to_lowercase())
+            .collect();
+        let mut expected = titles.clone();
+        expected.sort();
+        assert_eq!(titles, expected);
+    }
+
 }
