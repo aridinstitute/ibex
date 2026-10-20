@@ -1,15 +1,17 @@
 mod health;
 mod person;
 mod resource;
+mod series;
 
 pub use health::{Health, HealthReport};
 pub use person::{
     CreatePerson, DeletePerson, DeletedPerson, FindPersonsByName, GetPerson, ListPersons,
     UpdatePerson,
 };
-pub use resource::CreateResource;
+pub use resource::{CreateResource, GetResource};
+pub use series::CreateSeries;
 
-use oeuvre_core::{Person, Resource, StoreError};
+use oeuvre_core::{Person, Resource, Series, StoreError};
 
 use crate::event::Event;
 use crate::AppState;
@@ -25,7 +27,9 @@ pub enum Command {
     DeletePerson(DeletePerson),
     FindPersonsByName(FindPersonsByName),
     ListPersons(ListPersons),
+    CreateSeries(CreateSeries),
     CreateResource(CreateResource),
+    GetResource(GetResource),
 }
 
 /// The result of a successful command. One variant per [`Command`] variant.
@@ -39,7 +43,9 @@ pub enum Outcome {
     DeletePerson(DeletedPerson),
     FindPersonsByName(Vec<Person>),
     ListPersons(Vec<Person>),
+    CreateSeries(Series),
     CreateResource(Resource),
+    GetResource(Resource),
 }
 
 /// A command plus per-call transport context.
@@ -80,7 +86,9 @@ impl Command {
             Command::DeletePerson(_) => DeletePerson::NAME,
             Command::FindPersonsByName(_) => FindPersonsByName::NAME,
             Command::ListPersons(_) => ListPersons::NAME,
+            Command::CreateSeries(_) => CreateSeries::NAME,
             Command::CreateResource(_) => CreateResource::NAME,
+            Command::GetResource(_) => GetResource::NAME,
         }
     }
 }
@@ -115,7 +123,9 @@ pub(crate) async fn dispatch(
         Command::DeletePerson(c) => drive(c, state, ev).await,
         Command::FindPersonsByName(c) => drive(c, state, ev).await,
         Command::ListPersons(c) => drive(c, state, ev).await,
+        Command::CreateSeries(c) => drive(c, state, ev).await,
         Command::CreateResource(c) => drive(c, state, ev).await,
+        Command::GetResource(c) => drive(c, state, ev).await,
     }
 }
 
