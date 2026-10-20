@@ -32,6 +32,9 @@ pub trait Store: Send + Sync + 'static {
     /// Non-unique lookup. Matches primary or any alias via [`Name::key`].
     /// Empty vec when none match.
     async fn find_persons_by_name(&self, name: &Name) -> Result<Vec<Person>, StoreError>;
+
+    /// All people in the library. Empty vec when none.
+    async fn list_persons(&self) -> Result<Vec<Person>, StoreError>;
 }
 
 /// Result of [`Store::ping`].

@@ -154,6 +154,11 @@ impl Store for MemoryStore {
             .filter_map(|id| state.by_id.get(id).cloned())
             .collect())
     }
+
+    async fn list_persons(&self) -> Result<Vec<Person>, StoreError> {
+        let state = self.people.lock().expect("MemoryStore lock");
+        Ok(state.by_id.values().cloned().collect())
+    }
 }
 
 pub struct StubStore {
@@ -217,5 +222,9 @@ impl Store for StubStore {
 
     async fn find_persons_by_name(&self, _name: &Name) -> Result<Vec<Person>, StoreError> {
         Err(unsupported("find_persons_by_name"))
+    }
+
+    async fn list_persons(&self) -> Result<Vec<Person>, StoreError> {
+        Err(unsupported("list_persons"))
     }
 }

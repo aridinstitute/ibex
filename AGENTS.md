@@ -11,6 +11,7 @@ Oeuvre is a citation manager built for speed and agentic research (CLI + MCP). I
 | `oeuvre-core` | `crates/core` | Domain types and storage traits |
 | `oeuvre-app` | `crates/app` | AppState, commands, and wide-event logging |
 | `oeuvre-adapter-surreal` | `crates/adapter-surreal` | SurrealDB storage adapter |
+| `oeuvre-cli` | `crates/cli` | `ovr` CLI (clap) |
 
 See `README.md` and `docs/` for product context.
 

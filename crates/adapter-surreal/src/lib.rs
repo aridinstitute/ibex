@@ -181,6 +181,21 @@ impl Store for SurrealStore {
         }
         Ok(people)
     }
+
+    async fn list_persons(&self) -> Result<Vec<Person>, StoreError> {
+        let mut response = self
+            .db
+            .query("SELECT id FROM person")
+            .await
+            .map_err(map_err)?;
+        let rows: Vec<PersonIdRow> = response.take(0).map_err(map_err)?;
+        let mut people = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = Self::thing_to_person_id(&row.id)?;
+            people.push(self.get_person(id).await?);
+        }
+        Ok(people)
+    }
 }
 
 #[cfg(test)]

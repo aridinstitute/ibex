@@ -26,6 +26,9 @@ pub(crate) const STORE_OK: Key = Key::new("store.ok");
 pub(crate) const STORE_LATENCY_US: Key = Key::new("store.latency_us");
 pub(crate) const PERSON_ID: Key = Key::new("person.id");
 pub(crate) const PERSON_DISPLAY: Key = Key::new("person.display");
+pub(crate) const RESOURCE_ID: Key = Key::new("resource.id");
+pub(crate) const RESOURCE_KIND: Key = Key::new("resource.kind");
+pub(crate) const RESOURCE_TITLE: Key = Key::new("resource.title");
 
 #[cfg(test)]
 mod tests {
@@ -45,6 +48,9 @@ mod tests {
         STORE_LATENCY_US,
         PERSON_ID,
         PERSON_DISPLAY,
+        RESOURCE_ID,
+        RESOURCE_KIND,
+        RESOURCE_TITLE,
     ];
 
     #[test]
