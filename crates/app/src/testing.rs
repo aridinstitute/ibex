@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use oeuvre_core::{
     creator_label_name, format_creators_label, published_label_from, BibliographicDate, Creator,
     CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource,
-    ResourceId, ResourceKind, ResourceSummary, Series, SeriesId, Store, StoreError, StoreHealth,
+    ResourceId, ResourceKind, ResourcePage, ResourceSummary, Series, SeriesId, Store, StoreError,
+    StoreHealth,
 };
 
 use crate::event::{EventSink, FinishedEvent};
@@ -104,6 +105,57 @@ impl MemoryStore {
             resources: Mutex::new(HashMap::new()),
             created: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Build summary rows for `ids` in the given order, projecting creator
+    /// labels and container titles from the in-memory maps.
+    fn summaries_in_order(&self, ids: &[ResourceId]) -> Result<Vec<ResourceSummary>, StoreError> {
+        let resources = self.resources.lock().expect("MemoryStore lock");
+        let created = self.created.lock().expect("MemoryStore lock");
+        let people = self.people.lock().expect("MemoryStore lock");
+
+        let mut summaries = Vec::with_capacity(ids.len());
+        for id in ids {
+            let row = resources
+                .get(id)
+                .expect("ids come from the resources map keys");
+            let mut edges: Vec<&CreatedEdge> = created
+                .iter()
+                .filter(|e| e.resource_id == *id)
+                .collect();
+            edges.sort_by_key(|e| e.order);
+
+            let names: Vec<String> = edges
+                .iter()
+                .map(|e| {
+                    let person = people.by_id.get(&e.person_id).ok_or_else(|| {
+                        StoreError::new(format!(
+                            "created edge references missing person {}",
+                            e.person_id
+                        ))
+                    })?;
+                    Ok(creator_label_name(e.credited_as.as_ref(), &person.name))
+                })
+                .collect::<Result<Vec<_>, StoreError>>()?;
+
+            let container_title = match row.parent_id {
+                Some(parent_id) => resources
+                    .get(&parent_id)
+                    .map(|parent| parent.title.clone()),
+                None => None,
+            };
+
+            summaries.push(ResourceSummary {
+                id: *id,
+                kind: row.kind,
+                title: row.title.clone(),
+                creators_label: format_creators_label(&names),
+                published_label: published_label_from(row.published.as_ref()),
+                publisher: row.publisher.clone(),
+                container_title,
+            });
+        }
+        Ok(summaries)
     }
 }
 
@@ -286,55 +338,35 @@ impl Store for MemoryStore {
     }
 
     async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError> {
-        let resources = self.resources.lock().expect("MemoryStore lock");
-        let created = self.created.lock().expect("MemoryStore lock");
-        let people = self.people.lock().expect("MemoryStore lock");
+        // The full list is the first page with an unbounded cursor, so one
+        // projection path serves both reads.
+        let page = self.list_resources_page(None, u32::MAX).await?;
+        Ok(page.rows)
+    }
 
-        let mut ids: Vec<ResourceId> = resources.keys().copied().collect();
+    async fn list_resources_page(
+        &self,
+        before: Option<ResourceId>,
+        limit: u32,
+    ) -> Result<ResourcePage, StoreError> {
+        let mut ids: Vec<ResourceId> = {
+            let resources = self.resources.lock().expect("MemoryStore lock");
+            resources
+                .keys()
+                .copied()
+                .filter(|id| before.is_none_or(|b| id.as_ulid() < b.as_ulid()))
+                .collect()
+        };
         ids.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
-
-        let mut summaries = Vec::with_capacity(ids.len());
-        for id in ids {
-            let row = resources
-                .get(&id)
-                .expect("id taken from resources keys");
-            let mut edges: Vec<&CreatedEdge> = created
-                .iter()
-                .filter(|e| e.resource_id == id)
-                .collect();
-            edges.sort_by_key(|e| e.order);
-
-            let names: Vec<String> = edges
-                .iter()
-                .map(|e| {
-                    let person = people.by_id.get(&e.person_id).ok_or_else(|| {
-                        StoreError::new(format!(
-                            "created edge references missing person {}",
-                            e.person_id
-                        ))
-                    })?;
-                    Ok(creator_label_name(e.credited_as.as_ref(), &person.name))
-                })
-                .collect::<Result<Vec<_>, StoreError>>()?;
-
-            let container_title = match row.parent_id {
-                Some(parent_id) => resources
-                    .get(&parent_id)
-                    .map(|parent| parent.title.clone()),
-                None => None,
-            };
-
-            summaries.push(ResourceSummary {
-                id,
-                kind: row.kind,
-                title: row.title.clone(),
-                creators_label: format_creators_label(&names),
-                published_label: published_label_from(row.published.as_ref()),
-                publisher: row.publisher.clone(),
-                container_title,
-            });
-        }
-        Ok(summaries)
+        ids.truncate(limit as usize + 1);
+        let next_before = if ids.len() > limit as usize {
+            ids.pop();
+            ids.last().copied()
+        } else {
+            None
+        };
+        let rows = self.summaries_in_order(&ids)?;
+        Ok(ResourcePage { rows, next_before })
     }
 }
 
@@ -423,5 +455,13 @@ impl Store for StubStore {
 
     async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError> {
         Err(unsupported("list_resources"))
+    }
+
+    async fn list_resources_page(
+        &self,
+        _before: Option<ResourceId>,
+        _limit: u32,
+    ) -> Result<ResourcePage, StoreError> {
+        Err(unsupported("list_resources_page"))
     }
 }

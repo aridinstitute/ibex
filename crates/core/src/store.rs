@@ -2,7 +2,7 @@
 
 use crate::{
     Name, NewResource, NewSeries, Person, PersonError, PersonId, Resource, ResourceError,
-    ResourceId, ResourceSummary, Series, SeriesId,
+    ResourceId, ResourcePage, ResourceSummary, Series, SeriesId,
 };
 
 /// Storage backend. Grows one method per capability a command needs.
@@ -61,6 +61,18 @@ pub trait Store: Send + Sync + 'static {
     /// Newest first by [`ResourceId`] ULID (descending). Labels and
     /// `container_title` are read-time projections from edges / parent links.
     async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError>;
+
+    /// Newest-first page of summary rows, starting strictly below `before`
+    /// (`None` starts at the newest row).
+    ///
+    /// `limit` bounds the page size. Implementations fetch one extra row so
+    /// [`ResourcePage::next_before`] is exact and callers never land on an
+    /// empty trailing page.
+    async fn list_resources_page(
+        &self,
+        before: Option<ResourceId>,
+        limit: u32,
+    ) -> Result<ResourcePage, StoreError>;
 }
 
 /// Result of [`Store::ping`].

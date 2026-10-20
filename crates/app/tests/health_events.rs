@@ -118,6 +118,14 @@ impl Store for HangStore {
     async fn list_resources(&self) -> Result<Vec<oeuvre_core::ResourceSummary>, StoreError> {
         std::future::pending().await
     }
+
+    async fn list_resources_page(
+        &self,
+        _before: Option<ResourceId>,
+        _limit: u32,
+    ) -> Result<oeuvre_core::ResourcePage, StoreError> {
+        std::future::pending().await
+    }
 }
 
 struct NoopWaker;

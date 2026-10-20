@@ -1,6 +1,6 @@
 use oeuvre_core::{
-    NewResource, PersonId, Resource, ResourceError, ResourceId, ResourceSummary, SeriesId,
-    StoreError,
+    NewResource, PersonId, Resource, ResourceError, ResourceId, ResourcePage, ResourceSummary,
+    SeriesId, StoreError,
 };
 
 use crate::event::{self, Event};
@@ -19,9 +19,18 @@ pub struct GetResource {
 #[derive(Debug, Clone)]
 pub struct ListResources;
 
+#[derive(Debug, Clone)]
+pub struct ListResourcesPage {
+    /// Cursor from a previous page's `next_before`; `None` starts at the newest row.
+    pub before: Option<ResourceId>,
+    /// Page size in rows. Zero is rejected as invalid input.
+    pub limit: u32,
+}
+
 pub(crate) struct Created(pub Resource);
 pub(crate) struct Fetched(pub Resource);
 pub(crate) struct Listed(pub Vec<ResourceSummary>);
+pub(crate) struct ListedPage(pub ResourcePage);
 
 impl From<Created> for Outcome {
     fn from(Created(resource): Created) -> Self {
@@ -38,6 +47,12 @@ impl From<Fetched> for Outcome {
 impl From<Listed> for Outcome {
     fn from(Listed(rows): Listed) -> Self {
         Outcome::ListResources(rows)
+    }
+}
+
+impl From<ListedPage> for Outcome {
+    fn from(ListedPage(page): ListedPage) -> Self {
+        Outcome::ListResourcesPage(page)
     }
 }
 
@@ -165,5 +180,31 @@ impl Handler for ListResources {
 
     async fn run(self, state: &AppState, _ev: &mut Event) -> Result<Listed, CommandError> {
         Ok(Listed(state.store().list_resources().await?))
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for ListResourcesPage {
+    const NAME: &'static str = "list_resources_page";
+    type Output = ListedPage;
+
+    fn annotate(&self, ev: &mut Event) {
+        if let Some(before) = self.before {
+            ev.set(event::RESOURCE_ID, before.to_string());
+        }
+        ev.set(event::RESOURCE_PAGE_LIMIT, self.limit);
+    }
+
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<ListedPage, CommandError> {
+        // A zero limit has no meaning at the store layer, so reject it at the
+        // command boundary where invalid input maps to an exit code.
+        if self.limit == 0 {
+            return Err(CommandError::Invalid("page limit must be at least 1".into()));
+        }
+        let page = state
+            .store()
+            .list_resources_page(self.before, self.limit)
+            .await?;
+        Ok(ListedPage(page))
     }
 }

@@ -187,6 +187,17 @@ pub struct ResourceSummary {
     pub container_title: Option<NonEmptyStr>,
 }
 
+/// One newest-first page of summary rows from `Store::list_resources_page`.
+///
+/// `next_before` is the cursor for the following page: the id of this page's
+/// last row when more rows may exist, `None` at the end of the library.
+/// Feed it back verbatim as the next call's `before`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ResourcePage {
+    pub rows: Vec<ResourceSummary>,
+    pub next_before: Option<ResourceId>,
+}
+
 /// Creator slot label: `credited_as` when set, else [`Name::display`].
 pub fn creator_label_name(credited_as: Option<&NonEmptyStr>, name: &Name) -> String {
     match credited_as {

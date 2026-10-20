@@ -11,7 +11,7 @@ pub use person::{Name, NameError, NameKey, NonEmptyStr, Person, PersonError, Per
 pub use resource::{
     creator_label_name, format_creators_label, format_published_label, published_label_from,
     BibliographicDate, Creator, CreatorRole, CreatorSpec, NewResource, ParentRule, Resource,
-    ResourceError, ResourceId, ResourceKind, ResourceSummary, UtcMillis,
+    ResourceError, ResourceId, ResourceKind, ResourcePage, ResourceSummary, UtcMillis,
 };
 pub use series::{NewSeries, Series, SeriesId};
 pub use store::{Store, StoreError, StoreHealth};
