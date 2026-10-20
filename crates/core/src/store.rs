@@ -1,6 +1,9 @@
 //! Storage port. Adapters implement this; commands call it through `AppState`.
 
-use crate::{Name, Person, PersonError, PersonId};
+use crate::{
+    Name, NewResource, NewSeries, Person, PersonError, PersonId, Resource, ResourceError,
+    ResourceId, Series, SeriesError, SeriesId,
+};
 
 /// Storage backend. Grows one method per capability a command needs.
 #[async_trait::async_trait]
@@ -35,6 +38,23 @@ pub trait Store: Send + Sync + 'static {
 
     /// All people in the library. Empty vec when none.
     async fn list_persons(&self) -> Result<Vec<Person>, StoreError>;
+
+    /// Allocate [`SeriesId`], [`Series::try_new`], insert series row.
+    async fn create_series(&self, new: NewSeries) -> Result<Series, StoreError>;
+
+    /// Fetch series by id. Missing → [`StoreError::not_found`].
+    async fn get_series(&self, id: SeriesId) -> Result<Series, StoreError>;
+
+    /// Allocate id, [`Resource::try_new`], persist resource row **without** creators,
+    /// then create one `created` edge per creator (order = [`Creator::order`](crate::Creator::order)).
+    ///
+    /// Does **not** load/validate parent kind or series existence — caller
+    /// (`CreateResource`) does that before invoke.
+    async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError>;
+
+    /// Load resource row + reconstruct `creators` from edges ordered by `order`.
+    /// Missing resource → [`StoreError::not_found`].
+    async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError>;
 }
 
 /// Result of [`Store::ping`].
@@ -92,6 +112,18 @@ impl StoreError {
 
 impl From<PersonError> for StoreError {
     fn from(err: PersonError) -> Self {
+        StoreError::invalid(err.to_string())
+    }
+}
+
+impl From<ResourceError> for StoreError {
+    fn from(err: ResourceError) -> Self {
+        StoreError::invalid(err.to_string())
+    }
+}
+
+impl From<SeriesError> for StoreError {
+    fn from(err: SeriesError) -> Self {
         StoreError::invalid(err.to_string())
     }
 }

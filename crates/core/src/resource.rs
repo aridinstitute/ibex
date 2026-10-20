@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{NonEmptyStr, PersonId};
+use crate::{NonEmptyStr, PersonId, SeriesId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ResourceId(ulid::Ulid);
@@ -184,20 +184,46 @@ pub enum CreatorRole {
     Director,
 }
 
+/// Write-side creator link. Order is the index in `NewResource.creators`.
+/// Never stored on the resource document — becomes a `created` edge.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CreatorSpec {
+    pub person_id: PersonId,
+    pub role: CreatorRole,
+    pub credited_as: Option<NonEmptyStr>,
+}
+
+/// Read-side projection of one `created` edge.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Creator {
     pub person_id: PersonId,
     pub role: CreatorRole,
+    pub order: u32,
+    pub credited_as: Option<NonEmptyStr>,
+}
+
+impl Creator {
+    pub fn from_spec(order: u32, spec: CreatorSpec) -> Self {
+        Self {
+            person_id: spec.person_id,
+            role: spec.role,
+            order,
+            credited_as: spec.credited_as,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewResource {
     pub kind: ResourceKind,
     pub title: NonEmptyStr,
-    pub creators: Vec<Creator>,
+    pub creators: Vec<CreatorSpec>,
+    pub publisher: Option<String>,
     pub published: Option<BibliographicDate>,
     pub accessed: Option<BibliographicDate>,
     pub parent_id: Option<ResourceId>,
+    pub series_id: Option<SeriesId>,
+    pub series_number: Option<NonEmptyStr>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -212,6 +238,8 @@ pub enum ResourceError {
     ParentRequired,
     #[error("parent kind does not match expected container")]
     ParentKindMismatch,
+    #[error("series_number requires series_id")]
+    SeriesNumberWithoutSeries,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -219,39 +247,112 @@ pub struct Resource {
     pub id: ResourceId,
     pub kind: ResourceKind,
     pub title: NonEmptyStr,
+    /// Projection only. Source of truth is edges in the store.
     pub creators: Vec<Creator>,
+    pub publisher: Option<String>,
     pub published: Option<BibliographicDate>,
     pub accessed: Option<BibliographicDate>,
     pub parent_id: Option<ResourceId>,
+    pub series_id: Option<SeriesId>,
+    pub series_number: Option<NonEmptyStr>,
+}
+
+fn validate_creators(
+    kind: ResourceKind,
+    creators: &[Creator],
+) -> Result<(), ResourceError> {
+    if creators.is_empty() && !kind.is_container() {
+        return Err(ResourceError::EmptyCreators);
+    }
+    for (i, creator) in creators.iter().enumerate() {
+        if creators[..i]
+            .iter()
+            .any(|c| c.person_id == creator.person_id && c.role == creator.role)
+        {
+            return Err(ResourceError::DuplicateCreator);
+        }
+    }
+    Ok(())
+}
+
+fn validate_parent_presence(
+    kind: ResourceKind,
+    parent_id: Option<ResourceId>,
+) -> Result<(), ResourceError> {
+    match (kind.parent_rule(), parent_id.is_some()) {
+        (ParentRule::Forbidden, true) => Err(ResourceError::ParentForbidden),
+        (ParentRule::Required { .. }, false) => Err(ResourceError::ParentRequired),
+        _ => Ok(()),
+    }
+}
+
+fn validate_series(
+    series_id: Option<SeriesId>,
+    series_number: Option<&NonEmptyStr>,
+) -> Result<(), ResourceError> {
+    if series_number.is_some() && series_id.is_none() {
+        Err(ResourceError::SeriesNumberWithoutSeries)
+    } else {
+        Ok(())
+    }
 }
 
 impl Resource {
-    /// Does not check that creator PersonIds or parent_id exist.
+    /// Domain shape only. Does not check person/parent/series existence.
+    /// Assigns `Creator.order` from `creators` enumeration (0..n).
+    /// Does **not** call `accept_parent` (needs loaded parent kind — command boundary).
     pub fn try_new(id: ResourceId, new: NewResource) -> Result<Self, ResourceError> {
-        if new.creators.is_empty() && !new.kind.is_container() {
-            return Err(ResourceError::EmptyCreators);
-        }
-        for (i, creator) in new.creators.iter().enumerate() {
-            if new.creators[..i]
-                .iter()
-                .any(|c| c.person_id == creator.person_id && c.role == creator.role)
-            {
-                return Err(ResourceError::DuplicateCreator);
-            }
-        }
-        match (new.kind.parent_rule(), new.parent_id.is_some()) {
-            (ParentRule::Forbidden, true) => return Err(ResourceError::ParentForbidden),
-            (ParentRule::Required { .. }, false) => return Err(ResourceError::ParentRequired),
-            _ => {}
-        }
+        let creators: Vec<Creator> = new
+            .creators
+            .into_iter()
+            .enumerate()
+            .map(|(i, spec)| Creator::from_spec(i as u32, spec))
+            .collect();
+        validate_creators(new.kind, &creators)?;
+        validate_parent_presence(new.kind, new.parent_id)?;
+        validate_series(new.series_id, new.series_number.as_ref())?;
         Ok(Self {
             id,
             kind: new.kind,
             title: new.title,
-            creators: new.creators,
+            creators,
+            publisher: new.publisher,
             published: new.published,
             accessed: new.accessed,
             parent_id: new.parent_id,
+            series_id: new.series_id,
+            series_number: new.series_number,
+        })
+    }
+
+    /// Reassemble after loading a row + ordered edge projection.
+    /// Assumes `creators` already sorted by `order`.
+    pub fn from_stored(
+        id: ResourceId,
+        kind: ResourceKind,
+        title: NonEmptyStr,
+        creators: Vec<Creator>,
+        publisher: Option<String>,
+        published: Option<BibliographicDate>,
+        accessed: Option<BibliographicDate>,
+        parent_id: Option<ResourceId>,
+        series_id: Option<SeriesId>,
+        series_number: Option<NonEmptyStr>,
+    ) -> Result<Self, ResourceError> {
+        validate_creators(kind, &creators)?;
+        validate_parent_presence(kind, parent_id)?;
+        validate_series(series_id, series_number.as_ref())?;
+        Ok(Self {
+            id,
+            kind,
+            title,
+            creators,
+            publisher,
+            published,
+            accessed,
+            parent_id,
+            series_id,
+            series_number,
         })
     }
 }
@@ -264,21 +365,25 @@ mod tests {
         NonEmptyStr::try_new(s).unwrap()
     }
 
-    fn one_creator() -> Vec<Creator> {
-        vec![Creator {
+    fn one_creator() -> Vec<CreatorSpec> {
+        vec![CreatorSpec {
             person_id: PersonId::generate(),
             role: CreatorRole::Author,
+            credited_as: None,
         }]
     }
 
-    fn new_book(creators: Vec<Creator>, parent_id: Option<ResourceId>) -> NewResource {
+    fn new_book(creators: Vec<CreatorSpec>, parent_id: Option<ResourceId>) -> NewResource {
         NewResource {
             kind: ResourceKind::Book,
             title: title("Confessions"),
             creators,
+            publisher: None,
             published: None,
             accessed: None,
             parent_id,
+            series_id: None,
+            series_number: None,
         }
     }
 
@@ -309,9 +414,12 @@ mod tests {
                     kind,
                     title: title("Container"),
                     creators: vec![],
+                    publisher: None,
                     published: None,
                     accessed: None,
                     parent_id: None,
+                    series_id: None,
+                    series_number: None,
                 },
             )
             .unwrap();
@@ -320,16 +428,50 @@ mod tests {
     }
 
     #[test]
+    fn try_new_assigns_creator_order_from_index() {
+        let a = PersonId::generate();
+        let b = PersonId::generate();
+        let resource = Resource::try_new(
+            ResourceId::generate(),
+            new_book(
+                vec![
+                    CreatorSpec {
+                        person_id: a,
+                        role: CreatorRole::Author,
+                        credited_as: None,
+                    },
+                    CreatorSpec {
+                        person_id: b,
+                        role: CreatorRole::Editor,
+                        credited_as: Some(title("ed.")),
+                    },
+                ],
+                None,
+            ),
+        )
+        .unwrap();
+        assert_eq!(resource.creators[0].order, 0);
+        assert_eq!(resource.creators[0].person_id, a);
+        assert_eq!(resource.creators[1].order, 1);
+        assert_eq!(
+            resource.creators[1].credited_as.as_ref().map(NonEmptyStr::as_str),
+            Some("ed.")
+        );
+    }
+
+    #[test]
     fn try_new_rejects_duplicate_person_and_role() {
         let person_id = PersonId::generate();
         let creators = vec![
-            Creator {
+            CreatorSpec {
                 person_id,
                 role: CreatorRole::Author,
+                credited_as: None,
             },
-            Creator {
+            CreatorSpec {
                 person_id,
                 role: CreatorRole::Author,
+                credited_as: None,
             },
         ];
         let err = Resource::try_new(ResourceId::generate(), new_book(creators, None)).unwrap_err();
@@ -340,13 +482,15 @@ mod tests {
     fn try_new_allows_same_person_different_roles() {
         let person_id = PersonId::generate();
         let creators = vec![
-            Creator {
+            CreatorSpec {
                 person_id,
                 role: CreatorRole::Author,
+                credited_as: None,
             },
-            Creator {
+            CreatorSpec {
                 person_id,
                 role: CreatorRole::Editor,
+                credited_as: None,
             },
         ];
         let resource =
@@ -372,9 +516,12 @@ mod tests {
                 kind: ResourceKind::PodcastEpisode,
                 title: title("Ep 1"),
                 creators: one_creator(),
+                publisher: None,
                 published: None,
                 accessed: None,
                 parent_id: None,
+                series_id: None,
+                series_number: None,
             },
         )
         .unwrap_err();
@@ -389,9 +536,12 @@ mod tests {
                 kind: ResourceKind::JournalArticle,
                 title: title("Paper"),
                 creators: one_creator(),
+                publisher: None,
                 published: None,
                 accessed: None,
                 parent_id: None,
+                series_id: None,
+                series_number: None,
             },
         )
         .unwrap();
@@ -404,13 +554,65 @@ mod tests {
                 kind: ResourceKind::JournalArticle,
                 title: title("Paper"),
                 creators: one_creator(),
+                publisher: None,
                 published: None,
                 accessed: None,
                 parent_id: Some(parent),
+                series_id: None,
+                series_number: None,
             },
         )
         .unwrap();
         assert_eq!(with.parent_id, Some(parent));
+    }
+
+    #[test]
+    fn try_new_rejects_series_number_without_series() {
+        let err = Resource::try_new(
+            ResourceId::generate(),
+            NewResource {
+                kind: ResourceKind::Book,
+                title: title("Confessions"),
+                creators: one_creator(),
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: Some(title("LCL 26")),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err, ResourceError::SeriesNumberWithoutSeries);
+    }
+
+    #[test]
+    fn try_new_keeps_publisher_and_series() {
+        let series_id = SeriesId::generate();
+        let resource = Resource::try_new(
+            ResourceId::generate(),
+            NewResource {
+                kind: ResourceKind::Book,
+                title: title("Confessions"),
+                creators: one_creator(),
+                publisher: Some("Harvard University Press".into()),
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: Some(series_id),
+                series_number: Some(title("LCL 26")),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            resource.publisher.as_deref(),
+            Some("Harvard University Press")
+        );
+        assert_eq!(resource.series_id, Some(series_id));
+        assert_eq!(
+            resource.series_number.as_ref().map(NonEmptyStr::as_str),
+            Some("LCL 26")
+        );
     }
 
     #[test]
@@ -452,12 +654,27 @@ mod tests {
 
     #[test]
     fn bibliographic_date_keeps_instant_and_display() {
-        let date = BibliographicDate::try_new(
-            UtcMillis::from_unix_ms(0),
-            Some(title("397")),
-        )
-        .unwrap();
+        let date =
+            BibliographicDate::try_new(UtcMillis::from_unix_ms(0), Some(title("397"))).unwrap();
         assert_eq!(date.instant().as_unix_ms(), 0);
         assert_eq!(date.display(), Some("397"));
+    }
+
+    #[test]
+    fn from_stored_rejects_corrupt_empty_creators() {
+        let err = Resource::from_stored(
+            ResourceId::generate(),
+            ResourceKind::Book,
+            title("Orphan"),
+            vec![],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err, ResourceError::EmptyCreators);
     }
 }
