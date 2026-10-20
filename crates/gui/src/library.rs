@@ -312,6 +312,8 @@ impl Render for LibraryApp {
 
         v_flex()
             .size_full()
+            // The overlaid panel anchors to this root.
+            .relative()
             // `]` toggles the detail panel; the context must cover the
             // focused table, which renders below this root.
             .key_context("LibraryApp")
@@ -327,11 +329,13 @@ impl Render for LibraryApp {
                             .with_size(Size::XSmall)
                             .bordered(false)
                             .stripe(true),
-                    )
-                    .when(self.detail_open, |el| {
-                        el.child(render_panel(self.detail_view(), cx))
-                    }),
+                    ),
             )
+            // The panel overlays the grid instead of sharing a row with it,
+            // so narrow windows hide columns rather than cut the panel off.
+            .when(self.detail_open, |el| {
+                el.child(render_panel(self.detail_view(), cx))
+            })
             .when_some(error, |el, error| {
                 el.child(
                     div()

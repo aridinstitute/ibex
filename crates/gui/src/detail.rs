@@ -102,8 +102,11 @@ fn value_element(lines: &[String]) -> AnyElement {
     }
 }
 
-/// The right-side panel for the current [`DetailView`].
-pub fn render_panel(view: DetailView<'_>, cx: &App) -> Div {
+/// The right-side panel for the current [`DetailView`]. It overlaps the grid
+/// rather than sharing a row with it: anchored to the window's right edge,
+/// opaque so the covered columns do not show through, and scrollable when
+/// the field list outgrows the window.
+pub fn render_panel(view: DetailView<'_>, cx: &App) -> Stateful<Div> {
     let muted = cx.theme().muted_foreground;
     let danger = cx.theme().danger;
     let border = cx.theme().border;
@@ -132,14 +135,18 @@ pub fn render_panel(view: DetailView<'_>, cx: &App) -> Div {
     };
 
     div()
+        .id("detail-panel")
+        .absolute()
+        .top_0()
+        .right_0()
+        .bottom_0()
         .w(PANEL_WIDTH)
-        .flex_shrink_0()
-        .h_full()
-        .p_3()
-        .text_size(FIELD_TEXT_SIZE)
+        .bg(cx.theme().background)
         .border_l_1()
         .border_color(border)
-        .overflow_hidden()
+        .p_3()
+        .text_size(FIELD_TEXT_SIZE)
+        .overflow_y_scroll()
         .child(content)
 }
 
