@@ -2,7 +2,7 @@
 
 use crate::{
     Name, NewResource, NewSeries, Person, PersonError, PersonId, Resource, ResourceError,
-    ResourceId, Series, SeriesId,
+    ResourceId, ResourceSummary, Series, SeriesId,
 };
 
 /// Storage backend. Grows one method per capability a command needs.
@@ -55,6 +55,12 @@ pub trait Store: Send + Sync + 'static {
     /// Load resource row + reconstruct `creators` from edges ordered by `order`.
     /// Missing resource → [`StoreError::not_found`].
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError>;
+
+    /// All resources as summary rows. Empty vec when none.
+    ///
+    /// Newest first by [`ResourceId`] ULID (descending). Labels and
+    /// `container_title` are read-time projections from edges / parent links.
+    async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError>;
 }
 
 /// Result of [`Store::ping`].

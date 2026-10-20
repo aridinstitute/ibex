@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use oeuvre_core::{
-    BibliographicDate, Creator, CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person,
-    PersonId, Resource, ResourceId, ResourceKind, Series, SeriesId, Store, StoreError, StoreHealth,
+    creator_label_name, format_creators_label, published_label_from, BibliographicDate, Creator,
+    CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceId,
+    ResourceKind, ResourceSummary, Series, SeriesId, Store, StoreError, StoreHealth,
 };
 use serde::{Deserialize, Serialize};
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -57,6 +59,25 @@ struct CreatedEdgeRow {
     role: CreatorRole,
     order: u32,
     credited_as: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListResourceRow {
+    id: Thing,
+    kind: ResourceKind,
+    title: NonEmptyStr,
+    publisher: Option<String>,
+    published: Option<BibliographicDate>,
+    #[serde(default)]
+    parent: Option<Thing>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListCreatorEdgeRow {
+    out: Thing,
+    order: u32,
+    credited_as: Option<String>,
+    name: Name,
 }
 
 impl SurrealStore {
@@ -454,12 +475,86 @@ impl Store for SurrealStore {
         )
         .map_err(StoreError::from)
     }
+
+    async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError> {
+        let mut response = self
+            .db
+            .query(
+                "SELECT id, kind, title, publisher, published, parent FROM resource \
+                 ORDER BY id DESC; \
+                 SELECT out, order, credited_as, in.name AS name FROM created \
+                 ORDER BY order;",
+            )
+            .await
+            .map_err(map_err)?;
+
+        let rows: Vec<ListResourceRow> = response.take(0).map_err(map_err)?;
+        let edge_rows: Vec<ListCreatorEdgeRow> = response.take(1).map_err(map_err)?;
+
+        let mut title_by_id = HashMap::with_capacity(rows.len());
+        let mut parsed_rows = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = Self::thing_to_resource_id(&row.id)?;
+            title_by_id.insert(id, row.title.clone());
+            parsed_rows.push((id, row));
+        }
+
+        let mut names_by_resource: HashMap<ResourceId, Vec<(u32, String)>> = HashMap::new();
+        for edge in edge_rows {
+            let resource_id = Self::thing_to_resource_id(&edge.out)?;
+            let credited_as = match edge.credited_as {
+                Some(s) => Some(
+                    NonEmptyStr::try_new(s)
+                        .map_err(|e| StoreError::invalid(e.to_string()))?,
+                ),
+                None => None,
+            };
+            let label = creator_label_name(credited_as.as_ref(), &edge.name);
+            names_by_resource
+                .entry(resource_id)
+                .or_default()
+                .push((edge.order, label));
+        }
+        for names in names_by_resource.values_mut() {
+            names.sort_by_key(|(order, _)| *order);
+        }
+
+        let mut summaries = Vec::with_capacity(parsed_rows.len());
+        for (id, row) in parsed_rows {
+            let names: Vec<String> = names_by_resource
+                .remove(&id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(_, name)| name)
+                .collect();
+            let container_title = match row.parent {
+                Some(ref thing) => {
+                    let parent_id = Self::thing_to_resource_id(thing)?;
+                    title_by_id.get(&parent_id).cloned()
+                }
+                None => None,
+            };
+            summaries.push(ResourceSummary {
+                id,
+                kind: row.kind,
+                title: row.title,
+                creators_label: format_creators_label(&names),
+                published_label: published_label_from(row.published.as_ref()),
+                publisher: row.publisher,
+                container_title,
+            });
+        }
+        Ok(summaries)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oeuvre_core::{CreatorRole, CreatorSpec, NewResource, NewSeries, ResourceKind, Store};
+    use oeuvre_core::{
+        BibliographicDate, CreatorRole, CreatorSpec, NewResource, NewSeries, ResourceKind, Store,
+        UtcMillis,
+    };
 
     #[tokio::test]
     async fn person_crud_round_trip_memory() {
@@ -688,5 +783,135 @@ mod tests {
             !keys.iter().any(|k| k == "creators"),
             "resource document must not embed creators; keys={keys:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn list_resources_batch_summaries() {
+        let store = SurrealStore::open_memory().await.unwrap();
+
+        let author = store
+            .create_person(
+                Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let editor = store
+            .create_person(
+                Name::try_new(Some("Henry"), Some("Chadwick"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let journal = store
+            .create_resource(NewResource {
+                kind: ResourceKind::Journal,
+                title: NonEmptyStr::try_new("Speculum").unwrap(),
+                creators: vec![],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap();
+
+        let article = store
+            .create_resource(NewResource {
+                kind: ResourceKind::JournalArticle,
+                title: NonEmptyStr::try_new("On Grace").unwrap(),
+                creators: vec![
+                    CreatorSpec {
+                        person_id: author.id,
+                        role: CreatorRole::Author,
+                        credited_as: Some(NonEmptyStr::try_new("St. Augustine").unwrap()),
+                    },
+                    CreatorSpec {
+                        person_id: editor.id,
+                        role: CreatorRole::Editor,
+                        credited_as: None,
+                    },
+                ],
+                publisher: Some("Medieval Academy".into()),
+                published: Some(
+                    BibliographicDate::try_new(UtcMillis::from_unix_ms(1_609_459_200_000), None)
+                        .unwrap(),
+                ),
+                accessed: None,
+                parent_id: Some(journal.id),
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap();
+
+        let book = store
+            .create_resource(NewResource {
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new("Confessions").unwrap(),
+                creators: vec![CreatorSpec {
+                    person_id: author.id,
+                    role: CreatorRole::Author,
+                    credited_as: None,
+                }],
+                publisher: Some("Harvard".into()),
+                published: Some(
+                    BibliographicDate::try_new(
+                        UtcMillis::from_unix_ms(0),
+                        Some(NonEmptyStr::try_new("397").unwrap()),
+                    )
+                    .unwrap(),
+                ),
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap();
+
+        let listed = store.list_resources().await.unwrap();
+        assert_eq!(listed.len(), 3);
+        assert!(listed
+            .windows(2)
+            .all(|w| w[0].id.as_ulid() > w[1].id.as_ulid()));
+
+        let by_id = |id: ResourceId| {
+            listed
+                .iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("missing summary for {id}"))
+        };
+
+        let book_row = by_id(book.id);
+        assert_eq!(book_row.creators_label, "Augustine");
+        assert_eq!(
+            book_row.published_label.as_ref().map(NonEmptyStr::as_str),
+            Some("397")
+        );
+
+        let article_row = by_id(article.id);
+        assert_eq!(article_row.creators_label, "St. Augustine; Henry Chadwick");
+        assert_eq!(
+            article_row
+                .published_label
+                .as_ref()
+                .map(NonEmptyStr::as_str),
+            Some("2021")
+        );
+        assert_eq!(
+            article_row
+                .container_title
+                .as_ref()
+                .map(NonEmptyStr::as_str),
+            Some("Speculum")
+        );
+
+        let journal_row = by_id(journal.id);
+        assert_eq!(journal_row.creators_label, "");
+        assert!(journal_row.container_title.is_none());
     }
 }

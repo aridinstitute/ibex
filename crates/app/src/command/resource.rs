@@ -1,5 +1,6 @@
 use oeuvre_core::{
-    NewResource, PersonId, Resource, ResourceError, ResourceId, SeriesId, StoreError,
+    NewResource, PersonId, Resource, ResourceError, ResourceId, ResourceSummary, SeriesId,
+    StoreError,
 };
 
 use crate::event::{self, Event};
@@ -15,8 +16,12 @@ pub struct GetResource {
     pub id: ResourceId,
 }
 
+#[derive(Debug, Clone)]
+pub struct ListResources;
+
 pub(crate) struct Created(pub Resource);
 pub(crate) struct Fetched(pub Resource);
+pub(crate) struct Listed(pub Vec<ResourceSummary>);
 
 impl From<Created> for Outcome {
     fn from(Created(resource): Created) -> Self {
@@ -27,6 +32,12 @@ impl From<Created> for Outcome {
 impl From<Fetched> for Outcome {
     fn from(Fetched(resource): Fetched) -> Self {
         Outcome::GetResource(resource)
+    }
+}
+
+impl From<Listed> for Outcome {
+    fn from(Listed(rows): Listed) -> Self {
+        Outcome::ListResources(rows)
     }
 }
 
@@ -144,5 +155,15 @@ impl Handler for GetResource {
         ev.set(event::RESOURCE_KIND, resource.kind.as_str());
         ev.set(event::RESOURCE_TITLE, resource.title.as_str().to_owned());
         Ok(Fetched(resource))
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for ListResources {
+    const NAME: &'static str = "list_resources";
+    type Output = Listed;
+
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<Listed, CommandError> {
+        Ok(Listed(state.store().list_resources().await?))
     }
 }

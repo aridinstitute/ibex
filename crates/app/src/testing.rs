@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use oeuvre_core::{
-    BibliographicDate, Creator, CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr,
-    Person, PersonId, Resource, ResourceId, ResourceKind, Series, SeriesId, Store, StoreError,
-    StoreHealth,
+    creator_label_name, format_creators_label, published_label_from, BibliographicDate, Creator,
+    CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource,
+    ResourceId, ResourceKind, ResourceSummary, Series, SeriesId, Store, StoreError, StoreHealth,
 };
 
 use crate::event::{EventSink, FinishedEvent};
@@ -284,6 +284,58 @@ impl Store for MemoryStore {
         )
         .map_err(StoreError::from)
     }
+
+    async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError> {
+        let resources = self.resources.lock().expect("MemoryStore lock");
+        let created = self.created.lock().expect("MemoryStore lock");
+        let people = self.people.lock().expect("MemoryStore lock");
+
+        let mut ids: Vec<ResourceId> = resources.keys().copied().collect();
+        ids.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+
+        let mut summaries = Vec::with_capacity(ids.len());
+        for id in ids {
+            let row = resources
+                .get(&id)
+                .expect("id taken from resources keys");
+            let mut edges: Vec<&CreatedEdge> = created
+                .iter()
+                .filter(|e| e.resource_id == id)
+                .collect();
+            edges.sort_by_key(|e| e.order);
+
+            let names: Vec<String> = edges
+                .iter()
+                .map(|e| {
+                    let person = people.by_id.get(&e.person_id).ok_or_else(|| {
+                        StoreError::new(format!(
+                            "created edge references missing person {}",
+                            e.person_id
+                        ))
+                    })?;
+                    Ok(creator_label_name(e.credited_as.as_ref(), &person.name))
+                })
+                .collect::<Result<Vec<_>, StoreError>>()?;
+
+            let container_title = match row.parent_id {
+                Some(parent_id) => resources
+                    .get(&parent_id)
+                    .map(|parent| parent.title.clone()),
+                None => None,
+            };
+
+            summaries.push(ResourceSummary {
+                id,
+                kind: row.kind,
+                title: row.title.clone(),
+                creators_label: format_creators_label(&names),
+                published_label: published_label_from(row.published.as_ref()),
+                publisher: row.publisher.clone(),
+                container_title,
+            });
+        }
+        Ok(summaries)
+    }
 }
 
 pub struct StubStore {
@@ -367,5 +419,9 @@ impl Store for StubStore {
 
     async fn get_resource(&self, _id: ResourceId) -> Result<Resource, StoreError> {
         Err(unsupported("get_resource"))
+    }
+
+    async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError> {
+        Err(unsupported("list_resources"))
     }
 }

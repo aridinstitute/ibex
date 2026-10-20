@@ -8,10 +8,10 @@ pub use person::{
     CreatePerson, DeletePerson, DeletedPerson, FindPersonsByName, GetPerson, ListPersons,
     UpdatePerson,
 };
-pub use resource::{CreateResource, GetResource};
+pub use resource::{CreateResource, GetResource, ListResources};
 pub use series::CreateSeries;
 
-use oeuvre_core::{Person, Resource, Series, StoreError};
+use oeuvre_core::{Person, Resource, ResourceSummary, Series, StoreError};
 
 use crate::event::Event;
 use crate::AppState;
@@ -30,6 +30,7 @@ pub enum Command {
     CreateSeries(CreateSeries),
     CreateResource(CreateResource),
     GetResource(GetResource),
+    ListResources(ListResources),
 }
 
 /// The result of a successful command. One variant per [`Command`] variant.
@@ -46,6 +47,7 @@ pub enum Outcome {
     CreateSeries(Series),
     CreateResource(Resource),
     GetResource(Resource),
+    ListResources(Vec<ResourceSummary>),
 }
 
 /// A command plus per-call transport context.
@@ -89,6 +91,7 @@ impl Command {
             Command::CreateSeries(_) => CreateSeries::NAME,
             Command::CreateResource(_) => CreateResource::NAME,
             Command::GetResource(_) => GetResource::NAME,
+            Command::ListResources(_) => ListResources::NAME,
         }
     }
 }
@@ -126,6 +129,7 @@ pub(crate) async fn dispatch(
         Command::CreateSeries(c) => drive(c, state, ev).await,
         Command::CreateResource(c) => drive(c, state, ev).await,
         Command::GetResource(c) => drive(c, state, ev).await,
+        Command::ListResources(c) => drive(c, state, ev).await,
     }
 }
 

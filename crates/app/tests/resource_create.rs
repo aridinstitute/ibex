@@ -1,11 +1,13 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{CreatePerson, CreateResource, CreateSeries, GetResource};
+use oeuvre_app::command::{
+    CreatePerson, CreateResource, CreateSeries, GetResource, ListResources,
+};
 use oeuvre_app::testing::{MemorySink, MemoryStore};
 use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
 use oeuvre_core::{
-    CreatorRole, CreatorSpec, Name, NewResource, NewSeries, NonEmptyStr, PersonId, ResourceId,
-    ResourceKind,
+    BibliographicDate, CreatorRole, CreatorSpec, Name, NewResource, NewSeries, NonEmptyStr,
+    PersonId, ResourceId, ResourceKind, UtcMillis,
 };
 
 async fn seed_author(state: &AppState) -> PersonId {
@@ -486,4 +488,200 @@ async fn create_resource_emits_wide_event_fields() {
         ev.get("resource.title"),
         Some(&FieldValue::from("Confessions"))
     );
+}
+
+#[tokio::test]
+async fn list_resources_returns_summaries_ordered_newest_first() {
+    let sink = MemorySink::new();
+    let state = AppState::builder(MemoryStore::new())
+        .surface(Surface::Test)
+        .sink(sink)
+        .build();
+
+    let augustine = {
+        let name = Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap();
+        let Outcome::CreatePerson(p) = state
+            .execute(Command::CreatePerson(CreatePerson {
+                name,
+                aliases: vec![],
+            }))
+            .await
+            .unwrap()
+        else {
+            panic!("expected CreatePerson");
+        };
+        p.id
+    };
+    let chadwick = {
+        let name = Name::try_new(Some("Henry"), Some("Chadwick"), None::<&str>).unwrap();
+        let Outcome::CreatePerson(p) = state
+            .execute(Command::CreatePerson(CreatePerson {
+                name,
+                aliases: vec![],
+            }))
+            .await
+            .unwrap()
+        else {
+            panic!("expected CreatePerson");
+        };
+        p.id
+    };
+    let third = {
+        let name = Name::try_new(None::<&str>, Some("Pelagius"), None::<&str>).unwrap();
+        let Outcome::CreatePerson(p) = state
+            .execute(Command::CreatePerson(CreatePerson {
+                name,
+                aliases: vec![],
+            }))
+            .await
+            .unwrap()
+        else {
+            panic!("expected CreatePerson");
+        };
+        p.id
+    };
+
+    let Outcome::CreateResource(journal) = state
+        .execute(Command::CreateResource(CreateResource {
+            new: NewResource {
+                kind: ResourceKind::Journal,
+                title: NonEmptyStr::try_new("Speculum").unwrap(),
+                creators: vec![],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            },
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreateResource");
+    };
+
+    let Outcome::CreateResource(article) = state
+        .execute(Command::CreateResource(CreateResource {
+            new: NewResource {
+                kind: ResourceKind::JournalArticle,
+                title: NonEmptyStr::try_new("On Grace").unwrap(),
+                creators: vec![
+                    CreatorSpec {
+                        person_id: augustine,
+                        role: CreatorRole::Author,
+                        credited_as: Some(NonEmptyStr::try_new("St. Augustine").unwrap()),
+                    },
+                    CreatorSpec {
+                        person_id: chadwick,
+                        role: CreatorRole::Editor,
+                        credited_as: None,
+                    },
+                    CreatorSpec {
+                        person_id: third,
+                        role: CreatorRole::Contributor,
+                        credited_as: None,
+                    },
+                ],
+                publisher: Some("Medieval Academy".into()),
+                published: Some(
+                    BibliographicDate::try_new(
+                        UtcMillis::from_unix_ms(1_609_459_200_000),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                accessed: None,
+                parent_id: Some(journal.id),
+                series_id: None,
+                series_number: None,
+            },
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreateResource");
+    };
+
+    let Outcome::CreateResource(book) = state
+        .execute(Command::CreateResource(CreateResource {
+            new: NewResource {
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new("Confessions").unwrap(),
+                creators: vec![CreatorSpec {
+                    person_id: augustine,
+                    role: CreatorRole::Author,
+                    credited_as: None,
+                }],
+                publisher: Some("Harvard".into()),
+                published: Some(
+                    BibliographicDate::try_new(
+                        UtcMillis::from_unix_ms(0),
+                        Some(NonEmptyStr::try_new("397").unwrap()),
+                    )
+                    .unwrap(),
+                ),
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            },
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreateResource");
+    };
+
+    let Outcome::ListResources(listed) = state
+        .execute(Command::ListResources(ListResources))
+        .await
+        .unwrap()
+    else {
+        panic!("expected ListResources");
+    };
+
+    assert_eq!(listed.len(), 3);
+    assert!(listed
+        .windows(2)
+        .all(|w| w[0].id.as_ulid() > w[1].id.as_ulid()));
+
+    let by_id = |id: ResourceId| {
+        listed
+            .iter()
+            .find(|row| row.id == id)
+            .unwrap_or_else(|| panic!("missing summary for {id}"))
+    };
+
+    let book_row = by_id(book.id);
+    assert_eq!(book_row.creators_label, "Augustine");
+    assert_eq!(
+        book_row.published_label.as_ref().map(NonEmptyStr::as_str),
+        Some("397")
+    );
+    assert_eq!(book_row.publisher.as_deref(), Some("Harvard"));
+    assert!(book_row.container_title.is_none());
+
+    let article_row = by_id(article.id);
+    assert_eq!(article_row.creators_label, "St. Augustine et al.");
+    assert_eq!(
+        article_row
+            .published_label
+            .as_ref()
+            .map(NonEmptyStr::as_str),
+        Some("2021")
+    );
+    assert_eq!(article_row.publisher.as_deref(), Some("Medieval Academy"));
+    assert_eq!(
+        article_row
+            .container_title
+            .as_ref()
+            .map(NonEmptyStr::as_str),
+        Some("Speculum")
+    );
+
+    let journal_row = by_id(journal.id);
+    assert_eq!(journal_row.creators_label, "");
+    assert!(journal_row.published_label.is_none());
+    assert!(journal_row.container_title.is_none());
 }
