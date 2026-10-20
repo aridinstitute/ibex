@@ -2,7 +2,7 @@
 //! the way Zotero's item pane aligns them.
 
 use gpui_kit::component::description_list::{DescriptionItem, DescriptionList};
-use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::*;
 
 use oeuvre_core::{format_published_label, CreatorRole, ResourceDetail};
@@ -46,12 +46,13 @@ pub fn role_label(role: CreatorRole) -> String {
     .to_owned()
 }
 
-/// (field name, field value) rows for a detail, absent fields omitted the
-/// way the CLI summary row omits them. Title and Kind always show.
-pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, String)> {
-    let mut rows = vec![
-        ("Title".to_string(), detail.title.as_str().to_owned()),
-        ("Kind".to_string(), kind_label(detail.kind)),
+/// (field name, value lines) rows for a detail, absent fields omitted the
+/// way the CLI summary row omits them. Title and Kind always show; a creator
+/// group carries one line per name.
+pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
+    let mut rows: Vec<(String, Vec<String>)> = vec![
+        ("Title".to_string(), vec![detail.title.as_str().to_owned()]),
+        ("Kind".to_string(), vec![kind_label(detail.kind)]),
     ];
     rows.extend(
         detail
@@ -60,30 +61,45 @@ pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, String)> {
             .map(|group| (role_label(group.role), group.names.clone())),
     );
     if let Some(publisher) = &detail.publisher {
-        rows.push(("Publisher".to_string(), publisher.clone()));
+        rows.push(("Publisher".to_string(), vec![publisher.clone()]));
     }
     if let Some(published) = &detail.published {
         rows.push((
             "Published".to_string(),
-            format_published_label(published).as_str().to_owned(),
+            vec![format_published_label(published).as_str().to_owned()],
         ));
     }
     if let Some(accessed) = &detail.accessed {
         rows.push((
             "Accessed".to_string(),
-            format_published_label(accessed).as_str().to_owned(),
+            vec![format_published_label(accessed).as_str().to_owned()],
         ));
     }
     if let Some(container) = &detail.container_title {
-        rows.push(("In".to_string(), container.as_str().to_owned()));
+        rows.push(("In".to_string(), vec![container.as_str().to_owned()]));
     }
     if let Some(series) = &detail.series_title {
-        rows.push(("Series".to_string(), series.as_str().to_owned()));
+        rows.push(("Series".to_string(), vec![series.as_str().to_owned()]));
     }
     if let Some(number) = &detail.series_number {
-        rows.push(("Series number".to_string(), number.as_str().to_owned()));
+        rows.push((
+            "Series number".to_string(),
+            vec![number.as_str().to_owned()],
+        ));
     }
     rows
+}
+
+/// One value cell: a single line renders as text, several as a vertical
+/// list (one creator name per line).
+fn value_element(lines: &[String]) -> AnyElement {
+    match lines {
+        [line] => div().child(line.clone()).into_any_element(),
+        _ => v_flex()
+            .gap_1()
+            .children(lines.to_vec())
+            .into_any_element(),
+    }
 }
 
 /// The right-side panel for the current [`DetailView`].
@@ -109,11 +125,9 @@ pub fn render_panel(view: DetailView<'_>, cx: &App) -> Div {
             .bordered(false)
             .columns(1)
             .label_width(FIELD_LABEL_WIDTH)
-            .children(
-                field_rows(detail)
-                    .into_iter()
-                    .map(|(label, value)| DescriptionItem::new(label).value(value)),
-            )
+            .children(field_rows(detail).into_iter().map(|(label, lines)| {
+                DescriptionItem::new(label).value(value_element(&lines))
+            }))
             .into_any_element(),
     };
 
@@ -147,7 +161,7 @@ mod tests {
             title: NonEmptyStr::try_new("Quantum bibliometrics").unwrap(),
             creators: vec![DetailCreators {
                 role: CreatorRole::Author,
-                names: "Ada Lovelace; G. Hopper".into(),
+                names: vec!["Ada Lovelace".into(), "G. Hopper".into()],
             }],
             publisher: None,
             published: Some(
@@ -166,11 +180,12 @@ mod tests {
         let rows = field_rows(&detail);
         let labels: Vec<&str> = rows.iter().map(|(label, _)| label.as_str()).collect();
         assert_eq!(labels, ["Title", "Kind", "Author", "Published", "In"]);
-        assert_eq!(rows[0].1, "Quantum bibliometrics");
-        assert_eq!(rows[1].1, "Journal article");
-        assert_eq!(rows[2].1, "Ada Lovelace; G. Hopper");
-        assert_eq!(rows[3].1, "Summer 2021");
-        assert_eq!(rows[4].1, "Journal of Citation Studies");
+        assert_eq!(rows[0].1, vec!["Quantum bibliometrics"]);
+        assert_eq!(rows[1].1, vec!["Journal article"]);
+        // Creator groups carry one line per name; the panel stacks them.
+        assert_eq!(rows[2].1, vec!["Ada Lovelace", "G. Hopper"]);
+        assert_eq!(rows[3].1, vec!["Summer 2021"]);
+        assert_eq!(rows[4].1, vec!["Journal of Citation Studies"]);
     }
 
     #[test]

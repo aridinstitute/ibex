@@ -140,9 +140,9 @@ async fn detail_resolves_names_roles_and_linked_titles() {
     assert_eq!(detail.title.as_str(), "Quantum bibliometrics");
     assert_eq!(detail.creators.len(), 2);
     assert_eq!(detail.creators[0].role, CreatorRole::Author);
-    assert_eq!(detail.creators[0].names, "Ada Lovelace; G. Hopper");
+    assert_eq!(detail.creators[0].names, vec!["Ada Lovelace", "G. Hopper"]);
     assert_eq!(detail.creators[1].role, CreatorRole::Editor);
-    assert_eq!(detail.creators[1].names, "Ada Lovelace");
+    assert_eq!(detail.creators[1].names, vec!["Ada Lovelace"]);
     assert_eq!(detail.publisher.as_deref(), Some("Citation Society Press"));
     assert_eq!(detail.published, Some(published));
     assert_eq!(detail.accessed, Some(accessed));
@@ -225,7 +225,7 @@ async fn detail_emits_exactly_one_ok_event() {
     else {
         panic!("expected GetResourceDetail");
     };
-    assert_eq!(detail.creators[0].names, "Augustine");
+    assert_eq!(detail.creators[0].names, vec!["Augustine"]);
 
     let events = sink.take();
     assert_eq!(events.len(), 1);
