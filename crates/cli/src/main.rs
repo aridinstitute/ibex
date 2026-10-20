@@ -20,6 +20,10 @@ struct Cli {
     #[arg(long, global = true, env = "OEUVRE_DATA")]
     data: Option<PathBuf>,
 
+    /// Use an in-memory store seeded with a demo library (overrides --data).
+    #[arg(long, global = true)]
+    memory: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -49,20 +53,34 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let data = cli.data.unwrap_or_else(default_data_dir);
-    std::fs::create_dir_all(&data)
-        .with_context(|| format!("create data directory {}", data.display()))?;
-
-    let store = SurrealStore::open(&data)
-        .await
-        .with_context(|| format!("open library at {}", data.display()))?;
-    let state = AppState::builder(store).surface(Surface::Cli).build();
+    let state = open_state(&cli).await?;
 
     match cli.command {
         Commands::Person(cmd) => person::run(&state, cmd).await?,
         Commands::Resource(cmd) => resource::run(&state, cmd).await?,
     }
     Ok(())
+}
+
+async fn open_state(cli: &Cli) -> Result<AppState> {
+    if cli.memory {
+        let store = SurrealStore::open_memory()
+            .await
+            .context("open in-memory library")?;
+        oeuvre_app::seed::seed_demo_library(&store, oeuvre_app::seed::DEFAULT_DEMO_LIBRARY_SIZE)
+            .await
+            .context("seed demo library")?;
+        return Ok(AppState::builder(store).surface(Surface::Cli).build());
+    }
+
+    let data = cli.data.clone().unwrap_or_else(default_data_dir);
+    std::fs::create_dir_all(&data)
+        .with_context(|| format!("create data directory {}", data.display()))?;
+
+    let store = SurrealStore::open(&data)
+        .await
+        .with_context(|| format!("open library at {}", data.display()))?;
+    Ok(AppState::builder(store).surface(Surface::Cli).build())
 }
 
 fn default_data_dir() -> PathBuf {
@@ -94,5 +112,12 @@ mod tests {
                 action: ResourceAction::List
             })
         ));
+    }
+
+    #[test]
+    fn parses_memory_flag() {
+        let cli = Cli::try_parse_from(["ovr", "--memory", "resource", "list"])
+            .expect("valid args");
+        assert!(cli.memory);
     }
 }
