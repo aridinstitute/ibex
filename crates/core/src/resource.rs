@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{NonEmptyStr, PersonId, SeriesId};
+use crate::{Name, NonEmptyStr, PersonId, SeriesId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ResourceId(ulid::Ulid);
@@ -170,6 +170,75 @@ impl BibliographicDate {
 
     pub fn display(&self) -> Option<&str> {
         self.display.as_ref().map(NonEmptyStr::as_str)
+    }
+}
+
+/// Compact library-index row. Not a substitute for [`Resource`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ResourceSummary {
+    pub id: ResourceId,
+    pub kind: ResourceKind,
+    pub title: NonEmptyStr,
+    /// Empty when no creators; else one name, `"A; B"`, or `"A et al."`.
+    pub creators_label: String,
+    pub published_label: Option<NonEmptyStr>,
+    pub publisher: Option<String>,
+    /// Parent resource title when a parent link is set.
+    pub container_title: Option<NonEmptyStr>,
+}
+
+/// Creator slot label: `credited_as` when set, else [`Name::display`].
+pub fn creator_label_name(credited_as: Option<&NonEmptyStr>, name: &Name) -> String {
+    match credited_as {
+        Some(credited) => credited.as_str().to_owned(),
+        None => name.display(),
+    }
+}
+
+/// Format creator display names for a summary row.
+///
+/// - `[]` → `""`
+/// - `[a]` → `a`
+/// - `[a, b]` → `"a; b"`
+/// - three or more → `"a et al."`
+pub fn format_creators_label<S: AsRef<str>>(names: &[S]) -> String {
+    match names.len() {
+        0 => String::new(),
+        1 => names[0].as_ref().to_owned(),
+        2 => format!("{}; {}", names[0].as_ref(), names[1].as_ref()),
+        _ => format!("{} et al.", names[0].as_ref()),
+    }
+}
+
+/// Prefer fuzzy [`BibliographicDate::display`]; else UTC calendar year of the instant.
+pub fn format_published_label(published: &BibliographicDate) -> NonEmptyStr {
+    if let Some(display) = published.display() {
+        return NonEmptyStr::try_new(display).expect("display already NonEmptyStr");
+    }
+    let year = utc_year_from_millis(published.instant().as_unix_ms());
+    NonEmptyStr::try_new(year.to_string()).expect("year digits non-empty")
+}
+
+pub fn published_label_from(published: Option<&BibliographicDate>) -> Option<NonEmptyStr> {
+    published.map(format_published_label)
+}
+
+/// Civil UTC year from Unix millis (Howard Hinnant `civil_from_days`, year only).
+fn utc_year_from_millis(ms: i64) -> i32 {
+    let days = ms.div_euclid(86_400_000);
+    // Days since civil 0000-03-01.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    if month <= 2 {
+        (y + 1) as i32
+    } else {
+        y as i32
     }
 }
 
@@ -674,5 +743,59 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, ResourceError::EmptyCreators);
+    }
+
+    #[test]
+    fn format_creators_label_zero_one_two_et_al() {
+        assert_eq!(format_creators_label(&[] as &[&str]), "");
+        assert_eq!(format_creators_label(&["Augustine"]), "Augustine");
+        assert_eq!(
+            format_creators_label(&["Augustine", "Chadwick"]),
+            "Augustine; Chadwick"
+        );
+        assert_eq!(
+            format_creators_label(&["A", "B", "C"]),
+            "A et al."
+        );
+        assert_eq!(
+            format_creators_label(&["A", "B", "C", "D"]),
+            "A et al."
+        );
+    }
+
+    #[test]
+    fn creator_label_name_prefers_credited_as() {
+        let name = Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap();
+        assert_eq!(creator_label_name(None, &name), "Augustine");
+        assert_eq!(
+            creator_label_name(Some(&title("St. Augustine")), &name),
+            "St. Augustine"
+        );
+    }
+
+    #[test]
+    fn format_published_label_prefers_display() {
+        let date =
+            BibliographicDate::try_new(UtcMillis::from_unix_ms(0), Some(title("Summer 397")))
+                .unwrap();
+        assert_eq!(format_published_label(&date).as_str(), "Summer 397");
+    }
+
+    #[test]
+    fn format_published_label_falls_back_to_utc_year() {
+        // 2021-01-01T00:00:00Z
+        let date =
+            BibliographicDate::try_new(UtcMillis::from_unix_ms(1_609_459_200_000), None).unwrap();
+        assert_eq!(format_published_label(&date).as_str(), "2021");
+        assert_eq!(
+            published_label_from(Some(&date))
+                .as_ref()
+                .map(NonEmptyStr::as_str),
+            Some("2021")
+        );
+        assert_eq!(published_label_from(None), None);
+
+        assert_eq!(utc_year_from_millis(0), 1970);
+        assert_eq!(utc_year_from_millis(-1), 1969);
     }
 }
