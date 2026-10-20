@@ -20,6 +20,8 @@ const COL_CREATORS: usize = 1;
 const COL_PUBLISHED: usize = 2;
 const COLUMNS: usize = 3;
 
+const CELL_TEXT_SIZE: Pixels = px(13.);
+
 pub struct LibraryDelegate {
     worker: DbWorker,
     rows: Vec<ResourceSummary>,
@@ -71,17 +73,22 @@ impl TableDelegate for LibraryDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        // The table's cell is a plain block div, so content sits at the top
+        // unless each cell centers it itself.
+        let cell = h_flex()
+            .size_full()
+            .min_w_0()
+            .overflow_hidden()
+            .items_center()
+            .text_size(CELL_TEXT_SIZE);
         let Some(row) = self.rows.get(row_ix) else {
-            return div().into_any_element();
+            return cell;
         };
         let muted = cx.theme().muted_foreground;
         match col_ix {
             COL_TITLE => {
                 let label: SharedString = kind_label(row.kind).into();
-                h_flex()
-                    .gap_1p5()
-                    .min_w_0()
-                    .overflow_hidden()
+                cell.gap_1p5()
                     .child(
                         div()
                             .id(("kind", row_ix))
@@ -91,20 +98,18 @@ impl TableDelegate for LibraryDelegate {
                             .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx)),
                     )
                     .child(div().min_w_0().truncate().child(row.title.as_str().to_owned()))
-                    .into_any_element()
             }
-            COL_CREATORS => div()
-                .truncate()
+            COL_CREATORS => cell.text_color(muted).child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(row.creators_label.clone()),
+            ),
+            _ => cell
                 .text_color(muted)
-                .child(row.creators_label.clone())
-                .into_any_element(),
-            _ => div()
-                .text_color(muted)
-                .children(row.published_label.as_ref().map(|p| p.as_str().to_owned()))
-                .into_any_element(),
+                .children(row.published_label.as_ref().map(|p| p.as_str().to_owned())),
         }
     }
-
     fn cell_text(&self, row_ix: usize, col_ix: usize, _cx: &App) -> String {
         let Some(row) = self.rows.get(row_ix) else {
             return String::new();
