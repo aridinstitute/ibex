@@ -4,7 +4,8 @@ use std::path::Path;
 use oeuvre_core::{
     creator_label_name, format_creators_label, published_label_from, BibliographicDate, Creator,
     CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceId,
-    ResourceKind, ResourcePage, ResourceSummary, Series, SeriesId, Store, StoreError, StoreHealth,
+    ResourceKind, ResourcePage, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
+    SortedResourcePage, Store, StoreError, StoreHealth,
 };
 use serde::{Deserialize, Serialize};
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -113,6 +114,13 @@ impl SurrealStore {
             .query(
                 "DEFINE INDEX IF NOT EXISTS person_name_keys ON TABLE person FIELDS name_keys",
             )
+            .await;
+
+        // Sorted pages resolve the first created edge per resource row; the
+        // index turns that per-row lookup into a seek instead of a scan.
+        let _ = self
+            .db
+            .query("DEFINE INDEX IF NOT EXISTS created_out ON TABLE created FIELDS out")
             .await;
 
         let _ = self
@@ -229,6 +237,120 @@ impl SurrealStore {
             });
         }
         Ok(creators)
+    }
+
+    /// Project page rows into summary rows: creator labels from the created
+    /// edges, container titles from in-page parents plus one follow-up
+    /// query for parents outside the page.
+    async fn summaries_for_rows(
+        &self,
+        rows: Vec<ListResourceRow>,
+    ) -> Result<Vec<ResourceSummary>, StoreError> {
+        let ids: Vec<ResourceId> = rows
+            .iter()
+            .map(|row| Self::thing_to_resource_id(&row.id))
+            .collect::<Result<_, _>>()?;
+
+        // Creator edges for this page's rows only; per-resource order comes
+        // from the `order` field, re-sorted after grouping.
+        let edge_things: Vec<Thing> = ids
+            .iter()
+            .map(|id| Thing::from(Self::resource_key(*id)))
+            .collect();
+        let mut response = self
+            .db
+            .query(
+                "SELECT out, order, credited_as, in.name AS name FROM created \
+                 WHERE out IN $ids ORDER BY order",
+            )
+            .bind(("ids", edge_things))
+            .await
+            .map_err(map_err)?;
+        let edge_rows: Vec<ListCreatorEdgeRow> = response.take(0).map_err(map_err)?;
+
+        let mut names_by_resource: HashMap<ResourceId, Vec<(u32, String)>> = HashMap::new();
+        for edge in edge_rows {
+            let resource_id = Self::thing_to_resource_id(&edge.out)?;
+            let credited_as = match edge.credited_as {
+                Some(s) => Some(
+                    NonEmptyStr::try_new(s)
+                        .map_err(|e| StoreError::invalid(e.to_string()))?,
+                ),
+                None => None,
+            };
+            let label = creator_label_name(credited_as.as_ref(), &edge.name);
+            names_by_resource
+                .entry(resource_id)
+                .or_default()
+                .push((edge.order, label));
+        }
+        for names in names_by_resource.values_mut() {
+            names.sort_by_key(|(order, _)| *order);
+        }
+
+        let mut title_by_id: HashMap<ResourceId, NonEmptyStr> = HashMap::with_capacity(rows.len());
+        for (row, id) in rows.iter().zip(&ids) {
+            title_by_id.insert(*id, row.title.clone());
+        }
+
+        // Parents usually live outside the page (they must exist before their
+        // children), so resolve container titles the page itself missed with
+        // one follow-up query.
+        let mut missing: Vec<ResourceId> = Vec::new();
+        for row in &rows {
+            if let Some(parent) = &row.parent {
+                let parent_id = Self::thing_to_resource_id(parent)?;
+                if !title_by_id.contains_key(&parent_id) && !missing.contains(&parent_id) {
+                    missing.push(parent_id);
+                }
+            }
+        }
+        if !missing.is_empty() {
+            let parent_things: Vec<Thing> = missing
+                .iter()
+                .map(|id| Thing::from(Self::resource_key(*id)))
+                .collect();
+            let mut response = self
+                .db
+                .query("SELECT id, title FROM resource WHERE id IN $ids")
+                .bind(("ids", parent_things))
+                .await
+                .map_err(map_err)?;
+            let title_rows: Vec<ContainerTitleRow> = response.take(0).map_err(map_err)?;
+            for title_row in title_rows {
+                title_by_id.insert(
+                    Self::thing_to_resource_id(&title_row.id)?,
+                    title_row.title,
+                );
+            }
+        }
+
+        let mut summaries = Vec::with_capacity(rows.len());
+        for (row, id) in rows.into_iter().zip(ids) {
+            let names: Vec<String> = names_by_resource
+                .remove(&id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(_, name)| name)
+                .collect();
+            let container_title = match row.parent {
+                Some(ref thing) => {
+                    let parent_id = Self::thing_to_resource_id(thing)?;
+                    title_by_id.get(&parent_id).cloned()
+                }
+                None => None,
+            };
+            summaries.push(ResourceSummary {
+                id,
+                kind: row.kind,
+                title: row.title,
+                creators_label: format_creators_label(&names),
+                published_label: published_label_from(row.published.as_ref()),
+                publisher: row.publisher,
+                container_title,
+            });
+        }
+        Ok(summaries)
     }
 }
 
@@ -529,114 +651,84 @@ impl Store for SurrealStore {
             None
         };
 
-        let ids: Vec<ResourceId> = rows
-            .iter()
-            .map(|row| Self::thing_to_resource_id(&row.id))
-            .collect::<Result<_, _>>()?;
-
-        // Creator edges for this page's rows only; per-resource order comes
-        // from the `order` field, re-sorted after grouping.
-        let edge_things: Vec<Thing> = ids
-            .iter()
-            .map(|id| Thing::from(Self::resource_key(*id)))
-            .collect();
-        let mut response = self
-            .db
-            .query(
-                "SELECT out, order, credited_as, in.name AS name FROM created \
-                 WHERE out IN $ids ORDER BY order",
-            )
-            .bind(("ids", edge_things))
-            .await
-            .map_err(map_err)?;
-        let edge_rows: Vec<ListCreatorEdgeRow> = response.take(0).map_err(map_err)?;
-
-        let mut names_by_resource: HashMap<ResourceId, Vec<(u32, String)>> = HashMap::new();
-        for edge in edge_rows {
-            let resource_id = Self::thing_to_resource_id(&edge.out)?;
-            let credited_as = match edge.credited_as {
-                Some(s) => Some(
-                    NonEmptyStr::try_new(s)
-                        .map_err(|e| StoreError::invalid(e.to_string()))?,
-                ),
-                None => None,
-            };
-            let label = creator_label_name(credited_as.as_ref(), &edge.name);
-            names_by_resource
-                .entry(resource_id)
-                .or_default()
-                .push((edge.order, label));
-        }
-        for names in names_by_resource.values_mut() {
-            names.sort_by_key(|(order, _)| *order);
-        }
-
-        let mut title_by_id: HashMap<ResourceId, NonEmptyStr> = HashMap::with_capacity(rows.len());
-        for (row, id) in rows.iter().zip(&ids) {
-            title_by_id.insert(*id, row.title.clone());
-        }
-
-        // Parents usually live outside the page (they must exist before their
-        // children), so resolve container titles the page itself missed with
-        // one follow-up query.
-        let mut missing: Vec<ResourceId> = Vec::new();
-        for row in &rows {
-            if let Some(parent) = &row.parent {
-                let parent_id = Self::thing_to_resource_id(parent)?;
-                if !title_by_id.contains_key(&parent_id) && !missing.contains(&parent_id) {
-                    missing.push(parent_id);
-                }
-            }
-        }
-        if !missing.is_empty() {
-            let parent_things: Vec<Thing> = missing
-                .iter()
-                .map(|id| Thing::from(Self::resource_key(*id)))
-                .collect();
-            let mut response = self
-                .db
-                .query("SELECT id, title FROM resource WHERE id IN $ids")
-                .bind(("ids", parent_things))
-                .await
-                .map_err(map_err)?;
-            let title_rows: Vec<ContainerTitleRow> = response.take(0).map_err(map_err)?;
-            for title_row in title_rows {
-                title_by_id.insert(
-                    Self::thing_to_resource_id(&title_row.id)?,
-                    title_row.title,
-                );
-            }
-        }
-
-        let mut summaries = Vec::with_capacity(rows.len());
-        for (row, id) in rows.into_iter().zip(ids) {
-            let names: Vec<String> = names_by_resource
-                .remove(&id)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(_, name)| name)
-                .collect();
-            let container_title = match row.parent {
-                Some(ref thing) => {
-                    let parent_id = Self::thing_to_resource_id(thing)?;
-                    title_by_id.get(&parent_id).cloned()
-                }
-                None => None,
-            };
-            summaries.push(ResourceSummary {
-                id,
-                kind: row.kind,
-                title: row.title,
-                creators_label: format_creators_label(&names),
-                published_label: published_label_from(row.published.as_ref()),
-                publisher: row.publisher,
-                container_title,
-            });
-        }
+        let rows = self.summaries_for_rows(rows).await?;
         Ok(ResourcePage {
-            rows: summaries,
+            rows,
             next_before,
         })
+    }
+
+    async fn list_resources_sorted_page(
+        &self,
+        sort: ResourceSort,
+        direction: SortDirection,
+        offset: u64,
+        limit: u32,
+    ) -> Result<SortedResourcePage, StoreError> {
+        // ORDER BY takes field paths, not expressions, so computed keys are
+        // aliased projections the clause can name; ASC/DESC cannot come from
+        // a parameter, so the literal is chosen by the enum below, never
+        // from input. Ties break newest-first (id descending) and rows
+        // without the sort field land at the no-data end for the direction
+        // via the boolean pre-key (`sort_missing`).
+        let dir = match direction {
+            SortDirection::Ascending => "ASC",
+            SortDirection::Descending => "DESC",
+        };
+        let fetch_limit = (u64::from(limit) + 1).min(u64::from(u32::MAX)) as usize;
+        let sql = match sort {
+            ResourceSort::Title => format!(
+                "SELECT id, kind, title, publisher, published, parent FROM resource \
+                 ORDER BY title COLLATE {dir}, id DESC LIMIT $limit START $offset"
+            ),
+            ResourceSort::Published => format!(
+                "SELECT id, kind, title, publisher, published, parent, \
+                        published.instant AS sort_key, \
+                        (IF published THEN false ELSE true END) AS sort_missing \
+                 FROM resource \
+                 ORDER BY sort_missing {dir}, sort_key {dir}, id DESC \
+                 LIMIT $limit START $offset"
+            ),
+            // The primary-creator key needs the first created edge per row:
+            // a correlated subquery aliases it, the middle level computes
+            // the family-name key over that alias, and the outer level adds
+            // the no-data marker — one level per reference so the edge query
+            // runs once per row.
+            ResourceSort::PrimaryCreator => format!(
+                "SELECT id, kind, title, publisher, published, parent, sort_key, \
+                        (IF sort_key THEN false ELSE true END) AS sort_missing \
+                 FROM ( \
+                     SELECT *, \
+                         (IF first[0].credited_as THEN \
+                              array::last(string::split(first[0].credited_as, ' ')) \
+                          ELSE IF first[0].name.last THEN first[0].name.last \
+                          ELSE IF first[0].name.first THEN first[0].name.first \
+                          ELSE NONE END) AS sort_key \
+                     FROM ( \
+                         SELECT *, (SELECT order, credited_as, in.name AS name FROM created \
+                              WHERE out = $parent.id ORDER BY order LIMIT 1) AS first \
+                         FROM resource \
+                     ) \
+                 ) \
+                 ORDER BY sort_missing {dir}, sort_key COLLATE {dir}, id DESC \
+                 LIMIT $limit START $offset"
+            ),
+        };
+        let mut response = self
+            .db
+            .query(sql)
+            .bind(("limit", fetch_limit))
+            .bind(("offset", offset))
+            .await
+            .map_err(map_err)?;
+        let mut rows: Vec<ListResourceRow> = response.take(0).map_err(map_err)?;
+        // One extra row decides next_offset exactly, mirroring the cursor
+        // page; an offset past the end yields an empty page.
+        let has_more = rows.len() > limit as usize;
+        rows.truncate(limit as usize);
+        let next_offset = has_more.then(|| offset.saturating_add(u64::from(limit)));
+        let rows = self.summaries_for_rows(rows).await?;
+        Ok(SortedResourcePage { rows, next_offset })
     }
 }
 
@@ -644,8 +736,8 @@ impl Store for SurrealStore {
 mod tests {
     use super::*;
     use oeuvre_core::{
-        BibliographicDate, CreatorRole, CreatorSpec, NewResource, NewSeries, ResourceKind, Store,
-        UtcMillis,
+        BibliographicDate, CreatorRole, CreatorSpec, NewResource, NewSeries, ResourceKind,
+        ResourceSort, SortDirection, Store, UtcMillis,
     };
 
     const UNIX_MS_2021_01_01_UTC: i64 = 1_609_459_200_000;
@@ -773,6 +865,339 @@ mod tests {
         assert!(page.rows.is_empty());
         assert!(page.next_before.is_none());
     }
+
+    #[tokio::test]
+    async fn sorted_title_pages_walk_case_insensitive_order() {
+        let store = SurrealStore::open_memory().await.unwrap();
+
+        let author = store
+            .create_person(
+                Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let journal = store
+            .create_resource(NewResource {
+                kind: ResourceKind::Journal,
+                title: NonEmptyStr::try_new("Speculum").unwrap(),
+                creators: vec![],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap();
+
+        // Mixed case pins the ordering intent: "Beta" must land between
+        // "alpha" and "charlie", not before "alpha" the way a case-sensitive
+        // scan would sort it.
+        for title in ["alpha waves", "Beta modes", "charlie nodes"] {
+            page_article(&store, author.id, journal.id, title).await;
+        }
+
+        let first = store
+            .list_resources_sorted_page(ResourceSort::Title, SortDirection::Ascending, 0, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .rows
+                .iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha waves", "Beta modes"]
+        );
+        assert_eq!(first.next_offset, Some(2));
+        for row in &first.rows {
+            assert_eq!(row.kind, ResourceKind::JournalArticle);
+            assert_eq!(row.creators_label, "St. Augustine");
+            assert_eq!(
+                row.container_title.as_ref().map(NonEmptyStr::as_str),
+                Some("Speculum")
+            );
+        }
+
+        let second = store
+            .list_resources_sorted_page(ResourceSort::Title, SortDirection::Ascending, 2, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            second
+                .rows
+                .iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>(),
+            ["charlie nodes", "Speculum"]
+        );
+        assert_eq!(second.next_offset, None);
+    }
+    /// A resource with explicit creators (credited strings allowed) and an
+    /// explicit published instant, the two levers the sorted-order tests
+    /// need; the label is a free-form display string.
+    async fn sortable_resource(
+        store: &SurrealStore,
+        authors: Vec<(PersonId, Option<&str>)>,
+        title: &str,
+        published: Option<(i64, &str)>,
+    ) -> Resource {
+        store
+            .create_resource(NewResource {
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new(title).unwrap(),
+                creators: authors
+                    .into_iter()
+                    .map(|(person_id, credited_as)| CreatorSpec {
+                        person_id,
+                        role: CreatorRole::Author,
+                        credited_as: credited_as.map(|c| NonEmptyStr::try_new(c).unwrap()),
+                    })
+                    .collect(),
+                publisher: None,
+                published: published.map(|(ms, label)| {
+                    BibliographicDate::try_new(
+                        UtcMillis::from_unix_ms(ms),
+                        Some(NonEmptyStr::try_new(label).unwrap()),
+                    )
+                    .unwrap()
+                }),
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn sortable_container(store: &SurrealStore, title: &str) -> Resource {
+        store
+            .create_resource(NewResource {
+                kind: ResourceKind::Journal,
+                title: NonEmptyStr::try_new(title).unwrap(),
+                creators: vec![],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    fn sorted_titles(page: &oeuvre_core::SortedResourcePage) -> Vec<String> {
+        page.rows
+            .iter()
+            .map(|row| row.title.as_str().to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn sorted_primary_creator_keys_on_family_name_from_the_edges() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let hopper = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let lovelace = store
+            .create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let augustine = store
+            .create_person(
+                Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // Two authors pin "primary": the order key must come from the first
+        // creator only (Lovelace, not Hopper).
+        let coauthored = sortable_resource(
+            &store,
+            vec![(lovelace.id, None), (hopper.id, None)],
+            "Citation basics",
+            None,
+        )
+        .await;
+        let by_hopper = sortable_resource(&store, vec![(hopper.id, None)], "Compiler origins", None).await;
+        let by_augustine =
+            sortable_resource(&store, vec![(augustine.id, None)], "Confessions", None).await;
+        // A credited string keys on its last word, tying the coauthored book
+        // on "lovelace" so the newest-first tiebreak shows.
+        let credited = sortable_resource(
+            &store,
+            vec![(lovelace.id, Some("A. Lovelace"))],
+            "Annotated algorithms",
+            None,
+        )
+        .await;
+        let container = sortable_container(&store, "Speculum").await;
+
+        // Creation can tie within one ULID millisecond, so derive the
+        // lovelace pair order from the ids the contract ties on.
+        let mut lovelace_pair = [coauthored.id, credited.id];
+        lovelace_pair.sort_by_key(|id| std::cmp::Reverse(id.as_ulid()));
+        let title_of = |id: &ResourceId| -> String {
+            [&coauthored, &by_hopper, &by_augustine, &credited, &container]
+                .iter()
+                .find(|r| r.id == *id)
+                .map(|r| r.title.as_str().to_owned())
+                .unwrap_or_default()
+        };
+        let expected: Vec<String> = [
+            "Confessions".to_owned(),
+            "Compiler origins".to_owned(),
+            title_of(&lovelace_pair[0]),
+            title_of(&lovelace_pair[1]),
+            "Speculum".to_owned(),
+        ]
+        .to_vec();
+
+        let first = store
+            .list_resources_sorted_page(
+                ResourceSort::PrimaryCreator,
+                SortDirection::Ascending,
+                0,
+                3,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&first), expected[..3]);
+        assert_eq!(first.next_offset, Some(3));
+
+        let second = store
+            .list_resources_sorted_page(
+                ResourceSort::PrimaryCreator,
+                SortDirection::Ascending,
+                3,
+                3,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&second), expected[3..]);
+        assert_eq!(second.next_offset, None);
+
+        // Labels still resolve in sorted pages, whichever page holds the row.
+        let coauthored_row = first
+            .rows
+            .iter()
+            .chain(second.rows.iter())
+            .find(|row| row.id == coauthored.id)
+            .expect("coauthored row appears on one of the pages");
+        assert_eq!(coauthored_row.creators_label, "Ada Lovelace; Grace Hopper");
+    }
+
+    #[tokio::test]
+    async fn sorted_published_orders_by_instant_not_label() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // Labels are display strings, not chronological keys: "Zzz era"
+        // carries the oldest instant and would sort last under string order.
+        for (title, label, instant) in [
+            ("Modern notes", "1999", 1_900_000_000_000),
+            ("Middle era", "B-movie era", 1_500_000_000_000),
+            ("Old chronicle", "Zzz era", 1_000_000_000_000),
+        ] {
+            sortable_resource(&store, vec![(grace.id, None)], title, Some((instant, label))).await;
+        }
+        // The container has no date, so it lands last in ascending order.
+        sortable_container(&store, "Speculum").await;
+
+        let page = store
+            .list_resources_sorted_page(ResourceSort::Published, SortDirection::Ascending, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            sorted_titles(&page),
+            ["Old chronicle", "Middle era", "Modern notes", "Speculum"]
+        );
+        assert_eq!(page.next_offset, None);
+    }
+
+    #[tokio::test]
+    async fn sorted_descending_reverses_keys_and_moves_no_data_rows_first() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let hopper = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let lovelace = store
+            .create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        sortable_resource(&store, vec![(lovelace.id, None)], "Citation basics", None).await;
+        sortable_resource(&store, vec![(hopper.id, None)], "Compiler origins", None).await;
+        // No creators: last ascending, first descending.
+        sortable_container(&store, "Speculum").await;
+
+        let page = store
+            .list_resources_sorted_page(
+                ResourceSort::PrimaryCreator,
+                SortDirection::Descending,
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sorted_titles(&page),
+            ["Speculum", "Citation basics", "Compiler origins"]
+        );
+        assert_eq!(page.next_offset, None);
+    }
+
+    #[tokio::test]
+    async fn sorted_pages_at_or_past_the_end_yield_empty_pages() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let page = store
+            .list_resources_sorted_page(ResourceSort::Title, SortDirection::Ascending, 0, 3)
+            .await
+            .unwrap();
+        assert!(page.rows.is_empty());
+        assert_eq!(page.next_offset, None);
+
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        sortable_resource(&store, vec![(grace.id, None)], "Only book", None).await;
+        let past = store
+            .list_resources_sorted_page(ResourceSort::Title, SortDirection::Ascending, 100, 3)
+            .await
+            .unwrap();
+        assert!(past.rows.is_empty());
+        assert_eq!(past.next_offset, None);
+    }
+
 
     #[tokio::test]
     async fn person_crud_round_trip_memory() {
