@@ -2,7 +2,7 @@
 
 use crate::{
     Name, NewResource, NewSeries, Person, PersonError, PersonId, Resource, ResourceError,
-    ResourceId, ResourcePage, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
+    ResourceId, ResourcePage, ResourceQuery, ResourceSummary, Series, SeriesId,
     SortedResourcePage,
 };
 
@@ -71,10 +71,11 @@ pub trait Store: Send + Sync + 'static {
         limit: u32,
     ) -> Result<ResourcePage, StoreError>;
 
-    /// One page of summary rows in `sort` + `direction` order: the database
-    /// query owns the ordering, shells only walk offsets.
+    /// One page of summary rows for `query`: the database query owns the
+    /// ordering, shells only walk offsets.
     ///
     /// Order contract, shared by every adapter:
+    /// - `query.sort: None` orders newest-first by id (descending);
     /// - title rows order case-insensitively;
     /// - primary-creator rows order by the first creator's family name;
     /// - published rows order by the chronological instant;
@@ -87,17 +88,16 @@ pub trait Store: Send + Sync + 'static {
     /// the following page — only when more rows may exist. An offset past
     /// the end yields an empty page.
     ///
-    /// Backends that cannot sort in the query inherit an unsupported error.
-    async fn list_resources_sorted_page(
+    /// Backends that cannot order in the query inherit an unsupported error.
+    async fn list_resources_query_page(
         &self,
-        sort: ResourceSort,
-        direction: SortDirection,
+        query: &ResourceQuery,
         offset: u64,
         limit: u32,
     ) -> Result<SortedResourcePage, StoreError> {
-        let _ = (sort, direction, offset, limit);
+        let _ = (query, offset, limit);
         Err(StoreError::new(
-            "list_resources_sorted_page not supported by this store",
+            "list_resources_query_page not supported by this store",
         ))
     }
 }

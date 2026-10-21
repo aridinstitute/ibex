@@ -1,15 +1,25 @@
 #![cfg(feature = "testing")]
 
-//! Store-port tests for `list_resources_sorted_page`: the order contract a
+//! Store-port tests for `list_resources_query_page`: the order contract a
 //! shell page may rely on, independent of which adapter serves it.
 
-use oeuvre_app::command::{CreatePerson, CreateResource, ListResourcesSortedPage};
+use oeuvre_app::command::{CreatePerson, CreateResource, ListResourcesQueryPage};
 use oeuvre_app::testing::{MemorySink, MemoryStore};
 use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
 use oeuvre_core::{
     BibliographicDate, CreatorRole, CreatorSpec, Name, NewResource, NonEmptyStr, PersonId,
-    ResourceId, ResourceKind, ResourceSort, SortDirection, Store, UtcMillis,
+    ResourceId, ResourceKind, ResourceQuery, ResourceSort, SortDirection, Store, UtcMillis,
 };
+
+fn sorted(field: ResourceSort, direction: SortDirection) -> ResourceQuery {
+    ResourceQuery {
+        sort: Some((field, direction)),
+    }
+}
+
+fn newest_first() -> ResourceQuery {
+    ResourceQuery { sort: None }
+}
 
 fn book_with(authors: Vec<(PersonId, Option<&str>)>, title: &str) -> NewResource {
     let mut new = book(None, title);
@@ -104,17 +114,64 @@ async fn title_ascending_walks_case_insensitive_pages() {
         .expect("create container");
 
     let first = store
-        .list_resources_sorted_page(ResourceSort::Title, SortDirection::Ascending, 0, 2)
+        .list_resources_query_page(
+            &sorted(ResourceSort::Title, SortDirection::Ascending),
+            0,
+            2,
+        )
         .await
         .expect("first title page");
     assert_eq!(titles(&first), ["alpha waves", "Beta modes"]);
     assert_eq!(first.next_offset, Some(2));
 
     let second = store
-        .list_resources_sorted_page(ResourceSort::Title, SortDirection::Ascending, 2, 2)
+        .list_resources_query_page(
+            &sorted(ResourceSort::Title, SortDirection::Ascending),
+            2,
+            2,
+        )
         .await
         .expect("second title page");
     assert_eq!(titles(&second), ["charlie nodes", "Journal of Nothing"]);
+    assert_eq!(second.next_offset, None);
+}
+
+#[tokio::test]
+async fn unsorted_query_walks_newest_first_by_id() {
+    let store = MemoryStore::new();
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+
+    let mut created: Vec<ResourceId> = Vec::new();
+    for title in ["alpha waves", "Beta modes", "charlie nodes"] {
+        let id = store
+            .create_resource(book(Some(grace), title))
+            .await
+            .expect("create resource")
+            .id;
+        created.push(id);
+    }
+    // `sort: None` is the default listing order — newest first by id — and
+    // ids settle same-millisecond ties, so the expectation follows the ids.
+    created.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+
+    let first = store
+        .list_resources_query_page(&newest_first(), 0, 2)
+        .await
+        .expect("first unsorted page");
+    assert_eq!(
+        first.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        &created[..2]
+    );
+    assert_eq!(first.next_offset, Some(2));
+
+    let second = store
+        .list_resources_query_page(&newest_first(), 2, 2)
+        .await
+        .expect("second unsorted page");
+    assert_eq!(
+        second.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        &created[2..]
+    );
     assert_eq!(second.next_offset, None);
 }
 
@@ -191,14 +248,22 @@ async fn primary_creator_ascending_keys_on_first_creators_family_name() {
     ];
 
     let first = store
-        .list_resources_sorted_page(ResourceSort::PrimaryCreator, SortDirection::Ascending, 0, 3)
+        .list_resources_query_page(
+            &sorted(ResourceSort::PrimaryCreator, SortDirection::Ascending),
+            0,
+            3,
+        )
         .await
         .expect("first primary-creator page");
     assert_eq!(titles(&first), expected[..3]);
     assert_eq!(first.next_offset, Some(3));
 
     let second = store
-        .list_resources_sorted_page(ResourceSort::PrimaryCreator, SortDirection::Ascending, 3, 3)
+        .list_resources_query_page(
+            &sorted(ResourceSort::PrimaryCreator, SortDirection::Ascending),
+            3,
+            3,
+        )
         .await
         .expect("second primary-creator page");
     assert_eq!(titles(&second), expected[3..]);
@@ -229,7 +294,11 @@ async fn published_ascending_orders_by_instant_not_label() {
         .expect("create container");
 
     let page = store
-        .list_resources_sorted_page(ResourceSort::Published, SortDirection::Ascending, 0, 10)
+        .list_resources_query_page(
+            &sorted(ResourceSort::Published, SortDirection::Ascending),
+            0,
+            10,
+        )
         .await
         .expect("published page");
     assert_eq!(
@@ -262,9 +331,8 @@ async fn descending_reverses_keys_and_moves_no_data_rows_to_the_front() {
         .expect("create container");
 
     let page = store
-        .list_resources_sorted_page(
-            ResourceSort::PrimaryCreator,
-            SortDirection::Descending,
+        .list_resources_query_page(
+            &sorted(ResourceSort::PrimaryCreator, SortDirection::Descending),
             0,
             10,
         )
@@ -287,7 +355,11 @@ async fn offset_past_the_end_yields_an_empty_page() {
         .expect("create resource");
 
     let page = store
-        .list_resources_sorted_page(ResourceSort::Title, SortDirection::Ascending, 100, 10)
+        .list_resources_query_page(
+            &sorted(ResourceSort::Title, SortDirection::Ascending),
+            100,
+            10,
+        )
         .await
         .expect("page past the end");
     assert!(page.rows.is_empty());
@@ -344,22 +416,16 @@ async fn create_book(state: &AppState, author_id: PersonId, title: &str) {
     };
 }
 
-fn sorted_page_call(
-    sort: ResourceSort,
-    direction: SortDirection,
-    offset: u64,
-    limit: u32,
-) -> Command {
-    Command::ListResourcesSortedPage(ListResourcesSortedPage {
-        sort,
-        direction,
+fn query_page_call(query: ResourceQuery, offset: u64, limit: u32) -> Command {
+    Command::ListResourcesQueryPage(ListResourcesQueryPage {
+        query,
         offset,
         limit,
     })
 }
 
 #[tokio::test]
-async fn sorted_pages_walk_the_library_through_the_command() {
+async fn query_pages_walk_the_library_through_the_command() {
     let sink = MemorySink::new();
     let state = state_with_sink(&sink);
 
@@ -369,39 +435,37 @@ async fn sorted_pages_walk_the_library_through_the_command() {
     }
     let _ = sink.take();
 
-    let Outcome::ListResourcesSortedPage(first) = state
-        .execute(sorted_page_call(
-            ResourceSort::Title,
-            SortDirection::Ascending,
+    let Outcome::ListResourcesQueryPage(first) = state
+        .execute(query_page_call(
+            sorted(ResourceSort::Title, SortDirection::Ascending),
             0,
             2,
         ))
         .await
         .unwrap()
     else {
-        panic!("expected ListResourcesSortedPage");
+        panic!("expected ListResourcesQueryPage");
     };
     assert_eq!(titles(&first), ["alpha waves", "Beta modes"]);
     assert_eq!(first.next_offset, Some(2));
 
-    let Outcome::ListResourcesSortedPage(second) = state
-        .execute(sorted_page_call(
-            ResourceSort::Title,
-            SortDirection::Ascending,
+    let Outcome::ListResourcesQueryPage(second) = state
+        .execute(query_page_call(
+            sorted(ResourceSort::Title, SortDirection::Ascending),
             2,
             2,
         ))
         .await
         .unwrap()
     else {
-        panic!("expected ListResourcesSortedPage");
+        panic!("expected ListResourcesQueryPage");
     };
     assert_eq!(titles(&second), ["charlie nodes"]);
     assert_eq!(second.next_offset, None);
 }
 
 #[tokio::test]
-async fn sorted_page_command_emits_wide_event_fields() {
+async fn query_page_command_emits_wide_event_fields() {
     let sink = MemorySink::new();
     let state = state_with_sink(&sink);
 
@@ -411,23 +475,22 @@ async fn sorted_page_command_emits_wide_event_fields() {
     }
     let _ = sink.take();
 
-    let Outcome::ListResourcesSortedPage(_) = state
-        .execute(sorted_page_call(
-            ResourceSort::PrimaryCreator,
-            SortDirection::Descending,
+    let Outcome::ListResourcesQueryPage(_) = state
+        .execute(query_page_call(
+            sorted(ResourceSort::PrimaryCreator, SortDirection::Descending),
             2,
             2,
         ))
         .await
         .unwrap()
     else {
-        panic!("expected ListResourcesSortedPage");
+        panic!("expected ListResourcesQueryPage");
     };
 
     let events = sink.take();
     assert_eq!(events.len(), 1);
     let ev = &events[0];
-    assert_eq!(ev.command(), "list_resources_sorted_page");
+    assert_eq!(ev.command(), "list_resources_query_page");
     assert_eq!(ev.status(), Status::Ok);
     assert_eq!(
         ev.get("resource.sort_field"),
@@ -442,15 +505,36 @@ async fn sorted_page_command_emits_wide_event_fields() {
         ev.get("resource.page_limit"),
         Some(&FieldValue::from(2u32))
     );
+
+    // The default order carries no sort field, so the event stays honest
+    // about what drove the listing.
+    let Outcome::ListResourcesQueryPage(_) = state
+        .execute(query_page_call(newest_first(), 0, 2))
+        .await
+        .unwrap()
+    else {
+        panic!("expected ListResourcesQueryPage");
+    };
+    let events = sink.take();
+    assert_eq!(events.len(), 1);
+    let ev = &events[0];
+    assert_eq!(ev.get("resource.sort_field"), None);
+    assert_eq!(ev.get("resource.sort_direction"), None);
+    assert_eq!(ev.get("resource.page_offset"), Some(&FieldValue::from(0u64)));
+    assert_eq!(ev.get("resource.page_limit"), Some(&FieldValue::from(2u32)));
 }
 
 #[tokio::test]
-async fn sorted_page_zero_limit_is_invalid() {
+async fn query_page_zero_limit_is_invalid() {
     let sink = MemorySink::new();
     let state = state_with_sink(&sink);
 
     let err = state
-        .execute(sorted_page_call(ResourceSort::Title, SortDirection::Ascending, 0, 0))
+        .execute(query_page_call(
+            sorted(ResourceSort::Title, SortDirection::Ascending),
+            0,
+            0,
+        ))
         .await
         .unwrap_err();
     assert!(matches!(err, CommandError::Invalid(_)));

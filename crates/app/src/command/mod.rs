@@ -10,7 +10,7 @@ pub use person::{
 };
 pub use resource::{
     CreateResource, GetResource, GetResourceDetail, ListResources, ListResourcesPage,
-    ListResourcesSortedPage,
+    ListResourcesQueryPage,
 };
 pub use series::CreateSeries;
 
@@ -39,7 +39,7 @@ pub enum Command {
     GetResourceDetail(GetResourceDetail),
     ListResources(ListResources),
     ListResourcesPage(ListResourcesPage),
-    ListResourcesSortedPage(ListResourcesSortedPage),
+    ListResourcesQueryPage(ListResourcesQueryPage),
 }
 
 /// The result of a successful command. One variant per [`Command`] variant.
@@ -59,7 +59,7 @@ pub enum Outcome {
     GetResourceDetail(ResourceDetail),
     ListResources(Vec<ResourceSummary>),
     ListResourcesPage(ResourcePage),
-    ListResourcesSortedPage(SortedResourcePage),
+    ListResourcesQueryPage(SortedResourcePage),
 }
 
 /// A command plus per-call transport context.
@@ -106,7 +106,7 @@ impl Command {
             Command::GetResourceDetail(_) => GetResourceDetail::NAME,
             Command::ListResources(_) => ListResources::NAME,
             Command::ListResourcesPage(_) => ListResourcesPage::NAME,
-            Command::ListResourcesSortedPage(_) => ListResourcesSortedPage::NAME,
+            Command::ListResourcesQueryPage(_) => ListResourcesQueryPage::NAME,
         }
     }
 }
@@ -147,7 +147,7 @@ pub(crate) async fn dispatch(
         Command::GetResourceDetail(c) => drive(c, state, ev).await,
         Command::ListResources(c) => drive(c, state, ev).await,
         Command::ListResourcesPage(c) => drive(c, state, ev).await,
-        Command::ListResourcesSortedPage(c) => drive(c, state, ev).await,
+        Command::ListResourcesQueryPage(c) => drive(c, state, ev).await,
     }
 }
 

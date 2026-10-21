@@ -6,7 +6,9 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use oeuvre_core::{ResourceId, ResourcePage, ResourceSort, ResourceSummary, SortDirection};
+use oeuvre_core::{
+    ResourceId, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, SortDirection,
+};
 
 use crate::db::DbWorker;
 use crate::detail::{render_panel, DetailFetch, DetailView};
@@ -28,11 +30,12 @@ const CELL_TEXT_SIZE: Pixels = px(13.);
 const HEADER_TEXT_SIZE: Pixels = px(11.);
 
 /// Continuation for the next scroll page, keyed to the listing mode: the
-/// newest-first listing walks id cursors, a sorted listing walks offsets.
+/// plain newest-first listing walks id cursors, a queried listing walks
+/// offsets.
 #[derive(Debug, Clone, Copy)]
 enum PageCursor {
     NewestFirst(Option<ResourceId>),
-    Sorted(Option<u64>),
+    Query(Option<u64>),
 }
 
 pub struct LibraryDelegate {
@@ -83,9 +86,15 @@ impl LibraryDelegate {
         cx.spawn_in(window, async move |table, window| {
             let reply = match sort {
                 Some((field, direction)) => worker
-                    .list_sorted_page(field, direction, 0, PAGE_SIZE)
+                    .list_query_page(
+                        ResourceQuery {
+                            sort: Some((field, direction)),
+                        },
+                        0,
+                        PAGE_SIZE,
+                    )
                     .await
-                    .map(|page| (page.rows, PageCursor::Sorted(page.next_offset))),
+                    .map(|page| (page.rows, PageCursor::Query(page.next_offset))),
                 None => worker
                     .list_page(None, PAGE_SIZE)
                     .await
@@ -279,7 +288,7 @@ impl TableDelegate for LibraryDelegate {
         !self.loading
             && match self.next {
                 PageCursor::NewestFirst(next) => next.is_some(),
-                PageCursor::Sorted(next) => next.is_some(),
+                PageCursor::Query(next) => next.is_some(),
             }
     }
 
@@ -293,7 +302,7 @@ impl TableDelegate for LibraryDelegate {
         if self.loading
             || !matches!(
                 self.next,
-                PageCursor::NewestFirst(Some(_)) | PageCursor::Sorted(Some(_))
+                PageCursor::NewestFirst(Some(_)) | PageCursor::Query(Some(_))
             )
         {
             return;
@@ -320,16 +329,24 @@ impl TableDelegate for LibraryDelegate {
                 })
                 .detach();
             }
-            (Some((field, direction)), PageCursor::Sorted(Some(offset))) => {
+            (Some((field, direction)), PageCursor::Query(Some(offset))) => {
                 cx.spawn_in(window, async move |table, window| {
-                    let page = worker.list_sorted_page(field, direction, offset, PAGE_SIZE).await;
+                    let page = worker
+                        .list_query_page(
+                            ResourceQuery {
+                                sort: Some((field, direction)),
+                            },
+                            offset,
+                            PAGE_SIZE,
+                        )
+                        .await;
                     _ = table.update_in(window, |table, _window, cx| {
                         let delegate = table.delegate_mut();
                         delegate.loading = false;
                         match page {
                             Ok(page) => {
                                 delegate.rows.extend(page.rows);
-                                delegate.next = PageCursor::Sorted(page.next_offset);
+                                delegate.next = PageCursor::Query(page.next_offset);
                             }
                             Err(err) => delegate.error = Some(err),
                         }

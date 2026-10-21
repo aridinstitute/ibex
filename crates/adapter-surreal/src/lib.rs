@@ -4,8 +4,8 @@ use std::path::Path;
 use oeuvre_core::{
     creator_label_name, format_creators_label, published_label_from, BibliographicDate, Creator,
     CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceId,
-    ResourceKind, ResourcePage, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
-    SortedResourcePage, Store, StoreError, StoreHealth,
+    ResourceKind, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId,
+    SortDirection, SortedResourcePage, Store, StoreError, StoreHealth,
 };
 use serde::{Deserialize, Serialize};
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -658,10 +658,9 @@ impl Store for SurrealStore {
         })
     }
 
-    async fn list_resources_sorted_page(
+    async fn list_resources_query_page(
         &self,
-        sort: ResourceSort,
-        direction: SortDirection,
+        query: &ResourceQuery,
         offset: u64,
         limit: u32,
     ) -> Result<SortedResourcePage, StoreError> {
@@ -671,48 +670,57 @@ impl Store for SurrealStore {
         // from input. Ties break newest-first (id descending) and rows
         // without the sort field land at the no-data end for the direction
         // via the boolean pre-key (`sort_missing`).
-        let dir = match direction {
-            SortDirection::Ascending => "ASC",
-            SortDirection::Descending => "DESC",
-        };
         let fetch_limit = (u64::from(limit) + 1).min(u64::from(u32::MAX)) as usize;
-        let sql = match sort {
-            ResourceSort::Title => format!(
-                "SELECT id, kind, title, publisher, published, parent FROM resource \
-                 ORDER BY title COLLATE {dir}, id DESC LIMIT $limit START $offset"
-            ),
-            ResourceSort::Published => format!(
-                "SELECT id, kind, title, publisher, published, parent, \
-                        published.instant AS sort_key, \
-                        (IF published THEN false ELSE true END) AS sort_missing \
-                 FROM resource \
-                 ORDER BY sort_missing {dir}, sort_key {dir}, id DESC \
-                 LIMIT $limit START $offset"
-            ),
+        let sql = match query.sort {
+            // The default listing order, paged by offset instead of cursor.
+            None => "SELECT id, kind, title, publisher, published, parent FROM resource \
+                     ORDER BY id DESC LIMIT $limit START $offset"
+                .to_owned(),
+            Some((ResourceSort::Title, direction)) => {
+                let dir = dir_literal(direction);
+                format!(
+                    "SELECT id, kind, title, publisher, published, parent FROM resource \
+                     ORDER BY title COLLATE {dir}, id DESC LIMIT $limit START $offset"
+                )
+            }
+            Some((ResourceSort::Published, direction)) => {
+                let dir = dir_literal(direction);
+                format!(
+                    "SELECT id, kind, title, publisher, published, parent, \
+                            published.instant AS sort_key, \
+                            (IF published THEN false ELSE true END) AS sort_missing \
+                     FROM resource \
+                     ORDER BY sort_missing {dir}, sort_key {dir}, id DESC \
+                     LIMIT $limit START $offset"
+                )
+            }
             // The primary-creator key needs the first created edge per row:
             // a correlated subquery aliases it, the middle level computes
             // the family-name key over that alias, and the outer level adds
             // the no-data marker — one level per reference so the edge query
             // runs once per row.
-            ResourceSort::PrimaryCreator => format!(
-                "SELECT id, kind, title, publisher, published, parent, sort_key, \
-                        (IF sort_key THEN false ELSE true END) AS sort_missing \
-                 FROM ( \
-                     SELECT *, \
-                         (IF first[0].credited_as THEN \
-                              array::last(string::split(first[0].credited_as, ' ')) \
-                          ELSE IF first[0].name.last THEN first[0].name.last \
-                          ELSE IF first[0].name.first THEN first[0].name.first \
-                          ELSE NONE END) AS sort_key \
+            Some((ResourceSort::PrimaryCreator, direction)) => {
+                let dir = dir_literal(direction);
+                format!(
+                    "SELECT id, kind, title, publisher, published, parent, sort_key, \
+                            (IF sort_key THEN false ELSE true END) AS sort_missing \
                      FROM ( \
-                         SELECT *, (SELECT order, credited_as, in.name AS name FROM created \
-                              WHERE out = $parent.id ORDER BY order LIMIT 1) AS first \
-                         FROM resource \
+                         SELECT *, \
+                             (IF first[0].credited_as THEN \
+                                  array::last(string::split(first[0].credited_as, ' ')) \
+                              ELSE IF first[0].name.last THEN first[0].name.last \
+                              ELSE IF first[0].name.first THEN first[0].name.first \
+                              ELSE NONE END) AS sort_key \
+                         FROM ( \
+                             SELECT *, (SELECT order, credited_as, in.name AS name FROM created \
+                                  WHERE out = $parent.id ORDER BY order LIMIT 1) AS first \
+                             FROM resource \
+                         ) \
                      ) \
-                 ) \
-                 ORDER BY sort_missing {dir}, sort_key COLLATE {dir}, id DESC \
-                 LIMIT $limit START $offset"
-            ),
+                     ORDER BY sort_missing {dir}, sort_key COLLATE {dir}, id DESC \
+                     LIMIT $limit START $offset"
+                )
+            }
         };
         let mut response = self
             .db
@@ -729,6 +737,15 @@ impl Store for SurrealStore {
         let next_offset = has_more.then(|| offset.saturating_add(u64::from(limit)));
         let rows = self.summaries_for_rows(rows).await?;
         Ok(SortedResourcePage { rows, next_offset })
+    }
+}
+
+/// ORDER BY keywords cannot arrive as query parameters, so the direction
+/// enum picks the literal; caller input never reaches the query text.
+fn dir_literal(direction: SortDirection) -> &'static str {
+    match direction {
+        SortDirection::Ascending => "ASC",
+        SortDirection::Descending => "DESC",
     }
 }
 
@@ -900,7 +917,11 @@ mod tests {
         }
 
         let first = store
-            .list_resources_sorted_page(ResourceSort::Title, SortDirection::Ascending, 0, 2)
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::Title, SortDirection::Ascending),
+                0,
+                2,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -922,7 +943,11 @@ mod tests {
         }
 
         let second = store
-            .list_resources_sorted_page(ResourceSort::Title, SortDirection::Ascending, 2, 2)
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::Title, SortDirection::Ascending),
+                2,
+                2,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -997,6 +1022,12 @@ mod tests {
             .collect()
     }
 
+    fn sorted_query(field: ResourceSort, direction: SortDirection) -> ResourceQuery {
+        ResourceQuery {
+            sort: Some((field, direction)),
+        }
+    }
+
     #[tokio::test]
     async fn sorted_primary_creator_keys_on_family_name_from_the_edges() {
         let store = SurrealStore::open_memory().await.unwrap();
@@ -1066,9 +1097,8 @@ mod tests {
         .to_vec();
 
         let first = store
-            .list_resources_sorted_page(
-                ResourceSort::PrimaryCreator,
-                SortDirection::Ascending,
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::PrimaryCreator, SortDirection::Ascending),
                 0,
                 3,
             )
@@ -1078,9 +1108,8 @@ mod tests {
         assert_eq!(first.next_offset, Some(3));
 
         let second = store
-            .list_resources_sorted_page(
-                ResourceSort::PrimaryCreator,
-                SortDirection::Ascending,
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::PrimaryCreator, SortDirection::Ascending),
                 3,
                 3,
             )
@@ -1123,7 +1152,11 @@ mod tests {
         sortable_container(&store, "Speculum").await;
 
         let page = store
-            .list_resources_sorted_page(ResourceSort::Published, SortDirection::Ascending, 0, 10)
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::Published, SortDirection::Ascending),
+                0,
+                10,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -1157,9 +1190,8 @@ mod tests {
         sortable_container(&store, "Speculum").await;
 
         let page = store
-            .list_resources_sorted_page(
-                ResourceSort::PrimaryCreator,
-                SortDirection::Descending,
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::PrimaryCreator, SortDirection::Descending),
                 0,
                 10,
             )
@@ -1176,7 +1208,11 @@ mod tests {
     async fn sorted_pages_at_or_past_the_end_yield_empty_pages() {
         let store = SurrealStore::open_memory().await.unwrap();
         let page = store
-            .list_resources_sorted_page(ResourceSort::Title, SortDirection::Ascending, 0, 3)
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::Title, SortDirection::Ascending),
+                0,
+                3,
+            )
             .await
             .unwrap();
         assert!(page.rows.is_empty());
@@ -1191,11 +1227,58 @@ mod tests {
             .unwrap();
         sortable_resource(&store, vec![(grace.id, None)], "Only book", None).await;
         let past = store
-            .list_resources_sorted_page(ResourceSort::Title, SortDirection::Ascending, 100, 3)
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::Title, SortDirection::Ascending),
+                100,
+                3,
+            )
             .await
             .unwrap();
         assert!(past.rows.is_empty());
         assert_eq!(past.next_offset, None);
+    }
+
+    #[tokio::test]
+    async fn unsorted_query_pages_walk_newest_first() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let mut created: Vec<ResourceId> = Vec::new();
+        for title in ["alpha waves", "Beta modes", "charlie nodes"] {
+            let id = sortable_resource(&store, vec![(grace.id, None)], title, None)
+                .await
+                .id;
+            created.push(id);
+        }
+        // `sort: None` is the default listing order — newest first by id —
+        // and ids settle same-millisecond ties.
+        created.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+
+        let first = store
+            .list_resources_query_page(&ResourceQuery { sort: None }, 0, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            &created[..2]
+        );
+        assert_eq!(first.next_offset, Some(2));
+
+        let second = store
+            .list_resources_query_page(&ResourceQuery { sort: None }, 2, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            &created[2..]
+        );
+        assert_eq!(second.next_offset, None);
     }
 
 

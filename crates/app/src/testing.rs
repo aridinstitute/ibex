@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use oeuvre_core::{
     creator_label_name, format_creators_label, primary_creator_sort_key, published_label_from,
     BibliographicDate, Creator, CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr,
-    Person, PersonId, Resource, ResourceId, ResourceKind, ResourcePage, ResourceSort,
-    ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store, StoreError,
-    StoreHealth,
+    Person, PersonId, Resource, ResourceId, ResourceKind, ResourcePage, ResourceQuery,
+    ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store,
+    StoreError, StoreHealth,
 };
 
 use crate::event::{EventSink, FinishedEvent};
@@ -463,15 +463,28 @@ impl Store for MemoryStore {
         Ok(ResourcePage { rows, next_before })
     }
 
-    async fn list_resources_sorted_page(
+    async fn list_resources_query_page(
         &self,
-        sort: ResourceSort,
-        direction: SortDirection,
+        query: &ResourceQuery,
         offset: u64,
         limit: u32,
     ) -> Result<SortedResourcePage, StoreError> {
         // The order is the contract, so it is built once and windowed.
-        let ids = self.sorted_ids(sort, direction)?;
+        let ids = match query.sort {
+            // The default listing order: newest first by id.
+            None => {
+                let mut ids: Vec<ResourceId> = self
+                    .resources
+                    .lock()
+                    .expect("MemoryStore lock")
+                    .keys()
+                    .copied()
+                    .collect();
+                ids.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+                ids
+            }
+            Some((field, direction)) => self.sorted_ids(field, direction)?,
+        };
         let start = (offset as usize).min(ids.len());
         let end = start.saturating_add(limit as usize).min(ids.len());
         let rows = self.summaries_in_order(&ids[start..end])?;

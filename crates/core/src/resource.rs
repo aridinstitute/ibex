@@ -241,8 +241,21 @@ impl SortDirection {
     }
 }
 
-/// One window of a sorted library listing from
-/// [`Store::list_resources_sorted_page`]: `limit` rows at a 0-based offset
+/// One library listing query: the order rows come back in.
+///
+/// `sort: None` is the default listing order — newest-first by id, the
+/// same order [`Store::list_resources_page`] walks by cursor — while
+/// `Some((field, direction))` applies that field's order contract (see
+/// [`ResourceSort`]). Because this seam pages by offset, every order
+/// composes with one window contract.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResourceQuery {
+    /// Field and direction to order by; `None` orders newest-first.
+    pub sort: Option<(ResourceSort, SortDirection)>,
+}
+
+/// One window of a queried library listing from
+/// [`Store::list_resources_query_page`]: `limit` rows at a 0-based offset
 /// into the ordered list. The database query owns the ordering.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SortedResourcePage {
