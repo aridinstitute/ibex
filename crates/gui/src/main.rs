@@ -1,5 +1,6 @@
 mod db;
 mod detail;
+mod edit;
 mod icons;
 mod kind;
 mod library;

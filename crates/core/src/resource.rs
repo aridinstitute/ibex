@@ -59,6 +59,31 @@ pub enum ParentRule {
 }
 
 impl ResourceKind {
+    /// Every kind, for shells that enumerate the whole set (dropdowns,
+    /// round-trip tests).
+    pub const ALL: [Self; 20] = [
+        Self::Book,
+        Self::JournalArticle,
+        Self::BookSection,
+        Self::ConferencePaper,
+        Self::Preprint,
+        Self::Thesis,
+        Self::Report,
+        Self::Webpage,
+        Self::Dataset,
+        Self::Manuscript,
+        Self::MagazineArticle,
+        Self::NewspaperArticle,
+        Self::ComputerProgram,
+        Self::DictionaryEntry,
+        Self::EncyclopediaArticle,
+        Self::BlogPost,
+        Self::PodcastEpisode,
+        Self::Journal,
+        Self::Podcast,
+        Self::Blog,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Book => "book",
@@ -494,7 +519,7 @@ pub fn published_label_from(published: Option<&BibliographicDate>) -> Option<Non
     published.map(format_published_label)
 }
 
-fn utc_year_from_millis(ms: i64) -> i32 {
+pub fn utc_year_from_millis(ms: i64) -> i32 {
     time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1_000))
         .expect("bibliographic instant within OffsetDateTime range")
         .year()

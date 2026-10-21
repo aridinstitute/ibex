@@ -2,11 +2,13 @@
 //! page requests over channels, so gpui's executor never runs Surreal I/O.
 
 use oeuvre_app::command::{
-    GetResourceDetail, ListPersons, ListResourcesPage, ListResourcesQueryPage,
+    GetResource, GetResourceDetail, ListPersons, ListResourcesPage, ListResourcesQueryPage,
+    UpdateResource,
 };
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
-    Person, ResourceDetail, ResourceId, ResourcePage, ResourceQuery, SortedResourcePage,
+    NewResource, Person, Resource, ResourceDetail, ResourceId, ResourcePage, ResourceQuery,
+    SortedResourcePage,
 };
 use tokio::sync::oneshot;
 
@@ -25,6 +27,15 @@ pub enum DbRequest {
     GetDetail {
         id: ResourceId,
         reply: oneshot::Sender<Result<ResourceDetail, String>>,
+    },
+    GetResource {
+        id: ResourceId,
+        reply: oneshot::Sender<Result<Resource, String>>,
+    },
+    UpdateResource {
+        id: ResourceId,
+        new: NewResource,
+        reply: oneshot::Sender<Result<Resource, String>>,
     },
     ListPersons {
         reply: oneshot::Sender<Result<Vec<Person>, String>>,
@@ -112,6 +123,31 @@ impl DbWorker {
                                     });
                                 let _ = reply.send(result);
                             }
+                            DbRequest::GetResource { id, reply } => {
+                                let result = state
+                                    .execute(Command::GetResource(GetResource { id }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::GetResource(resource) => Ok(resource),
+                                        _ => Err("unexpected outcome from get_resource".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::UpdateResource { id, new, reply } => {
+                                let result = state
+                                    .execute(Command::UpdateResource(UpdateResource {
+                                        id,
+                                        new,
+                                    }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::UpdateResource(resource) => Ok(resource),
+                                        _ => Err("unexpected outcome from update_resource".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
                             DbRequest::ListPersons { reply } => {
                                 let result = state
                                     .execute(Command::ListPersons(ListPersons))
@@ -185,6 +221,33 @@ impl DbWorker {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DbRequest::GetDetail { id, reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    /// Fetch the raw stored record for one resource, for the edit form:
+    /// the detail projection drops ids the form needs (creator person ids,
+    /// parent, series).
+    pub async fn resource(&self, id: ResourceId) -> Result<Resource, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::GetResource { id, reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    /// Replace one resource's stored fields with `new`, handing back the
+    /// stored record.
+    pub async fn update_resource(
+        &self,
+        id: ResourceId,
+        new: NewResource,
+    ) -> Result<Resource, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::UpdateResource { id, new, reply: tx })
             .map_err(|_| "db worker stopped".to_string())?;
         rx.await
             .map_err(|_| "db worker dropped the request".to_string())?
@@ -461,6 +524,40 @@ mod tests {
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.rows[0].title.as_str(), "Citation Networks 000");
         assert_eq!(page.next_offset, None);
+    }
+
+    #[tokio::test]
+    async fn worker_updates_resource_through_command() {
+        let store = MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        let state = AppState::builder(store).surface(Surface::Test).build();
+        let worker = DbWorker::spawn(state);
+
+        let page = worker.list_page(None, 3).await.unwrap();
+        let id = page.rows[0].id;
+
+        // The edit flow's two legs: fetch the raw record, merge a new
+        // title into its write-side twin, save, read back the change.
+        let record = worker.resource(id).await.unwrap();
+        let mut edit = record.to_new();
+        edit.title =
+            oeuvre_core::NonEmptyStr::try_new("Retitled by worker").expect("title non-empty");
+        let updated = worker.update_resource(id, edit).await.unwrap();
+        assert_eq!(updated.title.as_str(), "Retitled by worker");
+
+        let again = worker.resource(id).await.unwrap();
+        assert_eq!(again.title.as_str(), "Retitled by worker");
+
+        // The listing row the grid shows carries the new title too.
+        let fresh = worker.list_page(None, 3).await.unwrap();
+        let row = fresh.rows.iter().find(|row| row.id == id).expect("row kept");
+        assert_eq!(row.title.as_str(), "Retitled by worker");
+
+        let err = worker
+            .update_resource(ResourceId::generate(), again.to_new())
+            .await
+            .unwrap_err();
+        assert!(err.contains("not found"), "message says not found: {err}");
     }
 
 }

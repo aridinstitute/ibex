@@ -13,9 +13,9 @@ use crate::kind::{kind_color, kind_label};
 /// Panel width on the right side of the library grid.
 pub const PANEL_WIDTH: Pixels = px(320.);
 /// Label column width inside the panel; values take the remaining width.
-const FIELD_LABEL_WIDTH: Pixels = px(88.);
+pub const FIELD_LABEL_WIDTH: Pixels = px(88.);
 /// Matches the grid's cell text so the two panes read as one view.
-const FIELD_TEXT_SIZE: Pixels = px(13.);
+pub const FIELD_TEXT_SIZE: Pixels = px(13.);
 /// Opacity of the kind tint at the panel's top edge. A hint of the kind's
 /// color rather than a wash: the field labels stay above 13:1 contrast on
 /// it in both palettes.

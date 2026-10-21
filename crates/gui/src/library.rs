@@ -2,6 +2,7 @@
 
 use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, ops::Range, path::PathBuf};
 
+use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -9,19 +10,22 @@ use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    ActiveTheme as _, FocusableExt as _, Icon, IconName, Selectable as _, Sizable as _, Size,
-    ThemeColor, ThemeMode, TitleBar, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IconName, IndexPath, Selectable as _,
+    Sizable as _, Size, ThemeColor, ThemeMode, TitleBar, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use oeuvre_core::{
-    NonEmptyStr, Person, PersonId, PublishedRange, ResourceDetail, ResourceFilter, ResourceId,
-    ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, SortDirection, UtcMillis,
+    NonEmptyStr, Person, PersonId, PublishedRange, Resource, ResourceDetail, ResourceFilter,
+    ResourceId, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, SortDirection, UtcMillis,
 };
 
 use crate::db::DbWorker;
-use crate::detail::{render_panel, DetailFetch, DetailView};
+use crate::detail::{
+    render_panel, DetailFetch, DetailView, FIELD_LABEL_WIDTH, FIELD_TEXT_SIZE, PANEL_WIDTH,
+};
+use crate::edit::{EditDraft, KindItem, build_update, kind_items, prefill_draft};
 use crate::icons::symbol;
 use crate::kind::{kind_color, kind_label, kind_symbol};
 use crate::settings::Settings;
@@ -768,8 +772,9 @@ const DETAIL_CACHE_CAPACITY: usize = 96;
 
 /// Fetched details keyed by id, first-in first-out. A hit renders the
 /// panel without a fetch, which is what makes nearby steps feel instant;
-/// details are immutable per id, so an entry is never stale, and the
-/// oldest entry falls out past [`DETAIL_CACHE_CAPACITY`].
+/// details change only through an edit, and saving one invalidates that
+/// id's entry (see [`DetailCache::invalidate`]), so entries are otherwise
+/// never stale, and the oldest falls out past [`DETAIL_CACHE_CAPACITY`].
 struct DetailCache {
     entries: HashMap<ResourceId, ResourceDetail>,
     /// Insertion order, oldest first; drives eviction.
@@ -797,6 +802,14 @@ impl DetailCache {
         while self.order.len() > DETAIL_CACHE_CAPACITY {
             let oldest = self.order.pop_front().expect("order mirrors entries");
             self.entries.remove(&oldest);
+        }
+    }
+
+    /// Drop `id`'s entry: an edit changed the stored record, so the next
+    /// read must fetch again instead of hitting the pre-edit detail.
+    fn invalidate(&mut self, id: &ResourceId) {
+        if self.entries.remove(id).is_some() {
+            self.order.retain(|entry| entry != id);
         }
     }
 }
@@ -834,6 +847,116 @@ pub struct LibraryApp {
     /// Ids with a detail fetch in flight, so selection and prefetch share
     /// one request per id instead of stacking duplicates.
     detail_inflight: HashSet<ResourceId>,
+    /// The edit form while one is open: loading while the raw record is
+    /// fetched, ready once the inputs exist. One form at a time, owned by
+    /// the row it was opened on.
+    edit: Option<EditFetch>,
+    /// Per-id generation for detail fetches. Saving an edit bumps its id's
+    /// generation; a reply from a fetch issued before the bump is dropped
+    /// instead of re-caching the pre-edit detail.
+    detail_gens: HashMap<ResourceId, u64>,
+}
+
+/// The edit flow's two states: fetching the raw record the form edits,
+/// then holding the prefilled widgets.
+enum EditFetch {
+    Loading(ResourceId),
+    Ready(Box<EditForm>),
+}
+
+/// The edit form's widgets plus the raw record they edit. Inputs are
+/// prefilled from the record at construction; saving reads them back into
+/// an [`EditDraft`] and builds the full-replace payload.
+struct EditForm {
+    record: Box<Resource>,
+    title: Entity<InputState>,
+    kind: Entity<ComboboxState<SearchableVec<KindItem>>>,
+    publisher: Entity<InputState>,
+    published_year: Entity<InputState>,
+    accessed_year: Entity<InputState>,
+    parent: Entity<InputState>,
+    series: Entity<InputState>,
+    series_number: Entity<InputState>,
+    /// The form's own line of complaint: a rejected payload or a failed
+    /// save, shown until the next attempt.
+    error: Option<String>,
+    /// While the save is in flight: the Save button busy, no double sends.
+    saving: bool,
+}
+
+impl EditForm {
+    /// Prefilled widgets for `record`: every scalar opens with its stored
+    /// value, the kind box with the record's kind selected.
+    fn new(record: Resource, window: &mut Window, cx: &mut Context<LibraryApp>) -> Self {
+        let draft = prefill_draft(&record);
+        let items = kind_items();
+        // The box keys rows by position: the kind's row in the alphabetized
+        // list is its selection. The list carries every kind, so the lookup
+        // cannot miss.
+        let kind_row = items
+            .iter()
+            .position(|item| item.value() == &record.kind)
+            .expect("kind_items carries every kind");
+        let kind = cx.new(|cx| {
+            ComboboxState::new(
+                SearchableVec::new(items),
+                vec![IndexPath::new(kind_row)],
+                window,
+                cx,
+            )
+            .searchable(true)
+        });
+        Self {
+            title: prefill_input(draft.title, "Title", window, cx),
+            kind,
+            publisher: prefill_input(draft.publisher, "Publisher", window, cx),
+            published_year: prefill_input(draft.published_year, "Year", window, cx),
+            accessed_year: prefill_input(draft.accessed_year, "Year", window, cx),
+            parent: prefill_input(draft.parent, "Resource id", window, cx),
+            series: prefill_input(draft.series, "Series id", window, cx),
+            series_number: prefill_input(draft.series_number, "e.g. LCL 26", window, cx),
+            record: Box::new(record),
+            error: None,
+            saving: false,
+        }
+    }
+
+    /// The inputs' current values as one plain draft. A cleared kind box
+    /// falls back to the stored kind: every resource carries one, so the
+    /// form never clears it.
+    fn draft(&self, cx: &App) -> EditDraft {
+        let value =
+            |input: &Entity<InputState>| input.read(cx).value().to_string();
+        EditDraft {
+            title: value(&self.title),
+            kind: self
+                .kind
+                .read(cx)
+                .selected_values()
+                .first()
+                .copied()
+                .unwrap_or(self.record.kind),
+            publisher: value(&self.publisher),
+            published_year: value(&self.published_year),
+            accessed_year: value(&self.accessed_year),
+            parent: value(&self.parent),
+            series: value(&self.series),
+            series_number: value(&self.series_number),
+        }
+    }
+}
+
+/// One prefilled input: placeholder when the value is empty, the value as
+/// opening text otherwise.
+fn prefill_input(
+    value: String,
+    placeholder: &'static str,
+    window: &mut Window,
+    cx: &mut Context<LibraryApp>,
+) -> Entity<InputState> {
+    let state = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+    state.update(cx, |state, cx| state.set_value(value, window, cx));
+    state
 }
 
 impl LibraryApp {
@@ -1000,6 +1123,8 @@ impl LibraryApp {
             detail: None,
             detail_cache: DetailCache::new(),
             detail_inflight: HashSet::new(),
+            edit: None,
+            detail_gens: HashMap::new(),
         }
     }
 
@@ -1010,6 +1135,17 @@ impl LibraryApp {
             return;
         };
         self.selected = Some(id);
+        // The form edits the record the panel was showing; a different row
+        // selected means that record is no longer in view, so the form
+        // closes instead of editing out of sight.
+        let editing_this = match &self.edit {
+            Some(EditFetch::Loading(loading)) => *loading == id,
+            Some(EditFetch::Ready(form)) => form.record.id == id,
+            None => true,
+        };
+        if !editing_this {
+            self.edit = None;
+        }
         self.show_detail(id, window, cx);
         self.prefetch_around(row_ix, window, cx);
         cx.notify();
@@ -1049,18 +1185,27 @@ impl LibraryApp {
     }
 
     /// Fetch `id`'s detail off the UI thread, unless one is already in
-    /// flight. The reply lands in the cache whatever happened since —
-    /// details are immutable per id — and the panel only changes when
-    /// this id is still the selection, so a stale reply never flashes in.
+    /// flight. The reply lands in the cache whatever happened since, and
+    /// the panel only changes when this id is still the selection, so a
+    /// stale reply never flashes in — except after an edit, which bumps the
+    /// id's generation so the pre-edit reply is discarded outright.
     fn fetch_detail(&mut self, id: ResourceId, window: &mut Window, cx: &mut Context<Self>) {
         if !self.detail_inflight.insert(id) {
             return;
         }
+        let fetch_epoch = *self.detail_gens.get(&id).unwrap_or(&0);
         let worker = self.table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
             let reply = worker.resource_detail(id).await;
             _ = app.update_in(window, |app, _window, cx| {
                 app.detail_inflight.remove(&id);
+                // The record this reply describes was edited after the
+                // fetch was issued; it must not enter the cache or the
+                // panel. The save's own refetch (issued at the new
+                // epoch) fills both.
+                if *app.detail_gens.get(&id).unwrap_or(&0) != fetch_epoch {
+                    return;
+                }
                 match reply {
                     Ok(detail) => {
                         // Failures stay out of the cache: reselecting a
@@ -1128,6 +1273,120 @@ impl LibraryApp {
         cx.notify();
     }
 
+    /// Open the edit form for the selected resource: fetch the raw record
+    /// (the panel's projection drops the ids the form needs), then open
+    /// the prefilled widgets. One form at a time; the panel swaps to it
+    /// while it exists.
+    fn request_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected else {
+            return;
+        };
+        if self.edit.is_some() {
+            return;
+        }
+        self.edit = Some(EditFetch::Loading(id));
+        self.detail_open = true;
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let reply = worker.resource(id).await;
+            _ = app.update_in(window, |app, window, cx| {
+                match reply {
+                    Ok(record) => {
+                        // The selection moved or re-clicked Edit since the
+                        // request: the reply belongs to a form nobody is
+                        // waiting for, so it is dropped.
+                        if app.selected == Some(id) && matches!(app.edit, Some(EditFetch::Loading(_)))
+                        {
+                            let form = EditForm::new(record, window, cx);
+                            app.edit = Some(EditFetch::Ready(Box::new(form)));
+                        }
+                    }
+                    Err(err) => {
+                        app.edit = None;
+                        if app.selected == Some(id) {
+                            app.detail = Some((id, DetailFetch::Failed(err)));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Close the form without writing; the panel falls back to the detail.
+    fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        self.edit = None;
+        cx.notify();
+    }
+
+    /// Save the form: read the inputs into a draft, build the full-replace
+    /// payload, send it through the worker. A rejected payload or a failed
+    /// save shows in the form; success closes it and refreshes the panel
+    /// and the listing row.
+    fn save_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(EditFetch::Ready(form)) = &self.edit else {
+            return;
+        };
+        if form.saving {
+            return;
+        }
+        let record = form.record.clone();
+        let draft = form.draft(cx);
+        let new = match build_update(&record, &draft) {
+            Ok(new) => new,
+            Err(message) => {
+                if let Some(EditFetch::Ready(form)) = &mut self.edit {
+                    form.error = Some(message);
+                }
+                cx.notify();
+                return;
+            }
+        };
+        let id = record.id;
+        if let Some(EditFetch::Ready(form)) = &mut self.edit {
+            form.saving = true;
+            form.error = None;
+        }
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let reply = worker.update_resource(id, new).await;
+            _ = app.update_in(window, |app, window, cx| {
+                match reply {
+                    Ok(_) => {
+                        app.edit = None;
+                        // The stored record changed under every detail
+                        // fetched for it: bump the id's generation so an
+                        // in-flight fetch's reply is dropped, forget the
+                        // cached detail, and refetch for the panel.
+                        *app.detail_gens.entry(id).or_default() += 1;
+                        app.detail_inflight.remove(&id);
+                        app.detail_cache.invalidate(&id);
+                        app.detail = Some((id, DetailFetch::Loading));
+                        app.fetch_detail(id, window, cx);
+                        // The row may have moved under the current sort;
+                        // the reload re-walks the listing and keeps the
+                        // highlight on the edited id.
+                        app.table.update(cx, |table, cx| {
+                            table
+                                .delegate_mut()
+                                .reload_from_top(Some(id), window, cx);
+                        });
+                    }
+                    Err(err) => match &mut app.edit {
+                        Some(EditFetch::Ready(form)) => {
+                            form.error = Some(err);
+                            form.saving = false;
+                        }
+                        _ => app.edit = None,
+                    },
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn detail_view(&self) -> DetailView<'_> {
         match (self.selected, self.detail.as_ref()) {
             (Some(id), Some((loaded, fetch))) if *loaded == id => match fetch {
@@ -1142,6 +1401,110 @@ impl LibraryApp {
             (None, _) => DetailView::Empty,
         }
     }
+
+    /// The right-side panel: the edit form while one is open, the detail
+    /// fields otherwise. The form keeps the panel's anchor, width, and
+    /// surface but drops the kind tint, so its inputs sit on a plain
+    /// background.
+    fn render_side_panel(&self, cx: &mut Context<Self>) -> Div {
+        match &self.edit {
+            Some(EditFetch::Ready(form)) => self.render_edit_panel(form, cx),
+            Some(EditFetch::Loading(_)) => render_panel(DetailView::Loading, cx),
+            None => render_panel(self.detail_view(), cx),
+        }
+    }
+
+    /// The form: Save/Cancel above, one labelled row per scalar, the error
+    /// line under the buttons. Scrollable like the detail panel, so a
+    /// short window still reaches every row.
+    fn render_edit_panel(&self, form: &EditForm, cx: &mut Context<Self>) -> Div {
+        let saving = form.saving;
+        let error = form.error.clone();
+        let danger = cx.theme().danger;
+
+        div()
+            .absolute()
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .w(PANEL_WIDTH)
+            .bg(cx.theme().background)
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .text_size(FIELD_TEXT_SIZE)
+            .child(
+                v_flex()
+                    .id("edit-panel")
+                    .size_full()
+                    .p_3()
+                    .gap_2()
+                    .overflow_y_scroll()
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("cancel-edit")
+                                    .ghost()
+                                    .small()
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|this, _, _window, cx| {
+                                        this.cancel_edit(cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("save-edit")
+                                    .primary()
+                                    .small()
+                                    .label("Save")
+                                    .loading(saving)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.save_edit(window, cx)
+                                    })),
+                            ),
+                    )
+                    .when_some(error, |el, error| {
+                        el.child(div().text_xs().text_color(danger).child(error))
+                    })
+                    .child(edit_field("Title", Input::new(&form.title).small().w_full()))
+                    .child(edit_field(
+                        "Kind",
+                        Combobox::new(&form.kind)
+                            .small()
+                            .placeholder("Kind")
+                            .search_placeholder("Search kinds")
+                            .w_full(),
+                    ))
+                    .child(edit_field(
+                        "Publisher",
+                        Input::new(&form.publisher).small().w_full(),
+                    ))
+                    .child(edit_field(
+                        "Published",
+                        Input::new(&form.published_year).small().w_full(),
+                    ))
+                    .child(edit_field(
+                        "Accessed",
+                        Input::new(&form.accessed_year).small().w_full(),
+                    ))
+                    .child(edit_field("Parent", Input::new(&form.parent).small().w_full()))
+                    .child(edit_field("Series", Input::new(&form.series).small().w_full()))
+                    .child(edit_field(
+                        "Series no.",
+                        Input::new(&form.series_number).small().w_full(),
+                    )),
+            )
+    }
+}
+
+/// One form row: the panel's label column left, the control filling the
+/// remaining width.
+fn edit_field(label: &'static str, control: impl IntoElement) -> Div {
+    h_flex()
+        .items_center()
+        .gap_2()
+        .child(div().w(FIELD_LABEL_WIDTH).flex_shrink_0().child(label))
+        .child(control)
 }
 
 impl Render for LibraryApp {
@@ -1151,6 +1514,8 @@ impl Render for LibraryApp {
         let filters_visible = delegate.filters_visible;
         let filter_active = delegate.filter.is_active();
         let danger = cx.theme().danger;
+        // Editing needs a selected row and no form already open.
+        let can_edit = self.selected.is_some() && self.edit.is_none();
 
         v_flex()
             .size_full()
@@ -1178,6 +1543,17 @@ impl Render for LibraryApp {
                             .selected(filters_visible)
                             .when(filter_active, |button| button.text_color(cx.theme().primary))
                             .on_click(cx.listener(|this, _, _window, cx| this.toggle_filters(cx))),
+                    )
+                    .child(
+                        Button::new("edit-resource")
+                            .ghost()
+                            .small()
+                            .icon(symbol("pencil", AssetIconName::PenLine))
+                            .label("Edit")
+                            .disabled(!can_edit)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.request_edit(window, cx)
+                            })),
                     )
                     .child(
                         Button::new("toggle-theme")
@@ -1227,9 +1603,11 @@ impl Render for LibraryApp {
                                 table.header_row_height(height)
                             }),
                     )
-                    // Keep the toolbar accessible while details overlay the grid.
+                    // Keep the toolbar accessible while the panel overlays
+                    // the grid; the panel shows the edit form while one is
+                    // open, the detail fields otherwise.
                     .when(self.detail_open, |el| {
-                        el.child(render_panel(self.detail_view(), cx))
+                        el.child(self.render_side_panel(cx))
                     }),
             )
             .when_some(error, |el, error| {
