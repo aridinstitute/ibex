@@ -1,8 +1,13 @@
 //! Library grid: resource summary rows, one page at a time.
 
-use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, ops::Range, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    ops::Range,
+    path::PathBuf,
+};
 
 use gpui_kit::assets::IconName as AssetIconName;
+use gpui_kit::base::{transition, Transition as MotionTransition};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -100,6 +105,10 @@ pub struct LibraryDelegate {
     /// Mirrors the table's selected row from its selection events, because
     /// `render_td` runs while the table state is borrowed and cannot ask it.
     selected_row: Option<usize>,
+    /// Mirrors the table's selected column the same way; row and column
+    /// selection are exclusive, and cell text follows whichever portion
+    /// sits on the accent fill.
+    selected_col: Option<usize>,
     /// Persisted GUI settings: column widths loaded from config.toml ride
     /// through `column`, and finished resizes are written back by
     /// `LibraryApp`.
@@ -125,19 +134,23 @@ impl LibraryDelegate {
             filters_visible: false,
             error: None,
             selected_row: None,
+            selected_col: None,
             settings,
             listing_gen: 0,
         }
     }
 
-    /// Apply a double-clicked header's next cycle state (see [`next_sort`]).
-    /// A changed order reloads the grid from the top of the new listing, and
-    /// the row highlight follows the selected resource by id once the first
-    /// page lands.
+    /// Apply a header's next cycle state (see [`next_sort`]). A changed
+    /// order reloads the grid from the top of the new listing.
+    ///
+    /// `restore_col`, when set, keeps that column selected after the page
+    /// lands so Space can step the cycle again; otherwise the row highlight
+    /// follows `selected_id` the way a double-click does.
     fn request_sort(
         &mut self,
         field: ResourceSort,
         selected_id: Option<ResourceId>,
+        restore_col: Option<usize>,
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
@@ -147,7 +160,7 @@ impl LibraryDelegate {
             return;
         }
         self.sort = next_sort(self.sort, field);
-        self.reload_from_top(selected_id, window, cx);
+        self.reload_from_top(selected_id, restore_col, window, cx);
     }
 
     /// Re-key the listing under a new title predicate. A keystroke must
@@ -165,7 +178,7 @@ impl LibraryDelegate {
             return;
         }
         self.filter.title = needle;
-        self.reload_from_top(selected_id, window, cx);
+        self.reload_from_top(selected_id, None, window, cx);
     }
 
     /// Re-key the listing under a new creator predicate; mirrors the title
@@ -181,7 +194,7 @@ impl LibraryDelegate {
             return;
         }
         self.filter.creator = creator;
-        self.reload_from_top(selected_id, window, cx);
+        self.reload_from_top(selected_id, None, window, cx);
     }
 
     /// Re-key the listing under a new kind predicate; mirrors the title
@@ -197,7 +210,7 @@ impl LibraryDelegate {
             return;
         }
         self.filter.kind = kind;
-        self.reload_from_top(selected_id, window, cx);
+        self.reload_from_top(selected_id, None, window, cx);
     }
 
     /// Re-key the listing under a new published window; mirrors the title
@@ -213,15 +226,17 @@ impl LibraryDelegate {
             return;
         }
         self.filter.published = range;
-        self.reload_from_top(selected_id, window, cx);
+        self.reload_from_top(selected_id, None, window, cx);
     }
 
     /// Fetch the first page under the current sort and filter and replace
-    /// the rows. The fetch carries the generation it serves, and the row
-    /// highlight follows the selected resource by id once it lands.
+    /// the rows. The fetch carries the generation it serves. When
+    /// `restore_col` is set, that column stays selected so Space can keep
+    /// cycling; otherwise the row highlight follows `selected_id`.
     fn reload_from_top(
         &mut self,
         selected_id: Option<ResourceId>,
+        restore_col: Option<usize>,
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
@@ -262,14 +277,19 @@ impl LibraryDelegate {
                     }
                     Err(err) => delegate.error = Some(err),
                 }
-                // The highlight follows the selected resource to its new
-                // row; a resource outside the first page loses it and the
-                // detail panel returns to empty.
-                let selected_ix = selected_id
-                    .and_then(|id| table.delegate().rows.iter().position(|row| row.id == id));
-                match selected_ix {
-                    Some(ix) => table.set_selected_row(ix, cx),
-                    None => table.clear_selection(cx),
+                // Column restore wins so Space can step the sort cycle
+                // again; otherwise the highlight follows the selected
+                // resource to its new row, and a miss clears selection
+                // (the detail panel returns to empty).
+                if let Some(col_ix) = restore_col {
+                    table.set_selected_col(col_ix, cx);
+                } else {
+                    let selected_ix = selected_id
+                        .and_then(|id| table.delegate().rows.iter().position(|row| row.id == id));
+                    match selected_ix {
+                        Some(ix) => table.set_selected_row(ix, cx),
+                        None => table.clear_selection(cx),
+                    }
                 }
                 cx.notify();
             });
@@ -454,6 +474,8 @@ impl TableDelegate for LibraryDelegate {
         } else {
             label
         };
+        // Header labels stay on the theme foreground even when the column
+        // body is accent-filled; only cells switch to on-accent text.
         let label = match sort_field_for_col(col_ix) {
             None => label.child(name).into_any_element(),
             Some(field) => {
@@ -478,7 +500,7 @@ impl TableDelegate for LibraryDelegate {
                             table.selected_row().and_then(|ix| table.delegate().row_id(ix));
                         table
                             .delegate_mut()
-                            .request_sort(field, selected_id, window, cx);
+                            .request_sort(field, selected_id, None, window, cx);
                     }))
                     .when(direction.is_some(), |el| el.justify_between())
                     .child(name)
@@ -525,15 +547,17 @@ impl TableDelegate for LibraryDelegate {
         let Some(row) = self.rows.get(row_ix) else {
             return cell;
         };
-        let (text, muted) = cell_text_colors(self.selected_row == Some(row_ix), cx.theme());
+        // Text follows the accent fill on the highlighted row or column,
+        // not the other axis that stays on the normal table surface.
+        let on_accent = cell_on_accent(self.selected_row, self.selected_col, row_ix, col_ix);
+        let (text, muted) = cell_text_colors(on_accent, cx.theme());
         let cell = cell.text_color(text);
         match col_ix {
             COL_KIND => {
                 let label: SharedString = kind_label(row.kind).into();
-                // The selected row sits on the accent fill, where a family
-                // hue would muddy the blue, so the icon goes monochrome
-                // along with the rest of the row.
-                let icon_color = if self.selected_row == Some(row_ix) {
+                // The accent fill muddies a family hue, so the icon goes
+                // monochrome along with the rest of the highlighted cell.
+                let icon_color = if on_accent {
                     muted
                 } else {
                     kind_color(row.kind, cx.theme().is_dark())
@@ -883,11 +907,21 @@ fn widths_by_key(widths: &[Pixels]) -> BTreeMap<String, f64> {
         .collect()
 }
 
-/// (primary, secondary) cell text for a row. The selected row sits on a
-/// solid accent fill, so both turn to the accent's foreground, with the
-/// secondary columns slightly dimmed to keep their hierarchy.
-fn cell_text_colors(selected: bool, colors: &ThemeColor) -> (Hsla, Hsla) {
-    if selected {
+/// Whether this cell sits on the table's solid accent fill (selected row
+/// or selected column). Callers paint white text only for that portion.
+fn cell_on_accent(
+    selected_row: Option<usize>,
+    selected_col: Option<usize>,
+    row_ix: usize,
+    col_ix: usize,
+) -> bool {
+    selected_row == Some(row_ix) || selected_col == Some(col_ix)
+}
+
+/// (primary, secondary) cell text. Accent-filled cells use the accent's
+/// foreground; secondary columns stay slightly dimmed for hierarchy.
+fn cell_text_colors(on_accent: bool, colors: &ThemeColor) -> (Hsla, Hsla) {
+    if on_accent {
         let on_accent = colors.primary_foreground;
         (on_accent, on_accent.opacity(0.8))
     } else {
@@ -906,7 +940,7 @@ fn sort_marker(direction: SortDirection, cx: &App) -> Icon {
     .text_color(cx.theme().muted_foreground)
 }
 
-gpui_kit::actions!([ToggleDetailPanel]);
+gpui_kit::actions!([ToggleDetailPanel, CycleColumnSort]);
 
 /// Rows on either side of the selection whose details prefetch warms.
 /// Arrow-key walking moves one row at a time, so a small radius covers
@@ -1198,22 +1232,40 @@ impl LibraryApp {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.subscribe_in(&table, window, |this, _table, event: &TableEvent, window, cx| {
-            if let TableEvent::ColumnWidthsChanged(widths) = event {
-                this.save_column_widths(widths, cx);
-                return;
-            }
-            let selected_row = match event {
-                TableEvent::SelectRow(row_ix) => Some(*row_ix),
-                TableEvent::ClearSelection => None,
-                _ => return,
-            };
-            this.table.update(cx, |table, cx| {
-                table.delegate_mut().selected_row = selected_row;
-                cx.notify();
-            });
-            match selected_row {
-                Some(row_ix) => this.select_row(row_ix, window, cx),
-                None => this.clear_selection(cx),
+            match event {
+                TableEvent::ColumnWidthsChanged(widths) => {
+                    this.save_column_widths(widths, cx);
+                }
+                TableEvent::SelectRow(row_ix) => {
+                    this.table.update(cx, |table, cx| {
+                        let delegate = table.delegate_mut();
+                        delegate.selected_row = Some(*row_ix);
+                        delegate.selected_col = None;
+                        cx.notify();
+                    });
+                    this.select_row(*row_ix, window, cx);
+                }
+                TableEvent::SelectColumn(col_ix) => {
+                    // Column highlight is visual only: keep the detail for
+                    // the last selected resource so Space can sort without
+                    // wiping the sidebar.
+                    this.table.update(cx, |table, cx| {
+                        let delegate = table.delegate_mut();
+                        delegate.selected_row = None;
+                        delegate.selected_col = Some(*col_ix);
+                        cx.notify();
+                    });
+                }
+                TableEvent::ClearSelection => {
+                    this.table.update(cx, |table, cx| {
+                        let delegate = table.delegate_mut();
+                        delegate.selected_row = None;
+                        delegate.selected_col = None;
+                        cx.notify();
+                    });
+                    this.clear_selection(cx);
+                }
+                _ => {}
             }
         })
         .detach();
@@ -1516,7 +1568,25 @@ impl LibraryApp {
         cx.notify();
     }
 
-    fn toggle_detail_panel(&mut self, cx: &mut Context<Self>) {        // The detail is fetched on selection whether or not the panel shows,
+    /// Space on a highlighted sortable column steps that column's sort
+    /// cycle. Kind has no sort field, so Space is a no-op there.
+    fn cycle_column_sort(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(col_ix) = self.table.read(cx).selected_col() else {
+            return;
+        };
+        let Some(field) = sort_field_for_col(col_ix) else {
+            return;
+        };
+        let selected_id = self.selected;
+        self.table.update(cx, |table, cx| {
+            table
+                .delegate_mut()
+                .request_sort(field, selected_id, Some(col_ix), window, cx);
+        });
+    }
+
+    fn toggle_detail_panel(&mut self, cx: &mut Context<Self>) {
+        // The detail is fetched on selection whether or not the panel shows,
         // so opening it never waits on a fetch.
         self.detail_open = !self.detail_open;
         cx.notify();
@@ -1731,7 +1801,7 @@ impl LibraryApp {
                         app.table.update(cx, |table, cx| {
                             table
                                 .delegate_mut()
-                                .reload_from_top(Some(id), window, cx);
+                                .reload_from_top(Some(id), None, window, cx);
                         });
                     }
                     Err(err) => match &mut app.edit {
@@ -1894,22 +1964,41 @@ fn edit_field(label: &'static str, control: impl IntoElement) -> Div {
 }
 
 impl Render for LibraryApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let delegate = self.table.read(cx).delegate();
         let error = delegate.error().map(str::to_owned);
         let filters_visible = delegate.filters_visible;
         let filter_active = delegate.filter.is_active();
         let danger = cx.theme().danger;
+        // Always sample the width so the first closed frame anchors at 0
+        // and later toggles animate from the live value.
+        let motion = cx.theme().motion_tokens();
+        let sidebar_target = if self.detail_open {
+            PANEL_WIDTH
+        } else {
+            px(0.)
+        };
+        let sidebar_width = transition(
+            "detail-sidebar-width",
+            sidebar_target,
+            MotionTransition::new(motion.duration_normal).easing(motion.easing_move.clone()),
+            window,
+            cx,
+        );
 
         v_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            // `]` toggles the detail panel; the context must cover the
-            // focused table, which renders below this root.
+            // `]` toggles the detail panel and Space cycles the selected
+            // column's sort; the context must cover the focused table,
+            // which renders below this root.
             .key_context("LibraryApp")
             .on_action(cx.listener(|this, _: &ToggleDetailPanel, _window, cx| {
                 this.toggle_detail_panel(cx);
+            }))
+            .on_action(cx.listener(|this, _: &CycleColumnSort, window, cx| {
+                this.cycle_column_sort(window, cx);
             }))
             .child(
                 // The toolbar doubles as the window's title bar: the traffic
@@ -1994,11 +2083,18 @@ impl Render for LibraryApp {
                                     }),
                             ),
                     )
-                    // The sidebar is the edit form while one is open, the
-                    // detail fields otherwise; hidden entirely while the
-                    // panel is toggled off.
-                    .when(self.detail_open, |el| {
-                        el.child(self.render_side_panel(cx))
+                    // Clip the fixed-width panel while the outer width
+                    // animates; keep it mounted until the close finishes.
+                    .when(sidebar_width > px(0.5), |el| {
+                        el.child(
+                            div()
+                                .id("detail-sidebar-clip")
+                                .h_full()
+                                .w(sidebar_width)
+                                .overflow_hidden()
+                                .flex_shrink_0()
+                                .child(self.render_side_panel(cx)),
+                        )
                     }),
             )
             .when_some(error, |el, error| {
@@ -2062,8 +2158,9 @@ mod sort_cycle_tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
     use super::{
-        cell_text_colors, creator_options, filter_field_for_col, header_row_height, next_sort,
-        sort_field_for_col, title_predicate, year_instant, year_range, FilterField, COL_CREATORS, COL_KIND,
+        cell_on_accent, cell_text_colors, creator_options, filter_field_for_col, header_row_height,
+        next_sort, sort_field_for_col, title_predicate, year_instant, year_range, FilterField,
+        COL_CREATORS, COL_KIND,
         COL_PUBLISHED, COL_TITLE,
     };
     use gpui_kit::component::ThemeColor;
@@ -2196,7 +2293,7 @@ mod sort_cycle_tests {
     }
 
     #[test]
-    fn selected_row_text_turns_white_on_the_accent_fill() {
+    fn accent_fill_text_turns_white() {
         let colors = ThemeColor {
             foreground: rgb(0x111111).into(),
             muted_foreground: rgb(0x777777).into(),
@@ -2213,6 +2310,18 @@ mod sort_cycle_tests {
         // on the blue fill.
         assert_eq!((secondary.h, secondary.s, secondary.l), (0., 0., 1.));
         assert!(secondary.a < 1. && secondary.a >= 0.75);
+    }
+
+    #[test]
+    fn cell_accent_follows_selected_row_or_column_not_both_axes() {
+        // Row highlight: every column of that row is on the accent.
+        assert!(cell_on_accent(Some(2), None, 2, 0));
+        assert!(cell_on_accent(Some(2), None, 2, 4));
+        assert!(!cell_on_accent(Some(2), None, 1, 0));
+        // Column highlight: every row of that column is on the accent.
+        assert!(cell_on_accent(None, Some(3), 0, 3));
+        assert!(cell_on_accent(None, Some(3), 9, 3));
+        assert!(!cell_on_accent(None, Some(3), 0, 1));
     }
 
     #[test]

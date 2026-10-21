@@ -21,7 +21,9 @@ use gpui_kit::{AppContext as _, *};
 
 use crate::db::DbWorker;
 use crate::kind::AppAssets;
-use crate::library::{LibraryApp, LibraryDelegate, ToggleDetailPanel, PAGE_SIZE};
+use crate::library::{
+    CycleColumnSort, LibraryApp, LibraryDelegate, ToggleDetailPanel, PAGE_SIZE,
+};
 use crate::settings::Settings;
 
 #[derive(Debug, Parser)]
@@ -65,11 +67,10 @@ fn run() -> Result<()> {
     gpui_kit::application().with_assets(AppAssets).run(move |cx| {
         gpui_kit::init(cx);
         crate::theme::apply(cx.window_appearance().into(), cx);
-        cx.bind_keys([KeyBinding::new(
-            "]",
-            ToggleDetailPanel,
-            Some("LibraryApp"),
-        )]);
+        cx.bind_keys([
+            KeyBinding::new("]", ToggleDetailPanel, Some("LibraryApp")),
+            KeyBinding::new("space", CycleColumnSort, Some("LibraryApp")),
+        ]);
         if let Err(err) = gpui_kit::open_window(
             // The window draws its own title bar (the toolbar inside
             // LibraryApp), so the native one is transparent with only the
