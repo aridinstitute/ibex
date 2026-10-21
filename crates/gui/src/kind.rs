@@ -94,6 +94,32 @@ pub fn kind_icon(kind: ResourceKind) -> IconName {
         ResourceKind::Blog => IconName::Rss,
     }
 }
+
+pub fn kind_symbol(kind: ResourceKind) -> gpui_kit::component::Icon {
+    let name = match kind {
+        ResourceKind::Book => "book.closed",
+        ResourceKind::JournalArticle => "doc.text",
+        ResourceKind::BookSection => "book",
+        ResourceKind::ConferencePaper => "person.3",
+        ResourceKind::Preprint => "doc.badge.clock",
+        ResourceKind::Thesis => "graduationcap",
+        ResourceKind::Report => "list.clipboard",
+        ResourceKind::Webpage => "globe",
+        ResourceKind::Dataset => "externaldrive",
+        ResourceKind::Manuscript => "scroll",
+        ResourceKind::MagazineArticle => "magazine",
+        ResourceKind::NewspaperArticle => "newspaper",
+        ResourceKind::ComputerProgram => "chevron.left.forwardslash.chevron.right",
+        ResourceKind::DictionaryEntry => "character.book.closed",
+        ResourceKind::EncyclopediaArticle => "books.vertical",
+        ResourceKind::BlogPost => "square.and.pencil",
+        ResourceKind::PodcastEpisode => "mic",
+        ResourceKind::Journal => "text.book.closed",
+        ResourceKind::Podcast => "dot.radiowaves.left.and.right",
+        ResourceKind::Blog => "antenna.radiowaves.left.and.right",
+    };
+    crate::icons::symbol(name, kind_icon(kind))
+}
 #[cfg(test)]
 mod tests {
     use super::*;

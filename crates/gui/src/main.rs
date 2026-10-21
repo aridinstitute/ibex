@@ -1,7 +1,9 @@
 mod db;
 mod detail;
+mod icons;
 mod kind;
 mod library;
+mod theme;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -11,7 +13,6 @@ use clap::Parser;
 use oeuvre_adapter_surreal::SurrealStore;
 use oeuvre_app::{AppState, Surface};
 
-use gpui_kit::component::Theme;
 use gpui_kit::component::table::TableState;
 use gpui_kit::{AppContext as _, *};
 
@@ -54,9 +55,7 @@ fn run() -> Result<()> {
 
     gpui_kit::application().with_assets(AppAssets).run(move |cx| {
         gpui_kit::init(cx);
-        // Root sets the window rem size from this, so every rem-based size
-        // in the kit shrinks with it.
-        Theme::global_mut(cx).font_size = px(12.);
+        crate::theme::apply(cx.window_appearance().into(), cx);
         cx.bind_keys([KeyBinding::new(
             "]",
             ToggleDetailPanel,

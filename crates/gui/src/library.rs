@@ -7,7 +7,7 @@ use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, Size, h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, Size, ThemeMode, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -19,7 +19,8 @@ use oeuvre_core::{
 
 use crate::db::DbWorker;
 use crate::detail::{render_panel, DetailFetch, DetailView};
-use crate::kind::{kind_icon, kind_label};
+use crate::icons::symbol;
+use crate::kind::{kind_label, kind_symbol};
 
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
 /// enough that the demo library spans several pages.
@@ -407,7 +408,7 @@ impl TableDelegate for LibraryDelegate {
                     div()
                         .id(("kind", row_ix))
                         .text_color(muted)
-                        .child(Icon::new(kind_icon(row.kind)).with_size(Size::Small))
+                        .child(kind_symbol(row.kind).with_size(px(18.)))
                         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx)),
                 )
             }
@@ -662,9 +663,9 @@ impl SearchableListItem for CreatorItem {
 /// Small direction marker beside the header label of the column that
 /// currently drives the order.
 fn sort_marker(direction: SortDirection, cx: &App) -> Icon {
-    Icon::new(match direction {
-        SortDirection::Ascending => IconName::SortAscending,
-        SortDirection::Descending => IconName::SortDescending,
+    (match direction {
+        SortDirection::Ascending => symbol("arrow.up", IconName::SortAscending),
+        SortDirection::Descending => symbol("arrow.down", IconName::SortDescending),
     })
     .with_size(Size::Small)
     .text_color(cx.theme().muted_foreground)
@@ -920,8 +921,8 @@ impl Render for LibraryApp {
 
         v_flex()
             .size_full()
-            // The overlaid panel anchors to this root.
-            .relative()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
             // `]` toggles the detail panel; the context must cover the
             // focused table, which renders below this root.
             .key_context("LibraryApp")
@@ -929,25 +930,54 @@ impl Render for LibraryApp {
                 this.toggle_detail_panel(cx);
             }))
             .child(
-                // The toolbar's one control shows or hides the whole filter
-                // row. Hidden filters keep narrowing, so the button tints
-                // while any is set and a narrowed listing never passes for
-                // the full library.
-                h_flex().flex_shrink_0().px_2().py_1().child(
-                    Button::new("toggle-filters")
-                        .ghost()
-                        .small()
-                        .icon(Icon::new(IconName::Settings2))
-                        .label("Filters")
-                        .selected(filters_visible)
-                        .when(filter_active, |button| button.text_color(cx.theme().primary))
-                        .on_click(cx.listener(|this, _, _window, cx| this.toggle_filters(cx))),
-                ),
+                h_flex()
+                    .flex_shrink_0()
+                    .justify_between()
+                    .px_2()
+                    .py_1()
+                    .bg(cx.theme().background)
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        Button::new("toggle-filters")
+                            .ghost()
+                            .small()
+                            .icon(symbol("line.3.horizontal.decrease", IconName::Settings2))
+                            .label("Filters")
+                            .selected(filters_visible)
+                            .when(filter_active, |button| button.text_color(cx.theme().primary))
+                            .on_click(cx.listener(|this, _, _window, cx| this.toggle_filters(cx))),
+                    )
+                    .child(
+                        Button::new("toggle-theme")
+                            .ghost()
+                            .small()
+                            .icon(if cx.theme().is_dark() {
+                                symbol("sun.max", IconName::Sun)
+                            } else {
+                                symbol("moon", IconName::Moon)
+                            })
+                            .label(if cx.theme().is_dark() { "Light" } else { "Dark" })
+                            .tooltip(if cx.theme().is_dark() {
+                                "Switch to light theme"
+                            } else {
+                                "Switch to dark theme"
+                            })
+                            .on_click(cx.listener(|_, _, _window, cx| {
+                                let mode = if cx.theme().is_dark() {
+                                    ThemeMode::Light
+                                } else {
+                                    ThemeMode::Dark
+                                };
+                                crate::theme::apply(mode, cx);
+                            })),
+                    ),
             )
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .child(
                         DataTable::new(&self.table)
                             .with_size(Size::XSmall)
@@ -956,13 +986,12 @@ impl Render for LibraryApp {
                             .when_some(header_row_height(filters_visible), |table, height| {
                                 table.header_row_height(height)
                             }),
-                    ),
+                    )
+                    // Keep the toolbar accessible while details overlay the grid.
+                    .when(self.detail_open, |el| {
+                        el.child(render_panel(self.detail_view(), cx))
+                    }),
             )
-            // The panel overlays the grid instead of sharing a row with it,
-            // so narrow windows hide columns rather than cut the panel off.
-            .when(self.detail_open, |el| {
-                el.child(render_panel(self.detail_view(), cx))
-            })
             .when_some(error, |el, error| {
                 el.child(
                     div()
