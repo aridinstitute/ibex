@@ -1,13 +1,14 @@
 //! Library grid: resource summary rows, one page at a time.
 
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::popover::Popover;
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, Size, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -53,9 +54,11 @@ pub struct LibraryDelegate {
     sort: Option<(ResourceSort, SortDirection)>,
     /// Predicates driving the listing; `none()` matches every resource.
     filter: ResourceFilter,
-    /// Handles to the filter inputs the header popovers render; attached
+    /// Handles to the filter inputs the header filter row renders; attached
     /// once `LibraryApp` wires its entities, before any window renders.
     filter_inputs: Option<FilterInputs>,
+    /// Whether the header shows its filter row; all controls or none.
+    filters_visible: bool,
     error: Option<String>,
     /// Bumped on every accepted sort or filter change. Each fetch carries
     /// the generation it was issued for, so a reply landing after a newer
@@ -75,6 +78,7 @@ impl LibraryDelegate {
             sort: None,
             filter: ResourceFilter::none(),
             filter_inputs: None,
+            filters_visible: false,
             error: None,
             listing_gen: 0,
         }
@@ -224,67 +228,45 @@ impl LibraryDelegate {
         &self.worker
     }
 
-    /// The column's filter trigger: a sliders button whose popover carries
-    /// the filter inputs under the header, so each column narrows the
-    /// listing from its own head. Tracking the input's focus keeps the
-    /// popover open while its control holds the keystrokes.
-    fn filter_popover(&self, col_ix: usize, inputs: &FilterInputs, cx: &App) -> Popover {
-        let active = column_filter_active(col_ix, &self.filter);
-        let trigger = Button::new(("th-filter", col_ix))
-            .icon(Icon::new(IconName::Settings2).with_size(Size::Small))
-            .compact()
-            .text_color(if active {
-                cx.theme().foreground
-            } else {
-                cx.theme().muted_foreground
-            });
-        let popover = Popover::new(("th-filter-popover", col_ix)).trigger(trigger);
-        match filter_field_for_col(col_ix).expect("filterable column") {
-            FilterField::Title => {
-                let input = inputs.title.clone();
-                let focus = input.read(cx).focus_handle(cx);
-                popover
-                    .track_focus(&focus)
-                    .content(move |_state, _window, _cx| {
-                        Input::new(&input).small().cleanable(true).w(px(240.))
-                    })
-            }
-            FilterField::Creators => {
-                let box_state = inputs.creator.clone();
-                let focus = box_state.read(cx).focus_handle(cx);
-                popover
-                    .track_focus(&focus)
-                    .content(move |_state, _window, _cx| {
-                        Combobox::new(&box_state)
-                            .small()
-                            .cleanable(true)
-                            .placeholder("Creator")
-                            .search_placeholder("Search creators")
-                            .w(px(220.))
-                    })
-            }
-            FilterField::Published => {
-                let from = inputs.published_from.clone();
-                let to = inputs.published_to.clone();
-                let focus = from.read(cx).focus_handle(cx);
-                // The published column is the table's last and narrowest;
-                // anchoring its right corner keeps the year pair inside
-                // the window instead of growing past the table's edge.
-                popover
-                    .anchor(Anchor::TopRight)
-                    .track_focus(&focus)
-                    .content(move |_state, _window, _cx| {
-                        h_flex()
-                            .gap_2()
-                            .child(Input::new(&from).small().cleanable(true).w(px(96.)))
-                            .child(Input::new(&to).small().cleanable(true).w(px(96.)))
-                    })
-            }
+    /// The column's slot in the filter row. Clicks into a control belong to
+    /// the control: the header's column selection and double-click sort
+    /// must never see them.
+    fn filter_control(&self, col_ix: usize) -> AnyElement {
+        let cell = h_flex()
+            .id(("th-filter", col_ix))
+            .w_full()
+            .flex_1()
+            .items_center()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(|_, _, cx| cx.stop_propagation());
+        let (Some(inputs), Some(field)) = (self.filter_inputs.as_ref(), filter_field_for_col(col_ix))
+        else {
+            return cell.into_any_element();
+        };
+        match field {
+            FilterField::Title => cell
+                .child(Input::new(&inputs.title).xsmall().cleanable(true).w_full())
+                .into_any_element(),
+            FilterField::Creators => cell
+                .child(
+                    Combobox::new(&inputs.creator)
+                        .xsmall()
+                        .cleanable(true)
+                        .placeholder("Creator")
+                        .search_placeholder("Search creators")
+                        .w_full(),
+                )
+                .into_any_element(),
+            FilterField::Published => cell
+                .gap_1()
+                .child(Input::new(&inputs.published_from).xsmall().w_full())
+                .child(Input::new(&inputs.published_to).xsmall().w_full())
+                .into_any_element(),
         }
     }
 }
-impl TableDelegate for LibraryDelegate {
-    fn columns_count(&self, _cx: &App) -> usize {
+
+impl TableDelegate for LibraryDelegate {    fn columns_count(&self, _cx: &App) -> usize {
         COLUMNS
     }
 
@@ -300,7 +282,7 @@ impl TableDelegate for LibraryDelegate {
                 .text_center(),
             COL_TITLE => Column::new("title", "Title").width(px(620.)).min_width(px(160.)),
             COL_CREATORS => Column::new("creators", "Authors").width(px(260.)).min_width(px(80.)),
-            COL_PUBLISHED => Column::new("published", "Published").width(px(80.)).min_width(px(50.)),
+            COL_PUBLISHED => Column::new("published", "Published").width(px(140.)).min_width(px(50.)),
             _ => unreachable!("columns_count is {COLUMNS}"),
         }
     }
@@ -311,62 +293,65 @@ impl TableDelegate for LibraryDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let name = self.column(col_ix, cx).name.clone();
         // The default header cell is a full-height block div, so its label
         // sits at the top of the header row. Center it vertically, and center
         // the kind column horizontally to match its cells.
-        let header = h_flex()
-            .size_full()
+        let label = h_flex()
+            .w_full()
+            .flex_1()
             .items_center()
             .text_size(HEADER_TEXT_SIZE);
-        let header = if col_ix == COL_KIND {
-            header.justify_center()
+        let label = if col_ix == COL_KIND {
+            label.justify_center()
         } else {
-            header
+            label
         };
-        let name = self.column(col_ix, cx).name.clone();
-        let Some(field) = sort_field_for_col(col_ix) else {
-            return header.child(name).into_any_element();
-        };
-        // Which direction of this column's cycle currently drives the order;
-        // `None` leaves the header without a marker.
-        let direction = match self.sort {
-            Some((active, direction)) if active == field => Some(direction),
-            _ => None,
-        };
-        // A filterable column keeps its label left and groups the sort
-        // marker with the filter trigger on the right edge, so the whole
-        // state of the listing reads from the header row.
-        header
-            .id(("th-sort", col_ix))
-            .on_click(cx.listener(move |table, event: &ClickEvent, window, cx| {
-                if event.click_count() != 2 {
-                    return;
-                }
-                // The second click drives the sort, not another selection.
-                cx.stop_propagation();
-                let selected_id =
-                    table.selected_row().and_then(|ix| table.delegate().row_id(ix));
-                table
-                    .delegate_mut()
-                    .request_sort(field, selected_id, window, cx);
-            }))
-            .justify_between()
-            .child(name)
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_1()
+        let label = match sort_field_for_col(col_ix) {
+            None => label.child(name).into_any_element(),
+            Some(field) => {
+                // Which direction of this column's cycle currently drives the
+                // order; `None` leaves the header without a marker.
+                let direction = match self.sort {
+                    Some((active, direction)) if active == field => Some(direction),
+                    _ => None,
+                };
+                // Double-click steps the cycle; a single click keeps flowing
+                // to the table's column selection. The marker claims the
+                // header's right edge, where the kit puts its own sort icon.
+                label
+                    .id(("th-sort", col_ix))
+                    .on_click(cx.listener(move |table, event: &ClickEvent, window, cx| {
+                        if event.click_count() != 2 {
+                            return;
+                        }
+                        // The second click drives the sort, not another selection.
+                        cx.stop_propagation();
+                        let selected_id =
+                            table.selected_row().and_then(|ix| table.delegate().row_id(ix));
+                        table
+                            .delegate_mut()
+                            .request_sort(field, selected_id, window, cx);
+                    }))
+                    .when(direction.is_some(), |el| el.justify_between())
+                    .child(name)
                     .when_some(
                         direction.map(|direction| sort_marker(direction, cx)),
                         |el, marker| el.child(marker),
                     )
-                    .when_some(self.filter_inputs.clone(), |el, inputs| {
-                        el.child(self.filter_popover(col_ix, &inputs, cx))
-                    }),
-            )
-            .into_any_element()
-    }    fn render_td(
-        &mut self,
+                    .into_any_element()
+            }
+        };
+        // The filter row stacks under the names inside each header cell, so
+        // every control spans exactly its column through resizes and
+        // horizontal scroll.
+        v_flex()
+            .size_full()
+            .child(label)
+            .when(self.filters_visible, |el| el.child(self.filter_control(col_ix)))
+    }
+
+    fn render_td(        &mut self,
         row_ix: usize,
         col_ix: usize,
         _window: &mut Window,
@@ -551,20 +536,15 @@ fn filter_field_for_col(col_ix: usize) -> Option<FilterField> {
     }
 }
 
-/// A header's filter icon tints only while its own predicate narrows the
-/// listing, so the active columns read at a glance.
-fn column_filter_active(col_ix: usize, filter: &ResourceFilter) -> bool {
-    match filter_field_for_col(col_ix) {
-        Some(FilterField::Title) => filter.title.is_some(),
-        Some(FilterField::Creators) => filter.creator.is_some(),
-        Some(FilterField::Published) => filter.published.is_some(),
-        None => false,
-    }
+/// Header height for the filter row's visibility: `None` keeps the kit's
+/// single row; shown filters stack a second row of controls under the names.
+fn header_row_height(filters_visible: bool) -> Option<Pixels> {
+    filters_visible.then(|| Size::XSmall.table_row_height() * 2.)
 }
 
-/// The filter inputs the header popovers render: the same entities the
-/// top bar held, so every keystroke still re-keys the listing through the
-/// subscriptions `LibraryApp` wires, whichever header opened the input.
+/// The filter inputs the header row renders. `LibraryApp` owns and
+/// subscribes to these entities, so every keystroke re-keys the listing
+/// through its wiring.
 #[derive(Clone)]
 struct FilterInputs {
     title: Entity<InputState>,
@@ -572,6 +552,7 @@ struct FilterInputs {
     published_from: Entity<InputState>,
     published_to: Entity<InputState>,
 }
+
 /// One header's three-state cycle: newest-first → ascending → descending →
 /// back to newest-first. Double-clicking a different column always restarts
 /// that column ascending.
@@ -662,10 +643,6 @@ gpui_kit::actions!([ToggleDetailPanel]);
 
 pub struct LibraryApp {
     table: Entity<TableState<LibraryDelegate>>,
-    /// Title filter box above the grid; its text re-keys the listing.
-    title_input: Entity<InputState>,
-    /// Creator filter box; picking a person re-keys the listing.
-    creator_box: Entity<ComboboxState<SearchableVec<CreatorItem>>>,
     /// Year boxes bracketing the published window; either side alone
     /// bounds the listing, so both re-key on every edit.
     published_from_input: Entity<InputState>,
@@ -717,6 +694,7 @@ impl LibraryApp {
                         .delegate_mut()
                         .request_title_filter(needle, selected_id, window, cx);
                 });
+                cx.notify();
             },
         )
         .detach();
@@ -747,6 +725,7 @@ impl LibraryApp {
                         .delegate_mut()
                         .request_creator_filter(creator, selected_id, window, cx);
                 });
+                cx.notify();
             },
         )
         .detach();
@@ -778,8 +757,8 @@ impl LibraryApp {
         // inclusive, the to year's next January 1 exclusive, so either
         // side alone still bounds the listing.
         let published_from_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("From year"));
-        let published_to_input = cx.new(|cx| InputState::new(window, cx).placeholder("To year"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("From"));
+        let published_to_input = cx.new(|cx| InputState::new(window, cx).placeholder("To"));
         for input in [&published_from_input, &published_to_input] {
             cx.subscribe_in(input, window, |this, _input, event: &InputEvent, window, cx| {
                 // Only edits re-key the listing; focus and blur leave it be.
@@ -791,13 +770,13 @@ impl LibraryApp {
             .detach();
         }
 
-        // The header popovers render the same entities this app subscribes
+        // The header filter row renders the same entities this app subscribes
         // to, so filtering works from the column headers with the wiring
         // above unchanged.
         table.update(cx, |table, _| {
             table.delegate_mut().filter_inputs = Some(FilterInputs {
-                title: title_input.clone(),
-                creator: creator_box.clone(),
+                title: title_input,
+                creator: creator_box,
                 published_from: published_from_input.clone(),
                 published_to: published_to_input.clone(),
             });
@@ -805,8 +784,6 @@ impl LibraryApp {
 
         Self {
             table,
-            title_input,
-            creator_box,
             published_from_input,
             published_to_input,
             detail_open: false,
@@ -868,10 +845,20 @@ impl LibraryApp {
                 .delegate_mut()
                 .request_published_filter(range, selected_id, window, cx);
         });
+        cx.notify();
     }
 
-    fn toggle_detail_panel(&mut self, cx: &mut Context<Self>) {
-        // The detail is fetched on selection whether or not the panel shows,
+    /// Show or hide the whole filter row; the filters themselves stay set.
+    fn toggle_filters(&mut self, cx: &mut Context<Self>) {
+        self.table.update(cx, |table, cx| {
+            let delegate = table.delegate_mut();
+            delegate.filters_visible = !delegate.filters_visible;
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn toggle_detail_panel(&mut self, cx: &mut Context<Self>) {        // The detail is fetched on selection whether or not the panel shows,
         // so opening it never waits on a fetch.
         self.detail_open = !self.detail_open;
         cx.notify();
@@ -894,7 +881,10 @@ impl LibraryApp {
 
 impl Render for LibraryApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let error = self.table.read(cx).delegate().error().map(str::to_owned);
+        let delegate = self.table.read(cx).delegate();
+        let error = delegate.error().map(str::to_owned);
+        let filters_visible = delegate.filters_visible;
+        let filter_active = delegate.filter.is_active();
         let danger = cx.theme().danger;
 
         v_flex()
@@ -908,6 +898,22 @@ impl Render for LibraryApp {
                 this.toggle_detail_panel(cx);
             }))
             .child(
+                // The toolbar's one control shows or hides the whole filter
+                // row. Hidden filters keep narrowing, so the button tints
+                // while any is set and a narrowed listing never passes for
+                // the full library.
+                h_flex().flex_shrink_0().px_2().py_1().child(
+                    Button::new("toggle-filters")
+                        .ghost()
+                        .small()
+                        .icon(Icon::new(IconName::Settings2))
+                        .label("Filters")
+                        .selected(filters_visible)
+                        .when(filter_active, |button| button.text_color(cx.theme().primary))
+                        .on_click(cx.listener(|this, _, _window, cx| this.toggle_filters(cx))),
+                ),
+            )
+            .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
@@ -915,7 +921,10 @@ impl Render for LibraryApp {
                         DataTable::new(&self.table)
                             .with_size(Size::XSmall)
                             .bordered(false)
-                            .stripe(true),
+                            .stripe(true)
+                            .when_some(header_row_height(filters_visible), |table, height| {
+                                table.header_row_height(height)
+                            }),
                     ),
             )
             // The panel overlays the grid instead of sharing a row with it,
@@ -942,14 +951,12 @@ mod sort_cycle_tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
     use super::{
-        column_filter_active, creator_options, filter_field_for_col, next_sort, sort_field_for_col,
+        creator_options, filter_field_for_col, header_row_height, next_sort, sort_field_for_col,
         title_predicate, year_instant, year_range, FilterField, COL_CREATORS, COL_KIND,
         COL_PUBLISHED, COL_TITLE,
     };
-    use oeuvre_core::{
-        Name, NonEmptyStr, Person, PersonId, PublishedRange, ResourceFilter, ResourceSort,
-        SortDirection, UtcMillis,
-    };
+    use gpui_kit::px;
+    use oeuvre_core::{Name, Person, PersonId, ResourceSort, SortDirection, UtcMillis};
 
     #[test]
     fn one_header_cycles_ascending_descending_then_reverts() {
@@ -1077,33 +1084,11 @@ mod sort_cycle_tests {
     }
 
     #[test]
-    fn a_column_tints_only_while_its_filter_is_set() {
-        let cleared = ResourceFilter::none();
-        for col in [COL_TITLE, COL_CREATORS, COL_PUBLISHED, COL_KIND] {
-            assert!(!column_filter_active(col, &cleared));
-        }
-
-        let title = ResourceFilter {
-            title: Some(NonEmptyStr::try_new("needle").expect("non-empty")),
-            ..ResourceFilter::none()
-        };
-        assert!(column_filter_active(COL_TITLE, &title));
-        assert!(!column_filter_active(COL_CREATORS, &title));
-
-        let creator = ResourceFilter {
-            creator: Some(PersonId::generate()),
-            ..ResourceFilter::none()
-        };
-        assert!(column_filter_active(COL_CREATORS, &creator));
-
-        let published = ResourceFilter {
-            published: Some(PublishedRange {
-                from: UtcMillis::jan_1_utc(1962),
-                to: None,
-            }),
-            ..ResourceFilter::none()
-        };
-        assert!(column_filter_active(COL_PUBLISHED, &published));
-        assert!(!column_filter_active(COL_KIND, &published));
+    fn header_grows_a_second_row_only_while_filters_show() {
+        // Hidden filters keep the kit's single-row header.
+        assert_eq!(header_row_height(false), None);
+        // Shown filters stack one control row under the names: two
+        // 26px extra-small rows.
+        assert_eq!(header_row_height(true), Some(px(52.)));
     }
 }
