@@ -1,6 +1,6 @@
 //! Library grid: resource summary rows, one page at a time.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, ops::Range, path::PathBuf};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
@@ -16,8 +16,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use oeuvre_core::{
-    NonEmptyStr, Person, PersonId, PublishedRange, ResourceFilter, ResourceId, ResourcePage,
-    ResourceQuery, ResourceSort, ResourceSummary, SortDirection, UtcMillis,
+    NonEmptyStr, Person, PersonId, PublishedRange, ResourceDetail, ResourceFilter, ResourceId,
+    ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, SortDirection, UtcMillis,
 };
 
 use crate::db::DbWorker;
@@ -748,6 +748,63 @@ fn sort_marker(direction: SortDirection, cx: &App) -> Icon {
 
 gpui_kit::actions!([ToggleDetailPanel]);
 
+/// Rows on either side of the selection whose details prefetch warms.
+/// Arrow-key walking moves one row at a time, so a small radius covers
+/// the next few steps while keeping requests bounded.
+const PREFETCH_RADIUS: usize = 4;
+
+/// Details the prefetch cache holds. A few screens deep: scrolling back
+/// through them stays instant, while a long session on the demo library's
+/// thousands of rows cannot grow the cache without bound.
+const DETAIL_CACHE_CAPACITY: usize = 96;
+
+/// Fetched details keyed by id, first-in first-out. A hit renders the
+/// panel without a fetch, which is what makes nearby steps feel instant;
+/// details are immutable per id, so an entry is never stale, and the
+/// oldest entry falls out past [`DETAIL_CACHE_CAPACITY`].
+struct DetailCache {
+    entries: HashMap<ResourceId, ResourceDetail>,
+    /// Insertion order, oldest first; drives eviction.
+    order: VecDeque<ResourceId>,
+}
+
+impl DetailCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn get(&self, id: &ResourceId) -> Option<&ResourceDetail> {
+        self.entries.get(id)
+    }
+
+    /// Store `id`'s detail. Re-storing an id keeps its original position
+    /// in the eviction order, so a later duplicate cannot evict early.
+    fn insert(&mut self, id: ResourceId, detail: ResourceDetail) {
+        if self.entries.insert(id, detail).is_none() {
+            self.order.push_back(id);
+        }
+        while self.order.len() > DETAIL_CACHE_CAPACITY {
+            let oldest = self.order.pop_front().expect("order mirrors entries");
+            self.entries.remove(&oldest);
+        }
+    }
+}
+
+/// Row indexes whose details prefetch warms for a selection at `row_ix`:
+/// the ±[`PREFETCH_RADIUS`] window, clamped to the listing's rows. Pure so
+/// the clamping is unit-testable without a window.
+fn prefetch_window(row_ix: usize, rows_count: usize) -> Range<usize> {
+    let Some(last) = rows_count.checked_sub(1) else {
+        return 0..0;
+    };
+    let start = row_ix.saturating_sub(PREFETCH_RADIUS).min(last);
+    let end = row_ix.saturating_add(PREFETCH_RADIUS).min(last) + 1;
+    start..end
+}
+
 pub struct LibraryApp {
     table: Entity<TableState<LibraryDelegate>>,
     /// App data directory holding config.toml, where settings persist.
@@ -763,6 +820,12 @@ pub struct LibraryApp {
     /// Detail for the selected resource, keyed by id: a late reply from a
     /// superseded selection is dropped instead of flashing into the panel.
     detail: Option<(ResourceId, DetailFetch)>,
+    /// Details fetched ahead of the selection; a hit renders straight into
+    /// the panel so nearby steps never flash loading.
+    detail_cache: DetailCache,
+    /// Ids with a detail fetch in flight, so selection and prefetch share
+    /// one request per id instead of stacking duplicates.
+    detail_inflight: HashSet<ResourceId>,
 }
 
 impl LibraryApp {
@@ -927,36 +990,91 @@ impl LibraryApp {
             detail_open: false,
             selected: None,
             detail: None,
+            detail_cache: DetailCache::new(),
+            detail_inflight: HashSet::new(),
         }
     }
 
+    /// Row selection: the panel follows the id immediately, then prefetch
+    /// warms the rows around it so the next step up or down is instant.
     fn select_row(&mut self, row_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.table.read(cx).delegate().row_id(row_ix) else {
             return;
         };
         self.selected = Some(id);
+        self.show_detail(id, window, cx);
+        self.prefetch_around(row_ix, window, cx);
+        cx.notify();
+    }
+
+    /// Point the panel at `id`'s detail: a prefetch hit renders the fields
+    /// immediately; a miss shows loading while the one fetch for this id
+    /// fills it. A slot already serving this id is left alone, so a
+    /// reselect never restarts a finished or in-flight fetch.
+    fn show_detail(&mut self, id: ResourceId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(detail) = self.detail_cache.get(&id) {
+            self.detail = Some((id, DetailFetch::Loaded(Box::new(detail.clone()))));
+            return;
+        }
         if self.detail.as_ref().is_some_and(|(loaded, _)| *loaded == id) {
-            cx.notify();
             return;
         }
         self.detail = Some((id, DetailFetch::Loading));
-        cx.notify();
+        self.fetch_detail(id, window, cx);
+    }
 
+    /// Warm the cache around the selection. Cached and in-flight rows are
+    /// skipped, so stepping back and forth near one spot issues no new
+    /// requests.
+    fn prefetch_around(&mut self, row_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: Vec<Option<ResourceId>> = {
+            let delegate = self.table.read(cx).delegate();
+            prefetch_window(row_ix, delegate.rows_count(cx))
+                .map(|ix| delegate.row_id(ix))
+                .collect()
+        };
+        for id in ids.into_iter().flatten() {
+            if self.detail_cache.get(&id).is_none() {
+                self.fetch_detail(id, window, cx);
+            }
+        }
+    }
+
+    /// Fetch `id`'s detail off the UI thread, unless one is already in
+    /// flight. The reply lands in the cache whatever happened since —
+    /// details are immutable per id — and the panel only changes when
+    /// this id is still the selection, so a stale reply never flashes in.
+    fn fetch_detail(&mut self, id: ResourceId, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.detail_inflight.insert(id) {
+            return;
+        }
         let worker = self.table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
             let reply = worker.resource_detail(id).await;
             _ = app.update_in(window, |app, _window, cx| {
-                // A newer selection wins; a stale reply is dropped.
-                if app.selected == Some(id) {
-                    app.detail = Some((
-                        id,
-                        match reply {
-                            Ok(detail) => DetailFetch::Loaded(Box::new(detail)),
-                            Err(error) => DetailFetch::Failed(error),
-                        },
-                    ));
+                app.detail_inflight.remove(&id);
+                match reply {
+                    Ok(detail) => {
+                        // Failures stay out of the cache: reselecting a
+                        // failed row gets a fresh retry, not a stored error.
+                        app.detail_cache.insert(id, detail);
+                        if app.selected == Some(id) {
+                            app.detail = Some((
+                                id,
+                                DetailFetch::Loaded(Box::new(
+                                    app.detail_cache.get(&id).expect("just inserted").clone(),
+                                )),
+                            ));
+                            cx.notify();
+                        }
+                    }
+                    Err(error) => {
+                        if app.selected == Some(id) {
+                            app.detail = Some((id, DetailFetch::Failed(error)));
+                            cx.notify();
+                        }
+                    }
                 }
-                cx.notify();
             });
         })
         .detach();
@@ -1009,8 +1127,9 @@ impl LibraryApp {
                 DetailFetch::Loaded(detail) => DetailView::Fields(detail),
                 DetailFetch::Failed(error) => DetailView::Failed(error),
             },
-            // select_row always starts a fetch, so this only covers the gap
-            // between the two statements; the panel just shows loading.
+            // select_row fills the slot in the same turn — from the cache
+            // or with a started fetch — so this arm only bridges the gap
+            // between its statements; the panel just shows loading.
             (Some(_), _) => DetailView::Loading,
             (None, _) => DetailView::Empty,
         }
@@ -1317,5 +1436,106 @@ mod sort_cycle_tests {
         // Shown filters stack one control row under the names: two
         // 26px extra-small rows.
         assert_eq!(header_row_height(true), Some(px(52.)));
+    }
+}
+
+#[cfg(test)]
+mod detail_prefetch_tests {
+    // No `use super::*`: the glob would re-import gpui's `test` proc
+    // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
+    use super::{DETAIL_CACHE_CAPACITY, DetailCache, PREFETCH_RADIUS, prefetch_window};
+    use oeuvre_core::{NonEmptyStr, ResourceDetail, ResourceId, ResourceKind};
+
+    /// A detail whose title is the only varying field, enough to prove
+    /// which entry a cache read returns.
+    fn detail(id: ResourceId, title: &str) -> ResourceDetail {
+        ResourceDetail {
+            id,
+            kind: ResourceKind::Book,
+            title: NonEmptyStr::try_new(title).unwrap(),
+            creators: Vec::new(),
+            publisher: None,
+            published: None,
+            accessed: None,
+            container_title: None,
+            series_title: None,
+            series_number: None,
+        }
+    }
+
+    #[test]
+    fn cache_round_trips_by_id() {
+        let a = ResourceId::generate();
+        let b = ResourceId::generate();
+        assert_ne!(a, b);
+        let mut cache = DetailCache::new();
+        cache.insert(a, detail(a, "Citation Networks 000"));
+        cache.insert(b, detail(b, "Provenance Studies 001"));
+        assert_eq!(cache.get(&a).unwrap().title.as_str(), "Citation Networks 000");
+        assert_eq!(cache.get(&b).unwrap().title.as_str(), "Provenance Studies 001");
+        assert!(cache.get(&ResourceId::generate()).is_none());
+    }
+
+    #[test]
+    fn cache_evicts_the_oldest_detail_past_capacity() {
+        let mut ids = Vec::new();
+        let mut cache = DetailCache::new();
+        // Capacity plus one insert: the first id is the one that falls out.
+        for _ in 0..=DETAIL_CACHE_CAPACITY {
+            let id = ResourceId::generate();
+            cache.insert(id, detail(id, "row"));
+            ids.push(id);
+        }
+        assert!(cache.get(&ids[0]).is_none());
+        assert!(cache.get(&ids[1]).is_some());
+        assert!(cache.get(&ids[DETAIL_CACHE_CAPACITY]).is_some());
+    }
+
+    #[test]
+    fn reinserting_an_id_keeps_its_original_eviction_position() {
+        let a = ResourceId::generate();
+        let mut cache = DetailCache::new();
+        // A repeated insert updates the detail but must not add a second
+        // place in the eviction order.
+        cache.insert(a, detail(a, "first"));
+        cache.insert(a, detail(a, "second"));
+        assert_eq!(cache.get(&a).unwrap().title.as_str(), "second");
+
+        // A plus capacity minus one others fill the cache exactly, so a
+        // duplicated order entry would already have evicted something.
+        let mut others = Vec::new();
+        for _ in 0..DETAIL_CACHE_CAPACITY - 1 {
+            let id = ResourceId::generate();
+            cache.insert(id, detail(id, "other"));
+            others.push(id);
+        }
+        assert!(cache.get(&a).is_some());
+        assert!(others.iter().all(|id| cache.get(id).is_some()));
+
+        // One more insert evicts a, the oldest, and nothing else.
+        let newest = ResourceId::generate();
+        cache.insert(newest, detail(newest, "newest"));
+        assert!(cache.get(&a).is_none());
+        assert!(others.iter().all(|id| cache.get(id).is_some()));
+    }
+
+    #[test]
+    fn prefetch_window_centers_on_the_selection() {
+        // Radius 4 around row 50 of 100: rows 46 through 54.
+        assert_eq!(prefetch_window(50, 100), 46..55);
+    }
+
+    #[test]
+    fn prefetch_window_clamps_at_both_ends() {
+        // The first and last rows keep full windows on their inside side.
+        assert_eq!(prefetch_window(0, 100), 0..PREFETCH_RADIUS + 1);
+        assert_eq!(prefetch_window(99, 100), 95..100);
+        // A one-row listing prefetches exactly that row.
+        assert_eq!(prefetch_window(0, 1), 0..1);
+    }
+
+    #[test]
+    fn prefetch_window_is_empty_without_rows() {
+        assert_eq!(prefetch_window(0, 0), 0..0);
     }
 }
