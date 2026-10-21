@@ -23,7 +23,7 @@ use oeuvre_core::{
 use crate::db::DbWorker;
 use crate::detail::{render_panel, DetailFetch, DetailView};
 use crate::icons::symbol;
-use crate::kind::{kind_label, kind_symbol};
+use crate::kind::{kind_color, kind_label, kind_symbol};
 use crate::settings::Settings;
 
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
@@ -448,10 +448,18 @@ impl TableDelegate for LibraryDelegate {
         match col_ix {
             COL_KIND => {
                 let label: SharedString = kind_label(row.kind).into();
+                // The selected row sits on the accent fill, where a family
+                // hue would muddy the blue, so the icon goes monochrome
+                // along with the rest of the row.
+                let icon_color = if self.selected_row == Some(row_ix) {
+                    muted
+                } else {
+                    kind_color(row.kind, cx.theme().is_dark())
+                };
                 cell.justify_center().child(
                     div()
                         .id(("kind", row_ix))
-                        .text_color(muted)
+                        .text_color(icon_color)
                         .child(kind_symbol(row.kind).with_size(px(18.)))
                         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx)),
                 )
