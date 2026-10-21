@@ -5,8 +5,8 @@ use oeuvre_app::command::{
 };
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
-    NonEmptyStr, PersonId, PublishedRange, ResourceFilter, ResourceId, ResourceQuery,
-    ResourceSummary, UtcMillis,
+    BibliographicDate, NewResource, NonEmptyStr, PersonId, PublishedRange, Resource,
+    ResourceFilter, ResourceId, ResourceKind, ResourceQuery, ResourceSummary, SeriesId, UtcMillis,
 };
 
 #[derive(Debug, Args)]
@@ -46,15 +46,88 @@ pub struct ListArgs {
 }
 
 /// Field flags for `resource update`: each set flag replaces that field,
-/// the rest keep their stored values.
+/// the rest keep their stored values. A `--clear-*` flag empties its field.
 #[derive(Debug, Args)]
 pub struct UpdateArgs {
     /// Resource id.
     pub id: String,
 
+    /// New kind as its slug, e.g. `book`, `journalArticle`.
+    #[arg(long)]
+    pub kind: Option<String>,
+
     /// New title.
     #[arg(long)]
     pub title: Option<String>,
+
+    /// New publisher.
+    #[arg(long)]
+    pub publisher: Option<String>,
+
+    /// Set publisher to empty.
+    #[arg(long, conflicts_with = "publisher")]
+    pub clear_publisher: bool,
+
+    /// New published year; keys the year's January 1 UTC instant.
+    #[arg(long)]
+    pub published_year: Option<u16>,
+
+    /// Set published to empty.
+    #[arg(long, conflicts_with = "published_year")]
+    pub clear_published: bool,
+
+    /// New accessed year; keys the year's January 1 UTC instant.
+    #[arg(long)]
+    pub accessed_year: Option<u16>,
+
+    /// Set accessed to empty.
+    #[arg(long, conflicts_with = "accessed_year")]
+    pub clear_accessed: bool,
+
+    /// New parent resource id.
+    #[arg(long)]
+    pub parent: Option<String>,
+
+    /// Remove the parent link.
+    #[arg(long, conflicts_with = "parent")]
+    pub clear_parent: bool,
+
+    /// New series id.
+    #[arg(long)]
+    pub series: Option<String>,
+
+    /// Remove the series link (also pass --clear-series-number when one is
+    /// stored, or the update is rejected).
+    #[arg(long, conflicts_with = "series")]
+    pub clear_series: bool,
+
+    /// New series number.
+    #[arg(long)]
+    pub series_number: Option<String>,
+
+    /// Set series number to empty.
+    #[arg(long, conflicts_with = "series_number")]
+    pub clear_series_number: bool,
+}
+
+impl UpdateArgs {
+    /// True when any field flag is set, so the update has work to do.
+    pub fn has_changes(&self) -> bool {
+        self.kind.is_some()
+            || self.title.is_some()
+            || self.publisher.is_some()
+            || self.clear_publisher
+            || self.published_year.is_some()
+            || self.clear_published
+            || self.accessed_year.is_some()
+            || self.clear_accessed
+            || self.parent.is_some()
+            || self.clear_parent
+            || self.series.is_some()
+            || self.clear_series
+            || self.series_number.is_some()
+            || self.clear_series_number
+    }
 }
 
 /// Rows per query-page fetch while walking a filtered listing.
@@ -173,14 +246,10 @@ async fn update(state: &AppState, args: UpdateArgs) -> Result<()> {
         bail!("unexpected outcome from get_resource");
     };
 
-    let Some(title) = args.title else {
-        bail!("nothing to update; pass --title");
-    };
-    let mut edit = existing.to_new();
-    edit.title = NonEmptyStr::try_new(title).map_err(|_| anyhow!("--title must not be empty"))?;
+    let new = merge_update(&existing, &args)?;
 
     let Outcome::UpdateResource(updated) = state
-        .execute(Command::UpdateResource(UpdateResource { id, new: edit }))
+        .execute(Command::UpdateResource(UpdateResource { id, new }))
         .await?
     else {
         bail!("unexpected outcome from update_resource");
@@ -192,6 +261,80 @@ async fn update(state: &AppState, args: UpdateArgs) -> Result<()> {
         updated.title.as_str()
     );
     Ok(())
+}
+
+/// Merge the set flags over the stored record's write-side twin: each set
+/// flag replaces its field, each `--clear-*` empties it, and untouched
+/// fields ride through as stored. Validation of the merged record belongs
+/// to the command (reference existence, parent rules, series invariants).
+fn merge_update(existing: &Resource, args: &UpdateArgs) -> Result<NewResource> {
+    if !args.has_changes() {
+        bail!("nothing to update; pass a field flag");
+    }
+    let mut edit = existing.to_new();
+
+    if let Some(kind) = &args.kind {
+        edit.kind = ResourceKind::from_slug(kind)
+            .with_context(|| format!("unknown --kind '{kind}'"))?;
+    }
+    if let Some(title) = &args.title {
+        edit.title = NonEmptyStr::try_new(title.clone())
+            .map_err(|_| anyhow!("--title must not be empty"))?;
+    }
+    if let Some(publisher) = &args.publisher {
+        edit.publisher = Some(publisher.clone());
+    }
+    if args.clear_publisher {
+        edit.publisher = None;
+    }
+    if let Some(year) = args.published_year {
+        edit.published = Some(year_date("--published-year", year)?);
+    }
+    if args.clear_published {
+        edit.published = None;
+    }
+    if let Some(year) = args.accessed_year {
+        edit.accessed = Some(year_date("--accessed-year", year)?);
+    }
+    if args.clear_accessed {
+        edit.accessed = None;
+    }
+    if let Some(parent) = &args.parent {
+        edit.parent_id = Some(
+            ResourceId::parse(parent)
+                .with_context(|| format!("--parent must be a resource id, got '{parent}'"))?,
+        );
+    }
+    if args.clear_parent {
+        edit.parent_id = None;
+    }
+    if let Some(series) = &args.series {
+        edit.series_id = Some(
+            SeriesId::parse(series)
+                .with_context(|| format!("--series must be a series id, got '{series}'"))?,
+        );
+    }
+    if args.clear_series {
+        edit.series_id = None;
+    }
+    if let Some(number) = &args.series_number {
+        edit.series_number = Some(
+            NonEmptyStr::try_new(number.clone())
+                .map_err(|_| anyhow!("--series-number must not be empty"))?,
+        );
+    }
+    if args.clear_series_number {
+        edit.series_number = None;
+    }
+
+    Ok(edit)
+}
+
+/// A year flag's date: the year's January 1 UTC instant, no fuzzy display.
+fn year_date(flag: &str, year: u16) -> Result<BibliographicDate> {
+    let instant = UtcMillis::jan_1_utc(i64::from(year))
+        .with_context(|| format!("{flag} outside the calendar"))?;
+    BibliographicDate::try_new(instant, None).map_err(|_| anyhow!("invalid date from {flag}"))
 }
 
 /// One line per summary: `id  kind  title  creators  (year)  in container`,
@@ -219,7 +362,7 @@ fn format_summary_row(row: &ResourceSummary) -> String {
 mod tests {
     use super::*;
     use oeuvre_core::{
-        NonEmptyStr, PersonId, ResourceId, ResourceKind, UtcMillis,
+        CreatorRole, CreatorSpec, NonEmptyStr, PersonId, ResourceId, ResourceKind, UtcMillis,
     };
 
     fn summary(
@@ -345,5 +488,154 @@ mod tests {
         let err = listing_query(&list_args(None, Some("not-an-id"), None, None))
             .expect_err("bad creator id rejects");
         assert!(err.to_string().contains("--creator"));
+    }
+
+    fn update_args() -> UpdateArgs {
+        UpdateArgs {
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            kind: None,
+            title: None,
+            publisher: None,
+            clear_publisher: false,
+            published_year: None,
+            clear_published: false,
+            accessed_year: None,
+            clear_accessed: false,
+            parent: None,
+            clear_parent: false,
+            series: None,
+            clear_series: false,
+            series_number: None,
+            clear_series_number: false,
+        }
+    }
+
+    fn existing_book() -> Resource {
+        let author = PersonId::generate();
+        Resource::try_new(
+            ResourceId::generate(),
+            NewResource {
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new("Confessions").expect("title non-empty"),
+                creators: vec![CreatorSpec {
+                    person_id: author,
+                    role: CreatorRole::Author,
+                    credited_as: None,
+                }],
+                publisher: Some("Harvard".into()),
+                published: Some(
+                    BibliographicDate::try_new(
+                        UtcMillis::jan_1_utc(1991).expect("year in calendar"),
+                        None,
+                    )
+                    .expect("date valid"),
+                ),
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            },
+        )
+        .expect("book valid")
+    }
+
+    #[test]
+    fn update_with_no_flags_rejects() {
+        let err = merge_update(&existing_book(), &update_args()).expect_err("no flags reject");
+        assert!(err.to_string().contains("nothing to update"));
+    }
+
+    #[test]
+    fn update_title_flag_replaces_only_title() {
+        let mut args = update_args();
+        args.title = Some("Retitled".into());
+        let merged = merge_update(&existing_book(), &args).expect("title merges");
+        assert_eq!(merged.title.as_str(), "Retitled");
+        assert_eq!(merged.kind, ResourceKind::Book);
+        assert_eq!(merged.publisher.as_deref(), Some("Harvard"));
+        assert_eq!(
+            merged.published.expect("published rides through").instant(),
+            UtcMillis::jan_1_utc(1991).expect("year in calendar")
+        );
+        assert_eq!(merged.creators.len(), 1);
+    }
+
+    #[test]
+    fn update_kind_flag_parses_slug_and_unknown_rejects() {
+        let mut args = update_args();
+        args.kind = Some("journalArticle".into());
+        let merged = merge_update(&existing_book(), &args).expect("kind merges");
+        assert_eq!(merged.kind, ResourceKind::JournalArticle);
+
+        args.kind = Some("novel".into());
+        let err = merge_update(&existing_book(), &args).expect_err("unknown kind rejects");
+        assert!(err.to_string().contains("unknown --kind 'novel'"));
+    }
+
+    #[test]
+    fn update_clear_flags_empty_their_fields() {
+        let mut args = update_args();
+        args.clear_publisher = true;
+        args.clear_published = true;
+        let merged = merge_update(&existing_book(), &args).expect("clears merge");
+        assert_eq!(merged.publisher, None);
+        assert_eq!(merged.published, None);
+        // Untouched fields ride through.
+        assert_eq!(merged.title.as_str(), "Confessions");
+    }
+
+    #[test]
+    fn update_year_flags_key_january_first() {
+        let mut args = update_args();
+        args.published_year = Some(2021);
+        args.accessed_year = Some(2024);
+        let merged = merge_update(&existing_book(), &args).expect("years merge");
+        assert_eq!(
+            merged.published.expect("published set").instant(),
+            UtcMillis::jan_1_utc(2021).expect("year in calendar")
+        );
+        assert_eq!(
+            merged.accessed.expect("accessed set").instant(),
+            UtcMillis::jan_1_utc(2024).expect("year in calendar")
+        );
+    }
+
+    #[test]
+    fn update_id_flags_parse_and_bad_ids_reject() {
+        let mut args = update_args();
+        args.parent = Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".into());
+        args.series = Some("01ARZ3NDEKTSV4RRFFQ69G5FAW".into());
+        let merged = merge_update(&existing_book(), &args).expect("ids merge");
+        assert_eq!(
+            merged.parent_id,
+            ResourceId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAV").ok()
+        );
+        assert_eq!(
+            merged.series_id,
+            SeriesId::parse("01ARZ3NDEKTSV4RRFFQ69G5FAW").ok()
+        );
+
+        args.parent = Some("nope".into());
+        let err = merge_update(&existing_book(), &args).expect_err("bad parent rejects");
+        assert!(err.to_string().contains("--parent"));
+
+        args.parent = None;
+        args.series = Some("nope".into());
+        let err = merge_update(&existing_book(), &args).expect_err("bad series rejects");
+        assert!(err.to_string().contains("--series"));
+    }
+
+    #[test]
+    fn update_series_number_merge_keeps_series_id_absent() {
+        let mut args = update_args();
+        args.series_number = Some("LCL 26".into());
+        let merged = merge_update(&existing_book(), &args).expect("number merges");
+        assert_eq!(
+            merged.series_number.as_ref().map(|n| n.as_str()),
+            Some("LCL 26")
+        );
+        // A number without a series is the command's call to reject, not the
+        // merge's; the payload carries it through for that rejection.
+        assert_eq!(merged.series_id, None);
     }
 }

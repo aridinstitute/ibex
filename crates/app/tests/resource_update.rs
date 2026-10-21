@@ -305,3 +305,94 @@ async fn update_creators_replaces_list_and_renumbers_order() {
         Some(&FieldValue::from("creators"))
     );
 }
+
+#[tokio::test]
+async fn update_retype_with_parent_rechecks_parent_kind() {
+    let sink = MemorySink::new();
+    let state = AppState::builder(MemoryStore::new())
+        .surface(Surface::Test)
+        .sink(sink.clone())
+        .build();
+
+    let author_id = seed_author(&state).await;
+    let Outcome::CreateResource(journal) = state
+        .execute(Command::CreateResource(CreateResource {
+            new: NewResource {
+                kind: ResourceKind::Journal,
+                title: NonEmptyStr::try_new("Oeuvre Journal").unwrap(),
+                creators: vec![],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            },
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreateResource");
+    };
+
+    let Outcome::CreateResource(article) = state
+        .execute(Command::CreateResource(CreateResource {
+            new: NewResource {
+                kind: ResourceKind::JournalArticle,
+                title: NonEmptyStr::try_new("Citation Networks").unwrap(),
+                creators: vec![CreatorSpec {
+                    person_id: author_id,
+                    role: CreatorRole::Author,
+                    credited_as: None,
+                }],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: Some(journal.id),
+                series_id: None,
+                series_number: None,
+            },
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreateResource");
+    };
+    let _ = sink.take();
+
+    // Retyping to bookSection keeps the journal parent, which that kind
+    // rejects: a bookSection's parent must be a book.
+    let mut edit = article.to_new();
+    edit.kind = ResourceKind::BookSection;
+    let err = state
+        .execute(Command::UpdateResource(UpdateResource {
+            id: article.id,
+            new: edit,
+        }))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CommandError::Invalid(_)));
+
+    // Retyping to book forbids any parent at all.
+    let mut edit = article.to_new();
+    edit.kind = ResourceKind::Book;
+    let err = state
+        .execute(Command::UpdateResource(UpdateResource {
+            id: article.id,
+            new: edit,
+        }))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CommandError::Invalid(_)));
+
+    // Both rejections leave the stored article untouched.
+    let Outcome::GetResource(kept) = state
+        .execute(Command::GetResource(GetResource { id: article.id }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected GetResource");
+    };
+    assert_eq!(kept.kind, ResourceKind::JournalArticle);
+    assert_eq!(kept.parent_id, Some(journal.id));
+}

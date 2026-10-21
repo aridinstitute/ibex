@@ -84,6 +84,34 @@ impl ResourceKind {
         }
     }
 
+    /// Parse the slug [`ResourceKind::as_str`] emits. `None` on any other
+    /// input, so callers own their error message.
+    pub fn from_slug(s: &str) -> Option<Self> {
+        Some(match s {
+            "book" => Self::Book,
+            "journalArticle" => Self::JournalArticle,
+            "bookSection" => Self::BookSection,
+            "conferencePaper" => Self::ConferencePaper,
+            "preprint" => Self::Preprint,
+            "thesis" => Self::Thesis,
+            "report" => Self::Report,
+            "webpage" => Self::Webpage,
+            "dataset" => Self::Dataset,
+            "manuscript" => Self::Manuscript,
+            "magazineArticle" => Self::MagazineArticle,
+            "newspaperArticle" => Self::NewspaperArticle,
+            "computerProgram" => Self::ComputerProgram,
+            "dictionaryEntry" => Self::DictionaryEntry,
+            "encyclopediaArticle" => Self::EncyclopediaArticle,
+            "blogPost" => Self::BlogPost,
+            "podcastEpisode" => Self::PodcastEpisode,
+            "journal" => Self::Journal,
+            "podcast" => Self::Podcast,
+            "blog" => Self::Blog,
+            _ => return None,
+        })
+    }
+
     pub fn is_container(self) -> bool {
         matches!(self, Self::Journal | Self::Podcast | Self::Blog)
     }
@@ -1060,6 +1088,38 @@ mod tests {
         };
         let stored = Resource::try_new(ResourceId::generate(), new.clone()).unwrap();
         assert_eq!(stored.to_new(), new);
+    }
+
+    #[test]
+    fn from_slug_round_trips_every_kind() {
+        let kinds = [
+            ResourceKind::Book,
+            ResourceKind::JournalArticle,
+            ResourceKind::BookSection,
+            ResourceKind::ConferencePaper,
+            ResourceKind::Preprint,
+            ResourceKind::Thesis,
+            ResourceKind::Report,
+            ResourceKind::Webpage,
+            ResourceKind::Dataset,
+            ResourceKind::Manuscript,
+            ResourceKind::MagazineArticle,
+            ResourceKind::NewspaperArticle,
+            ResourceKind::ComputerProgram,
+            ResourceKind::DictionaryEntry,
+            ResourceKind::EncyclopediaArticle,
+            ResourceKind::BlogPost,
+            ResourceKind::PodcastEpisode,
+            ResourceKind::Journal,
+            ResourceKind::Podcast,
+            ResourceKind::Blog,
+        ];
+        for kind in kinds {
+            assert_eq!(ResourceKind::from_slug(kind.as_str()), Some(kind));
+        }
+        assert_eq!(ResourceKind::from_slug("novel"), None);
+        // Slugs are exact: display case never parses.
+        assert_eq!(ResourceKind::from_slug("Book"), None);
     }
 
     #[test]
