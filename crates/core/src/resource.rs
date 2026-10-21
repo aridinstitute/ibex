@@ -17,6 +17,14 @@ impl ResourceId {
     pub fn as_ulid(self) -> ulid::Ulid {
         self.0
     }
+
+    /// Creation-time millis the ULID itself encodes: the fallback
+    /// `date_added` for rows persisted before record-keeping dates existed,
+    /// so no backfill migration is needed. The 48-bit ULID timestamp always
+    /// fits an i64.
+    pub fn timestamp_ms(self) -> i64 {
+        self.0.timestamp_ms() as i64
+    }
 }
 
 impl fmt::Display for ResourceId {
@@ -199,6 +207,19 @@ impl UtcMillis {
 
     pub fn as_unix_ms(self) -> i64 {
         self.0
+    }
+
+    /// The current instant, for record-keeping stamps (`date_added`,
+    /// `date_edited`): the same UTC-millisecond resolution the type stores.
+    pub fn now() -> Self {
+        let now = time::OffsetDateTime::now_utc();
+        // The millisecond half rounds down, so a stamp never lands in
+        // the future.
+        Self(
+            now.unix_timestamp()
+                .saturating_mul(1_000)
+                .saturating_add(i64::from(now.millisecond())),
+        )
     }
 
     /// The year's January 1, midnight UTC — the boundary a year-bracketed
@@ -435,8 +456,9 @@ pub struct DetailCreators {
 /// Like [`ResourceSummary`] this is a read-time projection, but complete:
 /// creator `person_id`s are replaced with credited names grouped by role, and
 /// the parent / series ids with their titles. Dates stay raw — shells label
-/// them with [`format_published_label`]. The command layer composes it from
-/// [`Resource`] plus lookups; the store does not build it.
+/// the bibliographic pair with [`format_published_label`] and the
+/// record-keeping pair with [`format_recorded_date`]. The command layer
+/// composes it from [`Resource`] plus lookups; the store does not build it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ResourceDetail {
     pub id: ResourceId,
@@ -451,6 +473,9 @@ pub struct ResourceDetail {
     pub container_title: Option<NonEmptyStr>,
     pub series_title: Option<NonEmptyStr>,
     pub series_number: Option<NonEmptyStr>,
+    /// Record-keeping stamps, always present on a stored record.
+    pub date_added: UtcMillis,
+    pub date_edited: UtcMillis,
 }
 
 /// Group creators into one [`DetailCreators`] per role.
@@ -531,6 +556,28 @@ pub fn format_published_label(published: &BibliographicDate) -> NonEmptyStr {
 
 pub fn published_label_from(published: Option<&BibliographicDate>) -> Option<NonEmptyStr> {
     published.map(format_published_label)
+}
+
+/// English month abbreviations in calendar order, the word each
+/// [`format_recorded_date`] label leads with.
+const RECORDED_MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// Record-keeping stamp as `Mon D, YYYY`, the label shells show for a
+/// resource's `date_added` / `date_edited`. UTC deliberately: a library
+/// table reads the same day whatever timezone it opens in, and tests stay
+/// deterministic.
+pub fn format_recorded_date(instant: UtcMillis) -> String {
+    let stamp =
+        time::OffsetDateTime::from_unix_timestamp(instant.as_unix_ms().div_euclid(1_000))
+            .expect("recorded stamp within OffsetDateTime range");
+    format!(
+        "{} {}, {}",
+        RECORDED_MONTHS[(stamp.month() as usize) - 1],
+        stamp.day(),
+        stamp.year()
+    )
 }
 
 pub fn utc_year_from_millis(ms: i64) -> i32 {
@@ -645,6 +692,11 @@ pub struct Resource {
     pub parent_id: Option<ResourceId>,
     pub series_id: Option<SeriesId>,
     pub series_number: Option<NonEmptyStr>,
+    /// When the record joined the library: a record-keeping stamp, never
+    /// the bibliographic `published`.
+    pub date_added: UtcMillis,
+    /// When the record last changed; every create and update restamps it.
+    pub date_edited: UtcMillis,
 }
 
 fn validate_creators(kind: ResourceKind, creators: &[Creator]) -> Result<(), ResourceError> {
@@ -698,6 +750,9 @@ impl Resource {
         validate_creators(new.kind, &creators)?;
         validate_parent_presence(new.kind, new.parent_id)?;
         validate_series(new.series_id, new.series_number.as_ref())?;
+        // One instant stamps both record-keeping dates: the record joined
+        // the library now and has not changed since.
+        let now = UtcMillis::now();
         Ok(Self {
             id,
             kind: new.kind,
@@ -709,7 +764,23 @@ impl Resource {
             parent_id: new.parent_id,
             series_id: new.series_id,
             series_number: new.series_number,
+            date_added: now,
+            date_edited: now,
         })
+    }
+
+    /// Rebuild for [`Store::update_resource`](crate::store::Store::update_resource):
+    /// the same shape validation as [`Resource::try_new`], carrying the
+    /// record's original `date_added` — an edit moves `date_edited` to now
+    /// but never the day the record joined the library.
+    pub fn try_new_updated(
+        id: ResourceId,
+        date_added: UtcMillis,
+        new: NewResource,
+    ) -> Result<Self, ResourceError> {
+        let mut resource = Self::try_new(id, new)?;
+        resource.date_added = date_added;
+        Ok(resource)
     }
 
     /// Reassemble after loading a row + ordered edge projection.
@@ -725,6 +796,8 @@ impl Resource {
         parent_id: Option<ResourceId>,
         series_id: Option<SeriesId>,
         series_number: Option<NonEmptyStr>,
+        date_added: UtcMillis,
+        date_edited: UtcMillis,
     ) -> Result<Self, ResourceError> {
         validate_creators(kind, &creators)?;
         validate_parent_presence(kind, parent_id)?;
@@ -740,6 +813,8 @@ impl Resource {
             parent_id,
             series_id,
             series_number,
+            date_added,
+            date_edited,
         })
     }
 
@@ -820,6 +895,78 @@ mod tests {
         let parsed = ResourceId::parse(&id.to_string()).unwrap();
         assert_eq!(parsed, id);
         assert_eq!(parsed.as_ulid(), id.as_ulid());
+    }
+
+    #[test]
+    fn resource_id_timestamp_ms_matches_the_ulid() {
+        // The ULID's encoded millis are the oracle; the accessor reads
+        // them for the legacy-row date_added backfill.
+        let id = ResourceId(ulid::Ulid::from_parts(1_609_459_200_000, 0));
+        assert_eq!(id.timestamp_ms(), 1_609_459_200_000);
+    }
+
+    #[test]
+    fn try_new_stamps_both_record_dates_with_one_instant() {
+        let before = UtcMillis::now().as_unix_ms();
+        let resource = Resource::try_new(ResourceId::generate(), new_book(one_creator(), None))
+            .expect("book shape valid");
+        let after = UtcMillis::now().as_unix_ms();
+        // Create stamps both record-keeping dates with the same instant:
+        // the record joined the library now and has not changed since.
+        assert_eq!(resource.date_added, resource.date_edited);
+        assert!(resource.date_added.as_unix_ms() >= before);
+        assert!(resource.date_added.as_unix_ms() <= after);
+    }
+
+    #[test]
+    fn try_new_updated_keeps_date_added_and_restamps_date_edited() {
+        let added = UtcMillis::from_unix_ms(1_500_000_000_000);
+        let resource =
+            Resource::try_new_updated(ResourceId::generate(), added, new_book(one_creator(), None))
+                .expect("book shape valid");
+        // An edit moves the edited stamp on from the added stamp, which is
+        // the record's history, never the edit's clock.
+        assert_eq!(resource.date_added, added);
+        assert!(resource.date_edited.as_unix_ms() >= added.as_unix_ms());
+    }
+
+    #[test]
+    fn from_stored_keeps_the_stored_record_dates() {
+        let added = UtcMillis::from_unix_ms(1_500_000_000_000);
+        let edited = UtcMillis::from_unix_ms(1_600_000_000_000);
+        let resource = Resource::from_stored(
+            ResourceId::generate(),
+            ResourceKind::Journal,
+            title("Oeuvre Journal"),
+            vec![],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            added,
+            edited,
+        )
+        .expect("containers carry no creators");
+        assert_eq!((resource.date_added, resource.date_edited), (added, edited));
+    }
+
+    #[test]
+    fn format_recorded_date_renders_month_day_year() {
+        // UTC midnight into January 1 lands on that day, and the epoch's
+        // single-digit day prints unpadded.
+        assert_eq!(
+            format_recorded_date(UtcMillis::from_unix_ms(1_609_459_200_000)),
+            "Jan 1, 2021"
+        );
+        assert_eq!(format_recorded_date(UtcMillis::from_unix_ms(0)), "Jan 1, 1970");
+        // The millisecond half floors, so the label never rolls to the
+        // next day on sub-second remainders.
+        assert_eq!(
+            format_recorded_date(UtcMillis::from_unix_ms(1_609_459_199_999)),
+            "Dec 31, 2020"
+        );
     }
 
     #[test]
@@ -1104,6 +1251,8 @@ mod tests {
             None,
             None,
             None,
+            UtcMillis::from_unix_ms(0),
+            UtcMillis::from_unix_ms(0),
         )
         .unwrap_err();
         assert_eq!(err, ResourceError::EmptyCreators);

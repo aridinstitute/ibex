@@ -2179,7 +2179,7 @@ mod detail_prefetch_tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
     use super::{DETAIL_CACHE_CAPACITY, DetailCache, PREFETCH_RADIUS, prefetch_window};
-    use oeuvre_core::{NonEmptyStr, ResourceDetail, ResourceId, ResourceKind};
+    use oeuvre_core::{NonEmptyStr, ResourceDetail, ResourceId, ResourceKind, UtcMillis};
 
     /// A detail whose title is the only varying field, enough to prove
     /// which entry a cache read returns.
@@ -2195,6 +2195,8 @@ mod detail_prefetch_tests {
             container_title: None,
             series_title: None,
             series_number: None,
+            date_added: UtcMillis::from_unix_ms(0),
+            date_edited: UtcMillis::from_unix_ms(0),
         }
     }
 

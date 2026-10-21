@@ -6,7 +6,7 @@ use oeuvre_core::{
     creator_label_name, format_creators_label, published_label_from, BibliographicDate, Creator,
     CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceFilter,
     ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series,
-    SeriesId, SortDirection, SortedResourcePage, Store, StoreError, StoreHealth,
+    SeriesId, SortDirection, SortedResourcePage, Store, StoreError, StoreHealth, UtcMillis,
 };
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
 use surrealdb::opt::Config;
@@ -64,6 +64,10 @@ struct ResourceDoc {
     series: Option<RecordId>,
     #[surreal(default)]
     series_number: Option<String>,
+    #[surreal(default)]
+    date_added: Option<i64>,
+    #[surreal(default)]
+    date_edited: Option<i64>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -255,7 +259,26 @@ impl SurrealStore {
                 .series_number
                 .as_ref()
                 .map(|s| s.as_str().to_owned()),
+            date_added: Some(resource.date_added.as_unix_ms()),
+            date_edited: Some(resource.date_edited.as_unix_ms()),
         }
+    }
+
+    /// Stored record-keeping stamps, with the legacy backfill: rows written
+    /// before the dates existed take the id's ULID creation millis as
+    /// `date_added` (the id already encodes when the row was written), and a
+    /// `date_edited` that never got stamped reads as the added date — the
+    /// record has not changed since it joined.
+    fn recorded_dates(
+        added: Option<i64>,
+        edited: Option<i64>,
+        id: ResourceId,
+    ) -> (UtcMillis, UtcMillis) {
+        let date_added = added
+            .map(UtcMillis::from_unix_ms)
+            .unwrap_or_else(|| UtcMillis::from_unix_ms(id.timestamp_ms()));
+        let date_edited = edited.map(UtcMillis::from_unix_ms).unwrap_or(date_added);
+        (date_added, date_edited)
     }
 
     async fn load_creators_from_edges(
@@ -650,10 +673,18 @@ impl Store for SurrealStore {
             .select(Self::resource_key(id))
             .await
             .map_err(map_err)?;
-        if existing.is_none() {
+        let Some(existing_doc) = existing else {
             return Err(StoreError::not_found(format!("resource {id}")));
-        }
-        let resource = Resource::try_new(id, new)?;
+        };
+        // An edit restamps date_edited (try_new_updated stamps now) but
+        // carries the record's date_added forward, whatever legacy row it
+        // replaced.
+        let (date_added, _) = Self::recorded_dates(
+            existing_doc.date_added,
+            existing_doc.date_edited,
+            id,
+        );
+        let resource = Resource::try_new_updated(id, date_added, new)?;
 
         self.db
             .query("BEGIN TRANSACTION")
@@ -723,6 +754,8 @@ impl Store for SurrealStore {
             ),
             None => None,
         };
+        let (date_added, date_edited) =
+            Self::recorded_dates(doc.date_added, doc.date_edited, id);
 
         Resource::from_stored(
             id,
@@ -735,6 +768,8 @@ impl Store for SurrealStore {
             parent_id,
             series_id,
             series_number,
+            date_added,
+            date_edited,
         )
         .map_err(StoreError::from)
     }
@@ -2352,6 +2387,109 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is_not_found());
+    }
+
+    #[tokio::test]
+    async fn resource_record_dates_round_trip_and_update_restamps() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let author = store
+            .create_person(
+                Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let created = store
+            .create_resource(NewResource {
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new("Confessions").unwrap(),
+                creators: vec![CreatorSpec {
+                    person_id: author.id,
+                    role: CreatorRole::Author,
+                    credited_as: None,
+                }],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap();
+        // Create stamps both record-keeping dates with one instant.
+        assert_eq!(created.date_added, created.date_edited);
+
+        let loaded = store.get_resource(created.id).await.unwrap();
+        assert_eq!(
+            (loaded.date_added, loaded.date_edited),
+            (created.date_added, created.date_edited)
+        );
+
+        let mut edit = created.to_new();
+        edit.title = NonEmptyStr::try_new("Retitled").unwrap();
+        let updated = store.update_resource(created.id, edit).await.unwrap();
+        // The edit moves the edited stamp on but never the day the record
+        // joined the library.
+        assert_eq!(updated.date_added, created.date_added);
+        assert!(updated.date_edited.as_unix_ms() >= created.date_edited.as_unix_ms());
+
+        let reloaded = store.get_resource(created.id).await.unwrap();
+        assert_eq!(
+            (reloaded.date_added, reloaded.date_edited),
+            (updated.date_added, updated.date_edited)
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_resource_row_backfills_dates_from_its_id() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let author = store
+            .create_person(
+                Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // A row from before record-keeping dates existed, written raw so
+        // nothing stamps the new fields: only the fields the old schema
+        // carried plus its created edge.
+        let id = ResourceId::generate();
+        store
+            .db
+            .query("CREATE type::record('resource', $id) SET kind = $kind, title = $title")
+            .bind(("id", id.to_string()))
+            .bind(("kind", SerdeWrapper(ResourceKind::Book)))
+            .bind(("title", SerdeWrapper(NonEmptyStr::try_new("Legacy Book").unwrap())))
+            .await
+            .unwrap();
+        store
+            .relate_creators(
+                id,
+                &[Creator {
+                    person_id: author.id,
+                    role: CreatorRole::Author,
+                    order: 0,
+                    credited_as: None,
+                }],
+            )
+            .await
+            .unwrap();
+
+        let loaded = store.get_resource(id).await.unwrap();
+        // The id's ULID already encodes when the row was written, so the
+        // backfill reads exactly that; a record that never changed reads
+        // as edited the day it was added.
+        assert_eq!(loaded.date_added.as_unix_ms(), id.timestamp_ms());
+        assert_eq!(loaded.date_edited, loaded.date_added);
+
+        // An edit of a legacy row keeps the backfilled added date.
+        let mut edit = loaded.to_new();
+        edit.title = NonEmptyStr::try_new("Retitled Legacy").unwrap();
+        let updated = store.update_resource(id, edit).await.unwrap();
+        assert_eq!(updated.date_added.as_unix_ms(), id.timestamp_ms());
+        assert!(updated.date_edited.as_unix_ms() >= loaded.date_edited.as_unix_ms());
     }
 
     #[tokio::test]

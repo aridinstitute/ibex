@@ -72,6 +72,9 @@ async fn create_book_after_create_person() {
     assert_eq!(resource.creators[0].person_id, author_id);
     assert_eq!(resource.creators[0].role, CreatorRole::Author);
     assert_eq!(resource.creators[0].order, 0);
+    // Create stamps both record-keeping dates with one instant: the
+    // record joined the library now and has not changed since.
+    assert_eq!(resource.date_added, resource.date_edited);
 }
 
 #[tokio::test]

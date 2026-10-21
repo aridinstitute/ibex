@@ -401,6 +401,8 @@ impl Handler for GetResourceDetail {
             container_title,
             series_title,
             series_number: resource.series_number,
+            date_added: resource.date_added,
+            date_edited: resource.date_edited,
         }))
     }
 }

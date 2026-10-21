@@ -83,6 +83,9 @@ async fn update_title_round_trip() {
     assert_eq!(updated.creators[0].person_id, author_id);
     assert_eq!(updated.creators[0].role, CreatorRole::Author);
     assert_eq!(updated.creators[0].order, 0);
+    // An edit restamps date_edited but keeps the day the record joined.
+    assert_eq!(updated.date_added, created.date_added);
+    assert!(updated.date_edited.as_unix_ms() >= created.date_edited.as_unix_ms());
 
     let Outcome::GetResource(got) = state
         .execute(Command::GetResource(GetResource { id: created.id }))
@@ -94,6 +97,7 @@ async fn update_title_round_trip() {
     assert_eq!(got.title.as_str(), "Retitled");
     assert_eq!(got.creators.len(), 1);
     assert_eq!(got.creators[0].person_id, author_id);
+    assert_eq!((got.date_added, got.date_edited), (updated.date_added, updated.date_edited));
 }
 
 #[tokio::test]

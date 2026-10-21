@@ -7,7 +7,7 @@ use oeuvre_core::{
     BibliographicDate, Creator, CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr,
     Person, PersonId, Resource, ResourceFilter, ResourceId, ResourceKind, ResourcePage,
     ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage,
-    Store, StoreError, StoreHealth,
+    Store, StoreError, StoreHealth, UtcMillis,
 };
 
 use crate::event::{EventSink, FinishedEvent};
@@ -82,6 +82,8 @@ struct ResourceRow {
     parent_id: Option<ResourceId>,
     series_id: Option<SeriesId>,
     series_number: Option<NonEmptyStr>,
+    date_added: UtcMillis,
+    date_edited: UtcMillis,
 }
 
 struct CreatedEdge {
@@ -439,6 +441,8 @@ impl Store for MemoryStore {
             parent_id: resource.parent_id,
             series_id: resource.series_id,
             series_number: resource.series_number.clone(),
+            date_added: resource.date_added,
+            date_edited: resource.date_edited,
         };
         self.resources
             .lock()
@@ -463,11 +467,14 @@ impl Store for MemoryStore {
         id: ResourceId,
         new: NewResource,
     ) -> Result<Resource, StoreError> {
-        let resource = Resource::try_new(id, new)?;
         let mut resources = self.resources.lock().expect("MemoryStore lock");
-        if !resources.contains_key(&id) {
-            return Err(StoreError::not_found(format!("resource {id}")));
-        }
+        // Existence first, matching the surreal adapter; the row's stamp is
+        // the date_added an edit must carry forward.
+        let date_added = match resources.get(&id) {
+            Some(row) => row.date_added,
+            None => return Err(StoreError::not_found(format!("resource {id}"))),
+        };
+        let resource = Resource::try_new_updated(id, date_added, new)?;
         resources.insert(
             id,
             ResourceRow {
@@ -479,6 +486,8 @@ impl Store for MemoryStore {
                 parent_id: resource.parent_id,
                 series_id: resource.series_id,
                 series_number: resource.series_number.clone(),
+                date_added: resource.date_added,
+                date_edited: resource.date_edited,
             },
         );
         drop(resources);
@@ -514,6 +523,8 @@ impl Store for MemoryStore {
                 parent_id: r.parent_id,
                 series_id: r.series_id,
                 series_number: r.series_number.clone(),
+                date_added: r.date_added,
+                date_edited: r.date_edited,
             })
             .ok_or_else(|| StoreError::not_found(format!("resource {id}")))?;
 
@@ -543,6 +554,8 @@ impl Store for MemoryStore {
             row.parent_id,
             row.series_id,
             row.series_number,
+            row.date_added,
+            row.date_edited,
         )
         .map_err(StoreError::from)
     }
