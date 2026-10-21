@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use oeuvre_core::{
     creator_label_name, format_creators_label, published_label_from, BibliographicDate, Creator,
@@ -9,6 +10,7 @@ use oeuvre_core::{
 };
 use serde::{Deserialize, Serialize};
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
+use surrealdb::opt::Config;
 use surrealdb::sql::Thing;
 use surrealdb::Surreal;
 
@@ -99,7 +101,23 @@ impl SurrealStore {
     }
 
     pub async fn open_memory() -> Result<Self, StoreError> {
-        let db = Surreal::new::<Mem>(()).await.map_err(map_err)?;
+        Self::open_memory_with_query_timeout(None).await
+    }
+
+    /// Open an in-memory store whose every query the datastore caps at
+    /// `query_timeout`. `None` leaves queries unbounded, matching
+    /// [`Self::open_memory`].
+    ///
+    /// The bound is enforced by SurrealDB itself rather than by a caller-side
+    /// race, so an expensive predicate fails with a timeout error instead of
+    /// running to completion. Benchmarks use it to keep a pathological query
+    /// from stalling a run that also measures healthy ones.
+    pub async fn open_memory_with_query_timeout(
+        query_timeout: Option<Duration>,
+    ) -> Result<Self, StoreError> {
+        let db = Surreal::new::<Mem>(Config::new().query_timeout(query_timeout))
+            .await
+            .map_err(map_err)?;
         db.use_ns(NS).use_db(DB).await.map_err(map_err)?;
         let store = Self { db };
         store.ensure_schema().await?;
