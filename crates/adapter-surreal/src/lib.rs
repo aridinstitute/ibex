@@ -3,9 +3,9 @@ use std::path::Path;
 
 use oeuvre_core::{
     creator_label_name, format_creators_label, published_label_from, BibliographicDate, Creator,
-    CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceId,
-    ResourceKind, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId,
-    SortDirection, SortedResourcePage, Store, StoreError, StoreHealth,
+    CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceFilter,
+    ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series,
+    SeriesId, SortDirection, SortedResourcePage, Store, StoreError, StoreHealth,
 };
 use serde::{Deserialize, Serialize};
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -671,15 +671,19 @@ impl Store for SurrealStore {
         // without the sort field land at the no-data end for the direction
         // via the boolean pre-key (`sort_missing`).
         let fetch_limit = (u64::from(limit) + 1).min(u64::from(u32::MAX)) as usize;
+        // Filter predicates AND into one WHERE ahead of the order contract;
+        // values are bound parameters, never interpolated text.
+        let where_sql = filter_where(&query.filter);
         let sql = match query.sort {
             // The default listing order, paged by offset instead of cursor.
-            None => "SELECT id, kind, title, publisher, published, parent FROM resource \
-                     ORDER BY id DESC LIMIT $limit START $offset"
-                .to_owned(),
+            None => format!(
+                "SELECT id, kind, title, publisher, published, parent FROM resource{where_sql} \
+                 ORDER BY id DESC LIMIT $limit START $offset"
+            ),
             Some((ResourceSort::Title, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent FROM resource \
+                    "SELECT id, kind, title, publisher, published, parent FROM resource{where_sql} \
                      ORDER BY title COLLATE {dir}, id DESC LIMIT $limit START $offset"
                 )
             }
@@ -689,7 +693,7 @@ impl Store for SurrealStore {
                     "SELECT id, kind, title, publisher, published, parent, \
                             published.instant AS sort_key, \
                             (IF published THEN false ELSE true END) AS sort_missing \
-                     FROM resource \
+                     FROM resource{where_sql} \
                      ORDER BY sort_missing {dir}, sort_key {dir}, id DESC \
                      LIMIT $limit START $offset"
                 )
@@ -714,7 +718,7 @@ impl Store for SurrealStore {
                          FROM ( \
                              SELECT *, (SELECT order, credited_as, in.name AS name FROM created \
                                   WHERE out = $parent.id ORDER BY order LIMIT 1) AS first \
-                             FROM resource \
+                             FROM resource{where_sql} \
                          ) \
                      ) \
                      ORDER BY sort_missing {dir}, sort_key COLLATE {dir}, id DESC \
@@ -722,13 +726,17 @@ impl Store for SurrealStore {
                 )
             }
         };
-        let mut response = self
+        let mut statement = self
             .db
             .query(sql)
             .bind(("limit", fetch_limit))
-            .bind(("offset", offset))
-            .await
-            .map_err(map_err)?;
+            .bind(("offset", offset));
+        // The needle binds only when its clause is present, and lowercases
+        // once here instead of per row inside the query.
+        if let Some(needle) = query.filter.title.as_ref() {
+            statement = statement.bind(("title_needle", needle.as_str().to_lowercase()));
+        }
+        let mut response = statement.await.map_err(map_err)?;
         let mut rows: Vec<ListResourceRow> = response.take(0).map_err(map_err)?;
         // One extra row decides next_offset exactly, mirroring the cursor
         // page; an offset past the end yields an empty page.
@@ -746,6 +754,16 @@ fn dir_literal(direction: SortDirection) -> &'static str {
     match direction {
         SortDirection::Ascending => "ASC",
         SortDirection::Descending => "DESC",
+    }
+}
+
+/// WHERE fragment for the set filter predicates, empty when none are set.
+/// Each fragment binds its own parameters in `list_resources_query_page`.
+fn filter_where(filter: &ResourceFilter) -> String {
+    if filter.title.is_some() {
+        " WHERE string::lowercase(title) CONTAINS $title_needle".to_owned()
+    } else {
+        String::new()
     }
 }
 
@@ -1023,9 +1041,7 @@ mod tests {
     }
 
     fn sorted_query(field: ResourceSort, direction: SortDirection) -> ResourceQuery {
-        ResourceQuery {
-            sort: Some((field, direction)),
-        }
+        ResourceQuery::sorted(field, direction)
     }
 
     #[tokio::test]
@@ -1261,7 +1277,7 @@ mod tests {
         created.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
 
         let first = store
-            .list_resources_query_page(&ResourceQuery { sort: None }, 0, 2)
+            .list_resources_query_page(&ResourceQuery::newest_first(), 0, 2)
             .await
             .unwrap();
         assert_eq!(
@@ -1271,13 +1287,90 @@ mod tests {
         assert_eq!(first.next_offset, Some(2));
 
         let second = store
-            .list_resources_query_page(&ResourceQuery { sort: None }, 2, 2)
+            .list_resources_query_page(&ResourceQuery::newest_first(), 2, 2)
             .await
             .unwrap();
         assert_eq!(
             second.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
             &created[2..]
         );
+        assert_eq!(second.next_offset, None);
+    }
+
+    fn titled_query(needle: &str) -> ResourceQuery {
+        ResourceQuery {
+            sort: None,
+            filter: ResourceFilter {
+                title: Some(NonEmptyStr::try_new(needle).unwrap()),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn title_filter_matches_case_insensitive_substring() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        for title in ["alpha waves", "Beta modes", "GAMMA nodes"] {
+            sortable_resource(&store, vec![(grace.id, None)], title, None).await;
+        }
+        sortable_container(&store, "Journal of Nothing").await;
+
+        // "MOD" must reach inside "Beta modes" regardless of case.
+        let page = store
+            .list_resources_query_page(&titled_query("MOD"), 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&page), ["Beta modes"]);
+        assert_eq!(page.next_offset, None);
+
+        let none = store
+            .list_resources_query_page(&titled_query("zzz-not-there"), 0, 10)
+            .await
+            .unwrap();
+        assert!(none.rows.is_empty());
+        assert_eq!(none.next_offset, None);
+    }
+
+    #[tokio::test]
+    async fn title_filter_keeps_sort_order_within_matches() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        for title in ["alpha waves", "Beta modes", "GAMMA nodes"] {
+            sortable_resource(&store, vec![(grace.id, None)], title, None).await;
+        }
+
+        let query = ResourceQuery {
+            sort: Some((ResourceSort::Title, SortDirection::Ascending)),
+            filter: ResourceFilter {
+                title: Some(NonEmptyStr::try_new("DE").unwrap()),
+            },
+        };
+        let first = store
+            .list_resources_query_page(&query, 0, 1)
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&first), ["Beta modes"]);
+        assert_eq!(first.next_offset, Some(1));
+
+        let second = store
+            .list_resources_query_page(&query, 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&second), ["GAMMA nodes"]);
         assert_eq!(second.next_offset, None);
     }
 

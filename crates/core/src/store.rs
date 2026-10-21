@@ -83,6 +83,11 @@ pub trait Store: Send + Sync + 'static {
     ///   ascending, first descending);
     /// - ties keep newest-first (id descending) in both directions.
     ///
+    /// Filter contract, shared by every adapter:
+    /// - `filter.title` holds when the title contains the needle,
+    ///   comparing case-insensitively;
+    /// - set predicates AND together: a row must satisfy every one.
+    ///
     /// `offset` is a 0-based window into the ordered list; the page returns
     /// `limit` rows and [`SortedResourcePage::next_offset`] — the offset of
     /// the following page — only when more rows may exist. An offset past

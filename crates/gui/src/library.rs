@@ -1,5 +1,6 @@
 //! Library grid: resource summary rows, one page at a time.
 
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_flex, v_flex};
@@ -7,7 +8,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use oeuvre_core::{
-    ResourceId, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, SortDirection,
+    NonEmptyStr, ResourceFilter, ResourceId, ResourcePage, ResourceQuery, ResourceSort,
+    ResourceSummary, SortDirection,
 };
 
 use crate::db::DbWorker;
@@ -45,7 +47,13 @@ pub struct LibraryDelegate {
     next: PageCursor,
     /// Column sort driving the listing; `None` is the newest-first default.
     sort: Option<(ResourceSort, SortDirection)>,
+    /// Predicates driving the listing; `none()` matches every resource.
+    filter: ResourceFilter,
     error: Option<String>,
+    /// Bumped on every accepted sort or filter change. Each fetch carries
+    /// the generation it was issued for, so a reply landing after a newer
+    /// change is dropped instead of clobbering the newer listing.
+    listing_gen: u64,
 }
 
 impl LibraryDelegate {
@@ -58,7 +66,9 @@ impl LibraryDelegate {
             loading: false,
             next: PageCursor::NewestFirst(first.next_before),
             sort: None,
+            filter: ResourceFilter::none(),
             error: None,
+            listing_gen: 0,
         }
     }
 
@@ -79,29 +89,65 @@ impl LibraryDelegate {
             return;
         }
         self.sort = next_sort(self.sort, field);
+        self.reload_from_top(selected_id, window, cx);
+    }
+
+    /// Re-key the listing under a new title predicate. A keystroke must
+    /// never be dropped, so unlike a sort click this reloads even while a
+    /// fetch is in flight; the listing generation discards whichever reply
+    /// the change made stale.
+    fn request_title_filter(
+        &mut self,
+        needle: Option<NonEmptyStr>,
+        selected_id: Option<ResourceId>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        if self.filter.title == needle {
+            return;
+        }
+        self.filter.title = needle;
+        self.reload_from_top(selected_id, window, cx);
+    }
+
+    /// Fetch the first page under the current sort and filter and replace
+    /// the rows. The fetch carries the generation it serves, and the row
+    /// highlight follows the selected resource by id once it lands.
+    fn reload_from_top(
+        &mut self,
+        selected_id: Option<ResourceId>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        self.listing_gen += 1;
         self.loading = true;
         self.error = None;
         let worker = self.worker.clone();
         let sort = self.sort;
+        let filter = self.filter.clone();
+        let issued_gen = self.listing_gen;
         cx.spawn_in(window, async move |table, window| {
-            let reply = match sort {
-                Some((field, direction)) => worker
-                    .list_query_page(
-                        ResourceQuery {
-                            sort: Some((field, direction)),
-                        },
-                        0,
-                        PAGE_SIZE,
-                    )
-                    .await
-                    .map(|page| (page.rows, PageCursor::Query(page.next_offset))),
-                None => worker
+            // The plain id-cursor walk exists only for the unsorted,
+            // unfiltered default; any sort or filter routes through the
+            // query seam.
+            let reply = if sort.is_none() && !filter.is_active() {
+                worker
                     .list_page(None, PAGE_SIZE)
                     .await
-                    .map(|page| (page.rows, PageCursor::NewestFirst(page.next_before))),
+                    .map(|page| (page.rows, PageCursor::NewestFirst(page.next_before)))
+            } else {
+                worker
+                    .list_query_page(ResourceQuery { sort, filter }, 0, PAGE_SIZE)
+                    .await
+                    .map(|page| (page.rows, PageCursor::Query(page.next_offset)))
             };
             _ = table.update_in(window, |table, _window, cx| {
                 let delegate = table.delegate_mut();
+                // A newer sort or keystroke superseded this fetch; its
+                // rows belong to a listing nobody is looking at.
+                if delegate.listing_gen != issued_gen {
+                    return;
+                }
                 delegate.loading = false;
                 match reply {
                     Ok((rows, next)) => {
@@ -310,12 +356,25 @@ impl TableDelegate for LibraryDelegate {
         self.loading = true;
         self.error = None;
         let worker = self.worker.clone();
-        match (self.sort, self.next) {
-            (None, PageCursor::NewestFirst(Some(before))) => {
+        let sort = self.sort;
+        let filter = self.filter.clone();
+        let issued_gen = self.listing_gen;
+        match self.next {
+            // Cursor kind pins the request shape: the id-cursor walk only
+            // exists while the listing is unsorted and unfiltered, because
+            // reload_from_top re-routes on any sort or filter.
+            PageCursor::NewestFirst(Some(before)) => {
                 cx.spawn_in(window, async move |table, window| {
                     let page = worker.list_page(Some(before), PAGE_SIZE).await;
                     _ = table.update_in(window, |table, _window, cx| {
                         let delegate = table.delegate_mut();
+                        // A sort or keystroke changed the listing after
+                        // this page was requested, so the page belongs to
+                        // a superseded listing; drop it rather than append
+                        // rows the current filter excludes.
+                        if delegate.listing_gen != issued_gen {
+                            return;
+                        }
                         delegate.loading = false;
                         match page {
                             Ok(page) => {
@@ -329,19 +388,16 @@ impl TableDelegate for LibraryDelegate {
                 })
                 .detach();
             }
-            (Some((field, direction)), PageCursor::Query(Some(offset))) => {
+            PageCursor::Query(Some(offset)) => {
                 cx.spawn_in(window, async move |table, window| {
                     let page = worker
-                        .list_query_page(
-                            ResourceQuery {
-                                sort: Some((field, direction)),
-                            },
-                            offset,
-                            PAGE_SIZE,
-                        )
+                        .list_query_page(ResourceQuery { sort, filter }, offset, PAGE_SIZE)
                         .await;
                     _ = table.update_in(window, |table, _window, cx| {
                         let delegate = table.delegate_mut();
+                        if delegate.listing_gen != issued_gen {
+                            return;
+                        }
                         delegate.loading = false;
                         match page {
                             Ok(page) => {
@@ -355,9 +411,8 @@ impl TableDelegate for LibraryDelegate {
                 })
                 .detach();
             }
-            // Cursor mode and sort stay in lockstep (request_sort swaps
-            // both); a mismatch is a state bug, so release the lock and
-            // stop rather than wedge future loads.
+            // Unreachable behind the guard above; a future cursor kind must
+            // not wedge the loading lock, so release it and stop.
             _ => self.loading = false,
         }
     }
@@ -390,6 +445,12 @@ fn next_sort(
     }
 }
 
+/// Title-filter text to a predicate: trimmed text becomes the substring to
+/// match; empty text clears the predicate.
+fn title_predicate(text: &str) -> Option<NonEmptyStr> {
+    NonEmptyStr::try_new(text).ok()
+}
+
 /// Small direction marker beside the header label of the column that
 /// currently drives the order.
 fn sort_marker(direction: SortDirection, cx: &App) -> Icon {
@@ -405,6 +466,8 @@ gpui_kit::actions!([ToggleDetailPanel]);
 
 pub struct LibraryApp {
     table: Entity<TableState<LibraryDelegate>>,
+    /// Title filter box above the grid; its text re-keys the listing.
+    title_input: Entity<InputState>,
     detail_open: bool,
     /// Row selection, tracked here so the panel shows one resource exactly
     /// as long as its row stays selected.
@@ -417,7 +480,7 @@ pub struct LibraryApp {
 impl LibraryApp {
     pub fn new(
         table: Entity<TableState<LibraryDelegate>>,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.subscribe_in(&table, window, |this, _table, event: &TableEvent, window, cx| {
@@ -428,8 +491,37 @@ impl LibraryApp {
             }
         })
         .detach();
+
+        // The box re-keys the listing on every change, clear button
+        // included; the listing generation keeps a late reply from
+        // clobbering the rows a newer keystroke asked for.
+        let title_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter by title"));
+        cx.subscribe_in(
+            &title_input,
+            window,
+            |this, input, event: &InputEvent, window, cx| {
+                // Focus and blur leave the listing alone; only edits count.
+                if !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                let needle = title_predicate(&input.read(cx).value());
+                let selected_id = this
+                    .table
+                    .read(cx)
+                    .selected_row()
+                    .and_then(|ix| this.table.read(cx).delegate().row_id(ix));
+                this.table.update(cx, |table, cx| {
+                    table
+                        .delegate_mut()
+                        .request_title_filter(needle, selected_id, window, cx);
+                });
+            },
+        )
+        .detach();
+
         Self {
             table,
+            title_input,
             detail_open: false,
             selected: None,
             detail: None,
@@ -511,6 +603,21 @@ impl Render for LibraryApp {
                 this.toggle_detail_panel(cx);
             }))
             .child(
+                // Filter bar: every keystroke re-keys the listing, so the
+                // box needs no submit affordance and stays slim above the
+                // grid.
+                h_flex()
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_2()
+                    .child(
+                        Input::new(&self.title_input)
+                            .small()
+                            .cleanable(true)
+                            .w(px(240.)),
+                    ),
+            )
+            .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
@@ -544,7 +651,10 @@ impl Render for LibraryApp {
 mod sort_cycle_tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
-    use super::{next_sort, sort_field_for_col, COL_CREATORS, COL_KIND, COL_PUBLISHED, COL_TITLE};
+    use super::{
+        next_sort, sort_field_for_col, title_predicate, COL_CREATORS, COL_KIND, COL_PUBLISHED,
+        COL_TITLE,
+    };
     use oeuvre_core::{ResourceSort, SortDirection};
 
     #[test]
@@ -583,5 +693,13 @@ mod sort_cycle_tests {
             Some(ResourceSort::Published)
         );
         assert_eq!(sort_field_for_col(COL_KIND), None);
+    }
+
+    #[test]
+    fn title_predicate_trims_and_clears_on_empty() {
+        assert_eq!(title_predicate(""), None);
+        assert_eq!(title_predicate("   "), None);
+        let needle = title_predicate("  MOD ").expect("non-empty needle");
+        assert_eq!(needle.as_str(), "MOD");
     }
 }

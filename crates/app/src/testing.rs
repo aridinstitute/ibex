@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use oeuvre_core::{
     creator_label_name, format_creators_label, primary_creator_sort_key, published_label_from,
     BibliographicDate, Creator, CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr,
-    Person, PersonId, Resource, ResourceId, ResourceKind, ResourcePage, ResourceQuery,
-    ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store,
-    StoreError, StoreHealth,
+    Person, PersonId, Resource, ResourceFilter, ResourceId, ResourceKind, ResourcePage,
+    ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage,
+    Store, StoreError, StoreHealth,
 };
 
 use crate::event::{EventSink, FinishedEvent};
@@ -255,6 +255,36 @@ impl MemoryStore {
         });
         Ok(keyed.into_iter().map(|(id, _)| id).collect())
     }
+
+    /// Keep ids whose rows satisfy every set filter predicate.
+    fn filter_ids(
+        &self,
+        ids: Vec<ResourceId>,
+        filter: &ResourceFilter,
+    ) -> Result<Vec<ResourceId>, StoreError> {
+        // The needle lowercases once, not per row; an unset predicate is a
+        // no-op so the window math stays untouched.
+        let Some(needle) = filter
+            .title
+            .as_ref()
+            .map(|title| title.as_str().to_lowercase())
+        else {
+            return Ok(ids);
+        };
+        let resources = self.resources.lock().expect("MemoryStore lock");
+        Ok(ids
+            .into_iter()
+            .filter(|id| {
+                resources
+                    .get(id)
+                    .expect("ids come from the resources map keys")
+                    .title
+                    .as_str()
+                    .to_lowercase()
+                    .contains(&needle)
+            })
+            .collect())
+    }
 }
 
 impl Default for MemoryStore {
@@ -485,6 +515,8 @@ impl Store for MemoryStore {
             }
             Some((field, direction)) => self.sorted_ids(field, direction)?,
         };
+        // Filters AND before the window: every set predicate must hold.
+        let ids = self.filter_ids(ids, &query.filter)?;
         let start = (offset as usize).min(ids.len());
         let end = start.saturating_add(limit as usize).min(ids.len());
         let rows = self.summaries_in_order(&ids[start..end])?;

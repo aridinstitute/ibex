@@ -256,12 +256,10 @@ mod tests {
         loop {
             let page = worker
                 .list_query_page(
-                    oeuvre_core::ResourceQuery {
-                        sort: Some((
-                            oeuvre_core::ResourceSort::Title,
-                            oeuvre_core::SortDirection::Ascending,
-                        )),
-                    },
+                    oeuvre_core::ResourceQuery::sorted(
+                        oeuvre_core::ResourceSort::Title,
+                        oeuvre_core::SortDirection::Ascending,
+                    ),
                     offset,
                     3,
                 )
@@ -287,6 +285,32 @@ mod tests {
         let mut expected = titles.clone();
         expected.sort();
         assert_eq!(titles, expected);
+    }
+
+    #[tokio::test]
+    async fn worker_filters_query_pages_by_title() {
+        let store = MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        let state = AppState::builder(store).surface(Surface::Test).build();
+        let worker = DbWorker::spawn(state);
+
+        // Exactly one seeded row carries "Networks" in its title.
+        let page = worker
+            .list_query_page(
+                oeuvre_core::ResourceQuery {
+                    sort: None,
+                    filter: oeuvre_core::ResourceFilter {
+                        title: Some(oeuvre_core::NonEmptyStr::try_new("Networks").unwrap()),
+                    },
+                },
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].title.as_str(), "Citation Networks 000");
+        assert_eq!(page.next_offset, None);
     }
 
 }

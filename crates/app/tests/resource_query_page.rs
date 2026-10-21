@@ -8,17 +8,26 @@ use oeuvre_app::testing::{MemorySink, MemoryStore};
 use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
 use oeuvre_core::{
     BibliographicDate, CreatorRole, CreatorSpec, Name, NewResource, NonEmptyStr, PersonId,
-    ResourceId, ResourceKind, ResourceQuery, ResourceSort, SortDirection, Store, UtcMillis,
+    ResourceFilter, ResourceId, ResourceKind, ResourceQuery, ResourceSort, SortDirection, Store,
+    UtcMillis,
 };
 
 fn sorted(field: ResourceSort, direction: SortDirection) -> ResourceQuery {
-    ResourceQuery {
-        sort: Some((field, direction)),
-    }
+    ResourceQuery::sorted(field, direction)
 }
 
 fn newest_first() -> ResourceQuery {
-    ResourceQuery { sort: None }
+    ResourceQuery::newest_first()
+}
+
+/// An unsorted listing narrowed to titles containing `needle`.
+fn titled(needle: &str) -> ResourceQuery {
+    ResourceQuery {
+        sort: None,
+        filter: ResourceFilter {
+            title: Some(NonEmptyStr::try_new(needle).expect("needle non-empty")),
+        },
+    }
 }
 
 fn book_with(authors: Vec<(PersonId, Option<&str>)>, title: &str) -> NewResource {
@@ -366,6 +375,74 @@ async fn offset_past_the_end_yields_an_empty_page() {
     assert_eq!(page.next_offset, None);
 }
 
+#[tokio::test]
+async fn title_filter_matches_case_insensitive_substring() {
+    let store = MemoryStore::new();
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+
+    for title in ["alpha waves", "Beta modes", "GAMMA nodes"] {
+        store
+            .create_resource(book(Some(grace), title))
+            .await
+            .expect("create resource");
+    }
+    store
+        .create_resource(container("Journal of Nothing"))
+        .await
+        .expect("create container");
+
+    // "MOD" must reach inside "Beta modes" regardless of case.
+    let page = store
+        .list_resources_query_page(&titled("MOD"), 0, 10)
+        .await
+        .expect("filtered page");
+    assert_eq!(titles(&page), ["Beta modes"]);
+    assert_eq!(page.next_offset, None);
+
+    // A needle nothing carries narrows to an empty page with a closed end.
+    let none = store
+        .list_resources_query_page(&titled("zzz-not-there"), 0, 10)
+        .await
+        .expect("no-match page");
+    assert!(none.rows.is_empty());
+    assert_eq!(none.next_offset, None);
+}
+
+#[tokio::test]
+async fn title_filter_keeps_the_sort_order_within_matches() {
+    let store = MemoryStore::new();
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+
+    for title in ["alpha waves", "Beta modes", "GAMMA nodes"] {
+        store
+            .create_resource(book(Some(grace), title))
+            .await
+            .expect("create resource");
+    }
+
+    // "DE" matches "Beta modes" and "GAMMA nodes"; the sort orders exactly
+    // those matches, case-insensitively, and the window still pages.
+    let query = ResourceQuery {
+        sort: Some((ResourceSort::Title, SortDirection::Ascending)),
+        filter: ResourceFilter {
+            title: Some(NonEmptyStr::try_new("DE").expect("needle non-empty")),
+        },
+    };
+    let first = store
+        .list_resources_query_page(&query, 0, 1)
+        .await
+        .expect("filtered sorted page");
+    assert_eq!(titles(&first), ["Beta modes"]);
+    assert_eq!(first.next_offset, Some(1));
+
+    let second = store
+        .list_resources_query_page(&query, 1, 1)
+        .await
+        .expect("second filtered sorted page");
+    assert_eq!(titles(&second), ["GAMMA nodes"]);
+    assert_eq!(second.next_offset, None);
+}
+
 // --- Command seam --------------------------------------------------------
 
 fn state_with_sink(sink: &MemorySink) -> AppState {
@@ -462,6 +539,44 @@ async fn query_pages_walk_the_library_through_the_command() {
     };
     assert_eq!(titles(&second), ["charlie nodes"]);
     assert_eq!(second.next_offset, None);
+}
+
+#[tokio::test]
+async fn filtered_query_page_command_emits_filter_event() {
+    let sink = MemorySink::new();
+    let state = state_with_sink(&sink);
+
+    let author_id = seed_author(&state).await;
+    for title in ["alpha waves", "Beta modes", "charlie nodes"] {
+        create_book(&state, author_id, title).await;
+    }
+    let _ = sink.take();
+
+    let Outcome::ListResourcesQueryPage(page) = state
+        .execute(query_page_call(titled("MOD"), 0, 10))
+        .await
+        .unwrap()
+    else {
+        panic!("expected ListResourcesQueryPage");
+    };
+    assert_eq!(titles(&page), ["Beta modes"]);
+
+    let events = sink.take();
+    assert_eq!(events.len(), 1);
+    let ev = &events[0];
+    assert_eq!(ev.get("resource.filter_title"), Some(&FieldValue::from("MOD")));
+
+    // An unfiltered listing carries no filter field.
+    let Outcome::ListResourcesQueryPage(_) = state
+        .execute(query_page_call(newest_first(), 0, 10))
+        .await
+        .unwrap()
+    else {
+        panic!("expected ListResourcesQueryPage");
+    };
+    let events = sink.take();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].get("resource.filter_title"), None);
 }
 
 #[tokio::test]

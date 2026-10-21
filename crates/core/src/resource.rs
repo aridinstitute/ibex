@@ -241,17 +241,60 @@ impl SortDirection {
     }
 }
 
-/// One library listing query: the order rows come back in.
+/// One library listing query: the order rows come back in, plus the
+/// additive predicates every returned row must satisfy.
 ///
 /// `sort: None` is the default listing order — newest-first by id, the
 /// same order [`Store::list_resources_page`] walks by cursor — while
 /// `Some((field, direction))` applies that field's order contract (see
 /// [`ResourceSort`]). Because this seam pages by offset, every order
-/// composes with one window contract.
+/// composes with every filter through one window contract.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResourceQuery {
     /// Field and direction to order by; `None` orders newest-first.
     pub sort: Option<(ResourceSort, SortDirection)>,
+    /// Predicates every returned row must satisfy;
+    /// [`ResourceFilter::none`] matches every resource.
+    pub filter: ResourceFilter,
+}
+
+impl ResourceQuery {
+    /// The default listing: newest-first, unfiltered.
+    pub fn newest_first() -> Self {
+        Self {
+            sort: None,
+            filter: ResourceFilter::none(),
+        }
+    }
+
+    /// A sorted, unfiltered listing.
+    pub fn sorted(field: ResourceSort, direction: SortDirection) -> Self {
+        Self {
+            sort: Some((field, direction)),
+            filter: ResourceFilter::none(),
+        }
+    }
+}
+
+/// Additive predicates a library listing applies before ordering and
+/// paging: every set field must hold (AND). [`ResourceFilter::none`]
+/// matches every resource.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResourceFilter {
+    /// Case-insensitive substring the title must contain.
+    pub title: Option<NonEmptyStr>,
+}
+
+impl ResourceFilter {
+    /// The filter that matches every resource.
+    pub fn none() -> Self {
+        Self { title: None }
+    }
+
+    /// True when at least one predicate is set, so the listing narrows.
+    pub fn is_active(&self) -> bool {
+        self.title.is_some()
+    }
 }
 
 /// One window of a queried library listing from
