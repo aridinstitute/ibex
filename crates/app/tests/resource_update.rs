@@ -396,3 +396,45 @@ async fn update_retype_with_parent_rechecks_parent_kind() {
     assert_eq!(kept.kind, ResourceKind::JournalArticle);
     assert_eq!(kept.parent_id, Some(journal.id));
 }
+
+#[tokio::test]
+async fn update_duplicate_creator_is_invalid() {
+    let sink = MemorySink::new();
+    let state = AppState::builder(MemoryStore::new())
+        .surface(Surface::Test)
+        .sink(sink.clone())
+        .build();
+
+    let author_id = seed_author(&state).await;
+    let Outcome::CreateResource(created) = state
+        .execute(Command::CreateResource(CreateResource {
+            new: book_new(author_id, "Confessions"),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreateResource");
+    };
+
+    // The same person twice in one role is the duplicate the domain
+    // rejects, whatever the route in.
+    let mut edit = created.to_new();
+    edit.creators.push(edit.creators[0].clone());
+    let err = state
+        .execute(Command::UpdateResource(UpdateResource {
+            id: created.id,
+            new: edit,
+        }))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CommandError::Invalid(_)));
+
+    let Outcome::GetResource(kept) = state
+        .execute(Command::GetResource(GetResource { id: created.id }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected GetResource");
+    };
+    assert_eq!(kept.creators.len(), 1);
+}

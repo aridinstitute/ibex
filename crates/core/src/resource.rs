@@ -511,6 +511,22 @@ pub enum CreatorRole {
     Director,
 }
 
+impl CreatorRole {
+    /// Parse the slug the CLI's `--creator` flag takes. `None` on any other
+    /// input, so callers own their error message.
+    pub fn from_slug(s: &str) -> Option<Self> {
+        Some(match s {
+            "author" => Self::Author,
+            "editor" => Self::Editor,
+            "translator" => Self::Translator,
+            "contributor" => Self::Contributor,
+            "host" => Self::Host,
+            "director" => Self::Director,
+            _ => return None,
+        })
+    }
+}
+
 /// Write-side creator link for [`NewResource`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CreatorSpec {
@@ -1120,6 +1136,22 @@ mod tests {
         assert_eq!(ResourceKind::from_slug("novel"), None);
         // Slugs are exact: display case never parses.
         assert_eq!(ResourceKind::from_slug("Book"), None);
+    }
+
+    #[test]
+    fn creator_role_from_slug_parses_every_role() {
+        let pairs = [
+            ("author", CreatorRole::Author),
+            ("editor", CreatorRole::Editor),
+            ("translator", CreatorRole::Translator),
+            ("contributor", CreatorRole::Contributor),
+            ("host", CreatorRole::Host),
+            ("director", CreatorRole::Director),
+        ];
+        for (slug, role) in pairs {
+            assert_eq!(CreatorRole::from_slug(slug), Some(role));
+        }
+        assert_eq!(CreatorRole::from_slug("publisher"), None);
     }
 
     #[test]

@@ -5,8 +5,9 @@ use oeuvre_app::command::{
 };
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
-    BibliographicDate, NewResource, NonEmptyStr, PersonId, PublishedRange, Resource,
-    ResourceFilter, ResourceId, ResourceKind, ResourceQuery, ResourceSummary, SeriesId, UtcMillis,
+    BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId,
+    PublishedRange, Resource, ResourceFilter, ResourceId, ResourceKind, ResourceQuery,
+    ResourceSummary, SeriesId, UtcMillis,
 };
 
 #[derive(Debug, Args)]
@@ -108,6 +109,17 @@ pub struct UpdateArgs {
     /// Set series number to empty.
     #[arg(long, conflicts_with = "series_number")]
     pub clear_series_number: bool,
+
+    /// Replace the creator list, one per creator: `personId:role`, with an
+    /// optional `="Credited as"` display. Roles: author, editor, translator,
+    /// contributor, host, director.
+    #[arg(long = "creator")]
+    pub creators: Vec<String>,
+
+    /// Set the creator list to empty. Containers accept that; other kinds
+    /// are rejected by the update itself.
+    #[arg(long, conflicts_with = "creators")]
+    pub clear_creators: bool,
 }
 
 impl UpdateArgs {
@@ -127,6 +139,8 @@ impl UpdateArgs {
             || self.clear_series
             || self.series_number.is_some()
             || self.clear_series_number
+            || !self.creators.is_empty()
+            || self.clear_creators
     }
 }
 
@@ -326,8 +340,56 @@ fn merge_update(existing: &Resource, args: &UpdateArgs) -> Result<NewResource> {
     if args.clear_series_number {
         edit.series_number = None;
     }
+    if !args.creators.is_empty() {
+        edit.creators = parse_creator_specs(&args.creators)?;
+    }
+    if args.clear_creators {
+        edit.creators = Vec::new();
+    }
 
     Ok(edit)
+}
+
+/// Parse `--creator` values into the replacement list. Each value is
+/// `personId:role`, optionally followed by `="Credited as"`; flag order is
+/// the bibliography order.
+fn parse_creator_specs(values: &[String]) -> Result<Vec<CreatorSpec>> {
+    let mut specs = Vec::with_capacity(values.len());
+    for value in values {
+        // The optional credited display splits off first, so an '=' meant
+        // for the credit can never be eaten by the id or role.
+        let (slot, credited) = match value.split_once('=') {
+            Some((slot, credited)) => (slot, Some(credited)),
+            None => (value.as_str(), None),
+        };
+        let (id, role) = slot
+            .split_once(':')
+            .with_context(|| format!("--creator must be 'personId:role', got '{value}'"))?;
+        let person_id = PersonId::parse(id)
+            .with_context(|| format!("--creator person id '{id}' is not a person id"))?;
+        let role = CreatorRole::from_slug(role)
+            .with_context(|| format!("--creator role '{role}' is not a known role"))?;
+        let credited_as = credited
+            .map(|c| {
+                // An optional surrounding quote pair keeps
+                // `id:role="Credited as"` shell-friendly; a bare credit
+                // works the same without the quotes.
+                let c = if c.len() >= 2 && c.starts_with('"') && c.ends_with('"') {
+                    &c[1..c.len() - 1]
+                } else {
+                    c
+                };
+                NonEmptyStr::try_new(c)
+            })
+            .transpose()
+            .map_err(|_| anyhow!("--creator credited name must not be empty"))?;
+        specs.push(CreatorSpec {
+            person_id,
+            role,
+            credited_as,
+        });
+    }
+    Ok(specs)
 }
 
 /// A year flag's date: the year's January 1 UTC instant, no fuzzy display.
@@ -507,6 +569,8 @@ mod tests {
             clear_series: false,
             series_number: None,
             clear_series_number: false,
+            creators: Vec::new(),
+            clear_creators: false,
         }
     }
 
@@ -637,5 +701,57 @@ mod tests {
         // A number without a series is the command's call to reject, not the
         // merge's; the payload carries it through for that rejection.
         assert_eq!(merged.series_id, None);
+    }
+
+    #[test]
+    fn update_creator_flags_build_the_replacement_list() {
+        let author = PersonId::generate().to_string();
+        let editor = PersonId::generate().to_string();
+        let mut args = update_args();
+        args.creators = vec![
+            format!("{author}:author"),
+            format!("{editor}:editor=\"H. Chadwick\""),
+        ];
+        let merged = merge_update(&existing_book(), &args).expect("creators merge");
+        assert_eq!(merged.creators.len(), 2);
+        assert_eq!(merged.creators[0].person_id.to_string(), author);
+        assert_eq!(merged.creators[0].role, CreatorRole::Author);
+        assert_eq!(merged.creators[0].credited_as, None);
+        assert_eq!(merged.creators[1].person_id.to_string(), editor);
+        assert_eq!(merged.creators[1].role, CreatorRole::Editor);
+        assert_eq!(
+            merged.creators[1].credited_as.as_ref().map(|c| c.as_str()),
+            Some("H. Chadwick")
+        );
+    }
+
+    #[test]
+    fn update_creator_flags_reject_bad_values() {
+        let author = PersonId::generate().to_string();
+        let mut args = update_args();
+
+        args.creators = vec!["nope:author".into()];
+        let err = merge_update(&existing_book(), &args).expect_err("bad person id rejects");
+        assert!(err.to_string().contains("--creator person id"));
+
+        args.creators = vec![format!("{author}:publisher")];
+        let err = merge_update(&existing_book(), &args).expect_err("bad role rejects");
+        assert!(err.to_string().contains("--creator role"));
+
+        args.creators = vec![author.clone()];
+        let err = merge_update(&existing_book(), &args).expect_err("missing role rejects");
+        assert!(err.to_string().contains("--creator must be"));
+
+        args.creators = vec![format!("{author}:author=")];
+        let err = merge_update(&existing_book(), &args).expect_err("empty credit rejects");
+        assert!(err.to_string().contains("credited"));
+    }
+
+    #[test]
+    fn update_clear_creators_empties_the_list() {
+        let mut args = update_args();
+        args.clear_creators = true;
+        let merged = merge_update(&existing_book(), &args).expect("clear merges");
+        assert!(merged.creators.is_empty());
     }
 }
