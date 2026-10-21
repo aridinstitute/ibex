@@ -262,26 +262,44 @@ impl MemoryStore {
         ids: Vec<ResourceId>,
         filter: &ResourceFilter,
     ) -> Result<Vec<ResourceId>, StoreError> {
+        if !filter.is_active() {
+            return Ok(ids);
+        }
         // The needle lowercases once, not per row; an unset predicate is a
         // no-op so the window math stays untouched.
-        let Some(needle) = filter
+        let needle = filter
             .title
             .as_ref()
-            .map(|title| title.as_str().to_lowercase())
-        else {
-            return Ok(ids);
-        };
+            .map(|title| title.as_str().to_lowercase());
+        // Creator membership resolves under its own lock, released before
+        // the resource rows lock, so no path holds both at once.
+        let by_creator: Option<HashSet<ResourceId>> = filter
+            .creator
+            .map(|creator| {
+                self.created
+                    .lock()
+                    .expect("MemoryStore lock")
+                    .iter()
+                    .filter(|edge| edge.person_id == creator)
+                    .map(|edge| edge.resource_id)
+                    .collect()
+            });
         let resources = self.resources.lock().expect("MemoryStore lock");
         Ok(ids
             .into_iter()
             .filter(|id| {
-                resources
+                let resource = resources
                     .get(id)
-                    .expect("ids come from the resources map keys")
-                    .title
-                    .as_str()
-                    .to_lowercase()
-                    .contains(&needle)
+                    .expect("ids come from the resources map keys");
+                if let Some(needle) = needle.as_deref() {
+                    if !resource.title.as_str().to_lowercase().contains(needle) {
+                        return false;
+                    }
+                }
+                by_creator
+                    .as_ref()
+                    .map(|set| set.contains(id))
+                    .unwrap_or(true)
             })
             .collect())
     }

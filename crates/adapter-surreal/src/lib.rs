@@ -123,6 +123,13 @@ impl SurrealStore {
             .query("DEFINE INDEX IF NOT EXISTS created_out ON TABLE created FIELDS out")
             .await;
 
+        // The creator filter walks one person's created edges; the index
+        // keeps that lookup a seek instead of a relation scan.
+        let _ = self
+            .db
+            .query("DEFINE INDEX IF NOT EXISTS created_in ON TABLE created FIELDS in")
+            .await;
+
         let _ = self
             .db
             .query("DEFINE TABLE IF NOT EXISTS series SCHEMALESS")
@@ -736,6 +743,11 @@ impl Store for SurrealStore {
         if let Some(needle) = query.filter.title.as_ref() {
             statement = statement.bind(("title_needle", needle.as_str().to_lowercase()));
         }
+        // The creator binds as its record id, matching the created edges'
+        // `in` links without string building.
+        if let Some(creator) = query.filter.creator {
+            statement = statement.bind(("creator_id", Thing::from(Self::person_key(creator))));
+        }
         let mut response = statement.await.map_err(map_err)?;
         let mut rows: Vec<ListResourceRow> = response.take(0).map_err(map_err)?;
         // One extra row decides next_offset exactly, mirroring the cursor
@@ -760,10 +772,19 @@ fn dir_literal(direction: SortDirection) -> &'static str {
 /// WHERE fragment for the set filter predicates, empty when none are set.
 /// Each fragment binds its own parameters in `list_resources_query_page`.
 fn filter_where(filter: &ResourceFilter) -> String {
+    let mut clauses: Vec<&str> = Vec::new();
     if filter.title.is_some() {
-        " WHERE string::lowercase(title) CONTAINS $title_needle".to_owned()
-    } else {
+        clauses.push("string::lowercase(title) CONTAINS $title_needle");
+    }
+    // Membership rides the created relation: one person's edges name
+    // exactly their works, so shared authorship counts.
+    if filter.creator.is_some() {
+        clauses.push("id IN (SELECT VALUE out FROM created WHERE in = $creator_id)");
+    }
+    if clauses.is_empty() {
         String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
     }
 }
 
@@ -1302,6 +1323,7 @@ mod tests {
             sort: None,
             filter: ResourceFilter {
                 title: Some(NonEmptyStr::try_new(needle).unwrap()),
+                creator: None,
             },
         }
     }
@@ -1357,6 +1379,7 @@ mod tests {
             sort: Some((ResourceSort::Title, SortDirection::Ascending)),
             filter: ResourceFilter {
                 title: Some(NonEmptyStr::try_new("DE").unwrap()),
+                creator: None,
             },
         };
         let first = store
@@ -1374,6 +1397,115 @@ mod tests {
         assert_eq!(second.next_offset, None);
     }
 
+
+    fn creator_query(person: PersonId) -> ResourceQuery {
+        ResourceQuery {
+            sort: None,
+            filter: ResourceFilter {
+                title: None,
+                creator: Some(person),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn creator_filter_matches_only_that_persons_works() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let ada = store
+            .create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let alpha = sortable_resource(&store, vec![(ada.id, None)], "Alpha Waves", None)
+            .await
+            .id;
+        sortable_resource(&store, vec![(grace.id, None)], "Beta Modes", None).await;
+        let shared = sortable_resource(
+            &store,
+            vec![(grace.id, None), (ada.id, None)],
+            "Shared Authorship",
+            None,
+        )
+        .await
+        .id;
+        sortable_container(&store, "Journal of Nothing").await;
+
+        // The created edges drive the predicate, so shared authorship
+        // counts; creatorless containers stay out and the matches keep
+        // the newest-first order, so the expectation follows the ids.
+        let mut expected = vec![shared, alpha];
+        expected.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+        let page = store
+            .list_resources_query_page(&creator_query(ada.id), 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(page.next_offset, None);
+
+        let empty = store
+            .list_resources_query_page(&creator_query(PersonId::generate()), 0, 10)
+            .await
+            .unwrap();
+        assert!(empty.rows.is_empty());
+        assert_eq!(empty.next_offset, None);
+    }
+
+    #[tokio::test]
+    async fn creator_filter_keeps_sort_order_within_matches() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let ada = store
+            .create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        sortable_resource(&store, vec![(ada.id, None)], "Gamma Nodes", None).await;
+        sortable_resource(&store, vec![(grace.id, None)], "Beta Modes", None).await;
+        sortable_resource(&store, vec![(ada.id, None)], "Alpha Waves", None).await;
+
+        let query = ResourceQuery {
+            sort: Some((ResourceSort::Title, SortDirection::Ascending)),
+            filter: ResourceFilter {
+                title: None,
+                creator: Some(ada.id),
+            },
+        };
+        let first = store
+            .list_resources_query_page(&query, 0, 1)
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&first), ["Alpha Waves"]);
+        assert_eq!(first.next_offset, Some(1));
+
+        let second = store
+            .list_resources_query_page(&query, 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&second), ["Gamma Nodes"]);
+        assert_eq!(second.next_offset, None);
+    }
 
     #[tokio::test]
     async fn person_crud_round_trip_memory() {

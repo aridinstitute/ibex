@@ -283,17 +283,22 @@ impl ResourceQuery {
 pub struct ResourceFilter {
     /// Case-insensitive substring the title must contain.
     pub title: Option<NonEmptyStr>,
+    /// A person with a creator edge to the resource, sole or shared.
+    pub creator: Option<PersonId>,
 }
 
 impl ResourceFilter {
     /// The filter that matches every resource.
     pub fn none() -> Self {
-        Self { title: None }
+        Self {
+            title: None,
+            creator: None,
+        }
     }
 
     /// True when at least one predicate is set, so the listing narrows.
     pub fn is_active(&self) -> bool {
-        self.title.is_some()
+        self.title.is_some() || self.creator.is_some()
     }
 }
 

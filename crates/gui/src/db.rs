@@ -1,9 +1,13 @@
 //! Store access for the UI: one OS thread owns a tokio runtime and serves
 //! page requests over channels, so gpui's executor never runs Surreal I/O.
 
-use oeuvre_app::command::{GetResourceDetail, ListResourcesPage, ListResourcesQueryPage};
+use oeuvre_app::command::{
+    GetResourceDetail, ListPersons, ListResourcesPage, ListResourcesQueryPage,
+};
 use oeuvre_app::{AppState, Command, Outcome};
-use oeuvre_core::{ResourceDetail, ResourceId, ResourcePage, ResourceQuery, SortedResourcePage};
+use oeuvre_core::{
+    Person, ResourceDetail, ResourceId, ResourcePage, ResourceQuery, SortedResourcePage,
+};
 use tokio::sync::oneshot;
 
 pub enum DbRequest {
@@ -21,6 +25,9 @@ pub enum DbRequest {
     GetDetail {
         id: ResourceId,
         reply: oneshot::Sender<Result<ResourceDetail, String>>,
+    },
+    ListPersons {
+        reply: oneshot::Sender<Result<Vec<Person>, String>>,
     },
 }
 
@@ -105,6 +112,17 @@ impl DbWorker {
                                     });
                                 let _ = reply.send(result);
                             }
+                            DbRequest::ListPersons { reply } => {
+                                let result = state
+                                    .execute(Command::ListPersons(ListPersons))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::ListPersons(people) => Ok(people),
+                                        _ => Err("unexpected outcome from list_persons".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
                         }
                     }
                 });
@@ -147,6 +165,16 @@ impl DbWorker {
                 limit,
                 reply: tx,
             })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    /// Fetch every person for the creator filter's dropdown.
+    pub async fn list_persons(&self) -> Result<Vec<Person>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::ListPersons { reply: tx })
             .map_err(|_| "db worker stopped".to_string())?;
         rx.await
             .map_err(|_| "db worker dropped the request".to_string())?
@@ -301,6 +329,7 @@ mod tests {
                     sort: None,
                     filter: oeuvre_core::ResourceFilter {
                         title: Some(oeuvre_core::NonEmptyStr::try_new("Networks").unwrap()),
+                        creator: None,
                     },
                 },
                 0,
@@ -310,6 +339,48 @@ mod tests {
             .unwrap();
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.rows[0].title.as_str(), "Citation Networks 000");
+        assert_eq!(page.next_offset, None);
+    }
+
+    #[tokio::test]
+    async fn worker_filters_query_pages_by_creator() {
+        let store = MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        let state = AppState::builder(store).surface(Surface::Test).build();
+        let worker = DbWorker::spawn(state);
+
+        let people = worker.list_persons().await.unwrap();
+        let ada = people
+            .iter()
+            .find(|person| person.name.display() == "Ada Lovelace")
+            .expect("demo people include Ada Lovelace");
+
+        // In the five-row demo cycle Ada authors exactly the n = 0 article
+        // (plus its credited alias) and the companion book; containers
+        // have no creators. The two rows arrive in seed order, so the
+        // assertion reads as a set.
+        let page = worker
+            .list_query_page(
+                oeuvre_core::ResourceQuery {
+                    sort: None,
+                    filter: oeuvre_core::ResourceFilter {
+                        title: None,
+                        creator: Some(ada.id),
+                    },
+                },
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.rows.len(), 2);
+        let mut got: Vec<String> = page
+            .rows
+            .iter()
+            .map(|row| row.title.as_str().to_owned())
+            .collect();
+        got.sort();
+        assert_eq!(got, ["Citation Networks 000", "The Reference Companion"]);
         assert_eq!(page.next_offset, None);
     }
 

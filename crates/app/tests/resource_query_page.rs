@@ -26,6 +26,19 @@ fn titled(needle: &str) -> ResourceQuery {
         sort: None,
         filter: ResourceFilter {
             title: Some(NonEmptyStr::try_new(needle).expect("needle non-empty")),
+            creator: None,
+        },
+    }
+}
+
+/// An unsorted listing narrowed to one person's works: any creator edge
+/// to the person counts, sole or shared.
+fn by_creator(person: PersonId) -> ResourceQuery {
+    ResourceQuery {
+        sort: None,
+        filter: ResourceFilter {
+            title: None,
+            creator: Some(person),
         },
     }
 }
@@ -426,6 +439,7 @@ async fn title_filter_keeps_the_sort_order_within_matches() {
         sort: Some((ResourceSort::Title, SortDirection::Ascending)),
         filter: ResourceFilter {
             title: Some(NonEmptyStr::try_new("DE").expect("needle non-empty")),
+            creator: None,
         },
     };
     let first = store
@@ -444,6 +458,100 @@ async fn title_filter_keeps_the_sort_order_within_matches() {
 }
 
 // --- Command seam --------------------------------------------------------
+
+#[tokio::test]
+async fn creator_filter_matches_only_that_persons_works() {
+    let store = MemoryStore::new();
+    let ada = person(&store, Some("Ada"), Some("Lovelace")).await;
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+
+    let alpha = store
+        .create_resource(book_with(vec![(ada, None)], "Alpha Waves"))
+        .await
+        .expect("create resource")
+        .id;
+    store
+        .create_resource(book_with(vec![(grace, None)], "Beta Modes"))
+        .await
+        .expect("create resource");
+    let shared = store
+        .create_resource(book_with(
+            vec![(grace, None), (ada, None)],
+            "Shared Authorship",
+        ))
+        .await
+        .expect("create resource")
+        .id;
+    // Creatorless containers never match a creator predicate.
+    store
+        .create_resource(container("Journal of Nothing"))
+        .await
+        .expect("create container");
+
+    // Co-authorship counts as much as sole authorship, and the matches
+    // keep the newest-first order, so the expectation follows the ids.
+    let mut expected = vec![shared, alpha];
+    expected.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+    let page = store
+        .list_resources_query_page(&by_creator(ada), 0, 10)
+        .await
+        .expect("creator page");
+    assert_eq!(
+        page.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(page.next_offset, None);
+
+    // An unknown person matches nothing rather than erroring: filters
+    // are predicates, not lookups.
+    let empty = store
+        .list_resources_query_page(&by_creator(PersonId::generate()), 0, 10)
+        .await
+        .expect("unknown creator page");
+    assert!(empty.rows.is_empty());
+    assert_eq!(empty.next_offset, None);
+}
+
+#[tokio::test]
+async fn creator_filter_keeps_the_sort_order_within_matches() {
+    let store = MemoryStore::new();
+    let ada = person(&store, Some("Ada"), Some("Lovelace")).await;
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+
+    store
+        .create_resource(book_with(vec![(ada, None)], "Gamma Nodes"))
+        .await
+        .expect("create resource");
+    store
+        .create_resource(book_with(vec![(grace, None)], "Beta Modes"))
+        .await
+        .expect("create resource");
+    store
+        .create_resource(book_with(vec![(ada, None)], "Alpha Waves"))
+        .await
+        .expect("create resource");
+
+    let query = ResourceQuery {
+        sort: Some((ResourceSort::Title, SortDirection::Ascending)),
+        filter: ResourceFilter {
+            title: None,
+            creator: Some(ada),
+        },
+    };
+    let first = store
+        .list_resources_query_page(&query, 0, 1)
+        .await
+        .expect("first creator-sorted page");
+    assert_eq!(titles(&first), ["Alpha Waves"]);
+    assert_eq!(first.next_offset, Some(1));
+
+    let second = store
+        .list_resources_query_page(&query, 1, 1)
+        .await
+        .expect("second creator-sorted page");
+    assert_eq!(titles(&second), ["Gamma Nodes"]);
+    assert_eq!(second.next_offset, None);
+}
 
 fn state_with_sink(sink: &MemorySink) -> AppState {
     AppState::builder(MemoryStore::new())
@@ -565,6 +673,27 @@ async fn filtered_query_page_command_emits_filter_event() {
     assert_eq!(events.len(), 1);
     let ev = &events[0];
     assert_eq!(ev.get("resource.filter_title"), Some(&FieldValue::from("MOD")));
+
+    // A creator-filtered listing names the person by id.
+    let Outcome::ListResourcesQueryPage(creator_page) = state
+        .execute(query_page_call(by_creator(author_id), 0, 10))
+        .await
+        .unwrap()
+    else {
+        panic!("expected ListResourcesQueryPage");
+    };
+    assert_eq!(creator_page.rows.len(), 3);
+    let mut got = titles(&creator_page);
+    got.sort();
+    assert_eq!(got, ["Beta modes", "alpha waves", "charlie nodes"]);
+
+    let events = sink.take();
+    assert_eq!(events.len(), 1);
+    let ev = &events[0];
+    assert_eq!(
+        ev.get("resource.filter_creator"),
+        Some(&FieldValue::from(author_id.to_string()))
+    );
 
     // An unfiltered listing carries no filter field.
     let Outcome::ListResourcesQueryPage(_) = state

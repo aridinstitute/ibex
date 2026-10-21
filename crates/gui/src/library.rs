@@ -1,6 +1,8 @@
 //! Library grid: resource summary rows, one page at a time.
 
+use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_flex, v_flex};
@@ -8,8 +10,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use oeuvre_core::{
-    NonEmptyStr, ResourceFilter, ResourceId, ResourcePage, ResourceQuery, ResourceSort,
-    ResourceSummary, SortDirection,
+    NonEmptyStr, Person, PersonId, ResourceFilter, ResourceId, ResourcePage, ResourceQuery,
+    ResourceSort, ResourceSummary, SortDirection,
 };
 
 use crate::db::DbWorker;
@@ -107,6 +109,22 @@ impl LibraryDelegate {
             return;
         }
         self.filter.title = needle;
+        self.reload_from_top(selected_id, window, cx);
+    }
+
+    /// Re-key the listing under a new creator predicate; mirrors the title
+    /// box's never-drop-a-change contract.
+    fn request_creator_filter(
+        &mut self,
+        creator: Option<PersonId>,
+        selected_id: Option<ResourceId>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        if self.filter.creator == creator {
+            return;
+        }
+        self.filter.creator = creator;
         self.reload_from_top(selected_id, window, cx);
     }
 
@@ -451,6 +469,36 @@ fn title_predicate(text: &str) -> Option<NonEmptyStr> {
     NonEmptyStr::try_new(text).ok()
 }
 
+/// One row per person for the creator filter box, sorted by display name
+/// so the dropdown reads alphabetically whatever order the store lists in.
+fn creator_options(people: &[Person]) -> Vec<(SharedString, PersonId)> {
+    let mut options: Vec<(SharedString, PersonId)> = people
+        .iter()
+        .map(|person| (person.name.display().into(), person.id))
+        .collect();
+    options.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    options
+}
+
+/// One dropdown row for the creator filter: the name reads, the id keys.
+#[derive(Clone)]
+struct CreatorItem {
+    label: SharedString,
+    id: PersonId,
+}
+
+impl SearchableListItem for CreatorItem {
+    type Value = PersonId;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.id
+    }
+}
+
 /// Small direction marker beside the header label of the column that
 /// currently drives the order.
 fn sort_marker(direction: SortDirection, cx: &App) -> Icon {
@@ -468,6 +516,8 @@ pub struct LibraryApp {
     table: Entity<TableState<LibraryDelegate>>,
     /// Title filter box above the grid; its text re-keys the listing.
     title_input: Entity<InputState>,
+    /// Creator filter box; picking a person re-keys the listing.
+    creator_box: Entity<ComboboxState<SearchableVec<CreatorItem>>>,
     detail_open: bool,
     /// Row selection, tracked here so the panel shows one resource exactly
     /// as long as its row stays selected.
@@ -519,9 +569,63 @@ impl LibraryApp {
         )
         .detach();
 
+        // The creator box starts empty and fills when the person list
+        // lands from the worker; picking or clearing a person re-keys the
+        // listing through the same reload the title box uses.
+        let creator_box = cx.new(|cx| {
+            ComboboxState::new(SearchableVec::new(Vec::new()), Vec::new(), window, cx)
+                .searchable(true)
+        });
+        cx.subscribe_in(
+            &creator_box,
+            window,
+            |this, _box, event: &ComboboxEvent<SearchableVec<CreatorItem>>, window, cx| {
+                // The box is single-select: one id narrows, none clears.
+                let ComboboxEvent::Change(values) = event else {
+                    return;
+                };
+                let creator = values.first().copied();
+                let selected_id = this
+                    .table
+                    .read(cx)
+                    .selected_row()
+                    .and_then(|ix| this.table.read(cx).delegate().row_id(ix));
+                this.table.update(cx, |table, cx| {
+                    table
+                        .delegate_mut()
+                        .request_creator_filter(creator, selected_id, window, cx);
+                });
+            },
+        )
+        .detach();
+
+        let worker = table.read(cx).delegate().worker().clone();
+        let creator_options_box = creator_box.clone();
+        cx.spawn_in(window, async move |app, window| {
+            let reply = worker.list_persons().await;
+            _ = app.update_in(window, |app, window, cx| match reply {
+                Ok(people) => {
+                    let items: Vec<_> = creator_options(&people)
+                        .into_iter()
+                        .map(|(label, id)| CreatorItem { label, id })
+                        .collect();
+                    creator_options_box.update(cx, |state, cx| {
+                        state.set_items(SearchableVec::new(items), window, cx);
+                    });
+                }
+                Err(err) => app.table.update(cx, |table, _cx| {
+                    // The dropdown stays empty; the listing's error line
+                    // explains why.
+                    table.delegate_mut().error = Some(err);
+                }),
+            });
+        })
+        .detach();
+
         Self {
             table,
             title_input,
+            creator_box,
             detail_open: false,
             selected: None,
             detail: None,
@@ -610,11 +714,20 @@ impl Render for LibraryApp {
                     .flex_shrink_0()
                     .px_3()
                     .py_2()
+                    .gap_2()
                     .child(
                         Input::new(&self.title_input)
                             .small()
                             .cleanable(true)
                             .w(px(240.)),
+                    )
+                    .child(
+                        Combobox::new(&self.creator_box)
+                            .small()
+                            .cleanable(true)
+                            .placeholder("Creator")
+                            .search_placeholder("Search creators")
+                            .w(px(220.)),
                     ),
             )
             .child(
@@ -652,10 +765,10 @@ mod sort_cycle_tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
     use super::{
-        next_sort, sort_field_for_col, title_predicate, COL_CREATORS, COL_KIND, COL_PUBLISHED,
-        COL_TITLE,
+        creator_options, next_sort, sort_field_for_col, title_predicate, COL_CREATORS, COL_KIND,
+        COL_PUBLISHED, COL_TITLE,
     };
-    use oeuvre_core::{ResourceSort, SortDirection};
+    use oeuvre_core::{Name, Person, PersonId, ResourceSort, SortDirection};
 
     #[test]
     fn one_header_cycles_ascending_descending_then_reverts() {
@@ -701,5 +814,26 @@ mod sort_cycle_tests {
         assert_eq!(title_predicate("   "), None);
         let needle = title_predicate("  MOD ").expect("non-empty needle");
         assert_eq!(needle.as_str(), "MOD");
+    }
+
+    #[test]
+    fn creator_options_sort_by_display_name() {
+        let hopper = Person::try_new(
+            PersonId::generate(),
+            Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+            vec![],
+        )
+        .unwrap();
+        let lovelace = Person::try_new(
+            PersonId::generate(),
+            Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            vec![],
+        )
+        .unwrap();
+        // The store's listing order must not leak into the dropdown.
+        let options = creator_options(&[hopper, lovelace]);
+        let labels: Vec<&str> = options.iter().map(|(label, _)| label.as_ref()).collect();
+        assert_eq!(labels, ["Ada Lovelace", "Grace Hopper"]);
+        assert!(options.iter().all(|(_, id)| id.as_ulid().timestamp_ms() > 0));
     }
 }
