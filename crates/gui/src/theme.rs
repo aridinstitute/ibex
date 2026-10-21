@@ -15,19 +15,21 @@ pub fn apply(mode: ThemeMode, cx: &mut App) {
 }
 
 /// Recolors only accent-bearing fields; backgrounds, text, borders, and
-/// hover fills keep the kit's neutral values. Light and dark use AppKit's
-/// `systemBlue` for each appearance.
+/// hover fills keep the kit's neutral values. Dark uses AppKit's dark
+/// `systemBlue`. Light uses a deeper blue: GPUI paints in sRGB, where
+/// `#007AFF` reads paler than the Display P3 `systemBlue` macOS draws.
 fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     let dark = mode.is_dark();
     let pick = |light: u32, dark_value: u32| if dark { dark_value } else { light };
-    let blue = rgb(pick(0x007aff, 0x0a84ff)).into();
-    // Selections tint the neutral surface instead of filling it, so row
-    // text keeps the theme foreground in both appearances.
-    let tint = rgba(pick(0x007aff2e, 0x0a84ff4d)).into();
+    let blue = rgb(pick(0x0064ff, 0x0a84ff)).into();
+    // Text selections and dropdown highlights tint the surface, because
+    // their text keeps the theme foreground. Table rows fill solid, and
+    // the grid switches their cells to `primary_foreground`.
+    let tint = rgba(pick(0x0064ff47, 0x0a84ff4d)).into();
 
     colors.primary = blue;
-    colors.primary_hover = rgb(pick(0x0069db, 0x3b9cff)).into();
-    colors.primary_active = rgb(pick(0x0058b8, 0x0071db)).into();
+    colors.primary_hover = rgb(pick(0x0055e0, 0x3b9cff)).into();
+    colors.primary_active = rgb(pick(0x0047bd, 0x0071db)).into();
     colors.primary_foreground = rgb(0xffffff).into();
     colors.button_primary = colors.primary;
     colors.button_primary_hover = colors.primary_hover;
@@ -39,7 +41,7 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     colors.link_hover = colors.primary_hover;
     colors.link_active = colors.primary_active;
     colors.selection = tint;
-    colors.table_active = tint;
+    colors.table_active = blue;
     colors.table_active_border = blue;
     colors.list_active = tint;
     colors.list_active_border = blue;
@@ -75,7 +77,7 @@ mod tests {
 
     #[test]
     fn accent_is_system_blue_and_surfaces_stay_neutral() {
-        for (mode, blue) in [(ThemeMode::Light, 0x007aff), (ThemeMode::Dark, 0x0a84ff)] {
+        for (mode, blue) in [(ThemeMode::Light, 0x0064ff), (ThemeMode::Dark, 0x0a84ff)] {
             let base = neutral_base();
             let colors = palette(mode, base);
             let blue: Hsla = rgb(blue).into();
@@ -83,7 +85,9 @@ mod tests {
             assert_eq!(colors.ring, blue);
             assert_eq!(colors.table_active_border, blue);
             assert!(colors.primary.s > 0.95, "accent must be fully saturated");
-            assert!(colors.table_active.a < 1., "selection tints, not fills");
+            assert_eq!(colors.table_active, blue, "selected rows fill solid");
+            assert!(colors.list_active.a < 1., "dropdown highlights tint");
+            assert!(colors.selection.a < 1., "text selection tints");
             for (field, after, before) in [
                 ("background", colors.background, base.background),
                 ("foreground", colors.foreground, base.foreground),

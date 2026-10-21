@@ -7,7 +7,8 @@ use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, Size, ThemeMode, h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, Size, ThemeColor, ThemeMode,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -61,6 +62,9 @@ pub struct LibraryDelegate {
     /// Whether the header shows its filter row; all controls or none.
     filters_visible: bool,
     error: Option<String>,
+    /// Mirrors the table's selected row from its selection events, because
+    /// `render_td` runs while the table state is borrowed and cannot ask it.
+    selected_row: Option<usize>,
     /// Bumped on every accepted sort or filter change. Each fetch carries
     /// the generation it was issued for, so a reply landing after a newer
     /// change is dropped instead of clobbering the newer listing.
@@ -81,6 +85,7 @@ impl LibraryDelegate {
             filter_inputs: None,
             filters_visible: false,
             error: None,
+            selected_row: None,
             listing_gen: 0,
         }
     }
@@ -400,7 +405,8 @@ impl TableDelegate for LibraryDelegate {
         let Some(row) = self.rows.get(row_ix) else {
             return cell;
         };
-        let muted = cx.theme().muted_foreground;
+        let (text, muted) = cell_text_colors(self.selected_row == Some(row_ix), cx.theme());
+        let cell = cell.text_color(text);
         match col_ix {
             COL_KIND => {
                 let label: SharedString = kind_label(row.kind).into();
@@ -660,6 +666,18 @@ impl SearchableListItem for CreatorItem {
     }
 }
 
+/// (primary, secondary) cell text for a row. The selected row sits on a
+/// solid accent fill, so both turn to the accent's foreground, with the
+/// secondary columns slightly dimmed to keep their hierarchy.
+fn cell_text_colors(selected: bool, colors: &ThemeColor) -> (Hsla, Hsla) {
+    if selected {
+        let on_accent = colors.primary_foreground;
+        (on_accent, on_accent.opacity(0.8))
+    } else {
+        (colors.foreground, colors.muted_foreground)
+    }
+}
+
 /// Small direction marker beside the header label of the column that
 /// currently drives the order.
 fn sort_marker(direction: SortDirection, cx: &App) -> Icon {
@@ -695,10 +713,18 @@ impl LibraryApp {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.subscribe_in(&table, window, |this, _table, event: &TableEvent, window, cx| {
-            match event {
-                TableEvent::SelectRow(row_ix) => this.select_row(*row_ix, window, cx),
-                TableEvent::ClearSelection => this.clear_selection(cx),
-                _ => {}
+            let selected_row = match event {
+                TableEvent::SelectRow(row_ix) => Some(*row_ix),
+                TableEvent::ClearSelection => None,
+                _ => return,
+            };
+            this.table.update(cx, |table, cx| {
+                table.delegate_mut().selected_row = selected_row;
+                cx.notify();
+            });
+            match selected_row {
+                Some(row_ix) => this.select_row(row_ix, window, cx),
+                None => this.clear_selection(cx),
             }
         })
         .detach();
@@ -1011,11 +1037,12 @@ mod sort_cycle_tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
     use super::{
-        creator_options, filter_field_for_col, header_row_height, next_sort, sort_field_for_col,
-        title_predicate, year_instant, year_range, FilterField, COL_CREATORS, COL_KIND,
+        cell_text_colors, creator_options, filter_field_for_col, header_row_height, next_sort,
+        sort_field_for_col, title_predicate, year_instant, year_range, FilterField, COL_CREATORS, COL_KIND,
         COL_PUBLISHED, COL_TITLE,
     };
-    use gpui_kit::px;
+    use gpui_kit::component::ThemeColor;
+    use gpui_kit::{px, rgb, white};
     use oeuvre_core::{Name, Person, PersonId, ResourceSort, SortDirection, UtcMillis};
 
     #[test]
@@ -1141,6 +1168,26 @@ mod sort_cycle_tests {
             filter_field_for_col(COL_PUBLISHED),
             Some(FilterField::Published)
         );
+    }
+
+    #[test]
+    fn selected_row_text_turns_white_on_the_accent_fill() {
+        let colors = ThemeColor {
+            foreground: rgb(0x111111).into(),
+            muted_foreground: rgb(0x777777).into(),
+            primary_foreground: white(),
+            ..ThemeColor::default()
+        };
+        assert_eq!(
+            cell_text_colors(false, &colors),
+            (colors.foreground, colors.muted_foreground)
+        );
+        let (primary, secondary) = cell_text_colors(true, &colors);
+        assert_eq!(primary, white());
+        // Secondary columns stay white, only dimmed, so they still read
+        // on the blue fill.
+        assert_eq!((secondary.h, secondary.s, secondary.l), (0., 0., 1.));
+        assert!(secondary.a < 1. && secondary.a >= 0.75);
     }
 
     #[test]
