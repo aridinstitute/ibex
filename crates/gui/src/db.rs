@@ -424,4 +424,43 @@ mod tests {
         assert_eq!(page.next_offset, None);
     }
 
+    #[tokio::test]
+    async fn worker_ands_all_three_filters() {
+        let store = MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        let state = AppState::builder(store).surface(Surface::Test).build();
+        let worker = DbWorker::spawn(state);
+
+        let people = worker.list_persons().await.unwrap();
+        let ada = people
+            .iter()
+            .find(|person| person.name.display() == "Ada Lovelace")
+            .expect("demo people include Ada Lovelace");
+
+        // Every predicate alone matches several demo rows: "0" is in
+        // every demo title, Ada authored two works, and 1962..=1966 spans
+        // the whole cycle. Only their intersection names one.
+        let page = worker
+            .list_query_page(
+                oeuvre_core::ResourceQuery {
+                    sort: None,
+                    filter: oeuvre_core::ResourceFilter {
+                        title: Some(oeuvre_core::NonEmptyStr::try_new("0").unwrap()),
+                        creator: Some(ada.id),
+                        published: Some(oeuvre_core::PublishedRange {
+                            from: oeuvre_core::UtcMillis::jan_1_utc(1962),
+                            to: oeuvre_core::UtcMillis::jan_1_utc(1967),
+                        }),
+                    },
+                },
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].title.as_str(), "Citation Networks 000");
+        assert_eq!(page.next_offset, None);
+    }
+
 }

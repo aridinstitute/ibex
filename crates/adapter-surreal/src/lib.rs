@@ -1594,12 +1594,22 @@ mod tests {
         );
         assert_eq!(bounded.next_offset, None);
 
-        // Open "from": rows before the bound, never the undated one.
+        // Open "from": rows before the bound, never the undated one;
+        // the expectation follows the ids.
+        let mut open_expected: Vec<ResourceId> = created
+            .iter()
+            .filter(|(_, instant, _)| *instant < 2_500)
+            .map(|(id, _, _)| *id)
+            .collect();
+        open_expected.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
         let open_from = store
             .list_resources_query_page(&ranged_query(None, Some(2_500)), 0, 10)
             .await
             .unwrap();
-        assert_eq!(sorted_titles(&open_from), ["Beta modes", "alpha waves"]);
+        assert_eq!(
+            open_from.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            open_expected
+        );
         assert_eq!(open_from.next_offset, None);
 
         // Open "to": only rows from the bound on.
@@ -1663,6 +1673,54 @@ mod tests {
             .unwrap();
         assert_eq!(sorted_titles(&second), ["GAMMA nodes"]);
         assert_eq!(second.next_offset, None);
+    }
+
+    #[tokio::test]
+    async fn filters_and_together() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let ada = store
+            .create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // Every predicate alone matches several rows; only their
+        // intersection names one.
+        sortable_resource(&store, vec![(ada.id, None)], "alpha waves", Some((1_000, "1999")))
+            .await;
+        sortable_resource(&store, vec![(ada.id, None)], "alpha nodes", Some((2_000, "2001")))
+            .await;
+        sortable_resource(&store, vec![(grace.id, None)], "alpha notes", Some((2_000, "2000")))
+            .await;
+        sortable_resource(&store, vec![(grace.id, None)], "beta waves", Some((1_000, "1998")))
+            .await;
+
+        let query = ResourceQuery {
+            sort: None,
+            filter: ResourceFilter {
+                title: Some(NonEmptyStr::try_new("ALPHA").unwrap()),
+                creator: Some(ada.id),
+                published: Some(oeuvre_core::PublishedRange {
+                    from: Some(oeuvre_core::UtcMillis::from_unix_ms(1_500)),
+                    to: Some(oeuvre_core::UtcMillis::from_unix_ms(3_500)),
+                }),
+            },
+        };
+        let page = store
+            .list_resources_query_page(&query, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&page), ["alpha nodes"]);
+        assert_eq!(page.next_offset, None);
     }
 
     #[tokio::test]

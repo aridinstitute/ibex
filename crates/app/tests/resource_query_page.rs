@@ -582,33 +582,56 @@ async fn published_range_filters_by_instant_not_label() {
     // decides, never the fuzzy display.
     let mut alpha = book_with(vec![(grace, None)], "alpha waves");
     alpha.published = published_with(1_000, "1999");
-    store.create_resource(alpha).await.expect("create resource");
+    let alpha_id = store
+        .create_resource(alpha)
+        .await
+        .expect("create resource")
+        .id;
     let mut beta = book_with(vec![(grace, None)], "Beta modes");
     beta.published = published_with(2_000, "1900");
-    store.create_resource(beta).await.expect("create resource");
+    let beta_id = store
+        .create_resource(beta)
+        .await
+        .expect("create resource")
+        .id;
     let mut charlie = book_with(vec![(grace, None)], "charlie nodes");
     charlie.published = published_with(3_000, "2000");
-    store.create_resource(charlie).await.expect("create resource");
+    let charlie_id = store
+        .create_resource(charlie)
+        .await
+        .expect("create resource")
+        .id;
     // Undated rows only match a window that bounds nothing.
     store
         .create_resource(book_with(vec![(grace, None)], "Delta notes"))
         .await
         .expect("create resource");
 
-    // Bounded: only the instants between the bounds.
+    // Bounded: only the instants between the bounds; the newest-first
+    // expectation follows the ids, since ids settle same-millisecond ties.
+    let mut bounded_expected = vec![beta_id, charlie_id];
+    bounded_expected.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
     let bounded = store
         .list_resources_query_page(&ranged(Some(1_500), Some(3_500)), 0, 10)
         .await
         .expect("bounded page");
-    assert_eq!(titles(&bounded), ["Beta modes", "charlie nodes"]);
+    assert_eq!(
+        bounded.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        bounded_expected
+    );
     assert_eq!(bounded.next_offset, None);
 
     // Open "from": everything before the bound, never the undated row.
+    let mut open_expected = vec![alpha_id, beta_id];
+    open_expected.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
     let open_from = store
         .list_resources_query_page(&ranged(None, Some(2_500)), 0, 10)
         .await
         .expect("open-from page");
-    assert_eq!(titles(&open_from), ["Beta modes", "alpha waves"]);
+    assert_eq!(
+        open_from.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        open_expected
+    );
 
     // Open "to": everything from the bound on.
     let open_to = store
@@ -667,6 +690,46 @@ async fn published_range_keeps_sort_order_within_matches() {
         .expect("second range-sorted page");
     assert_eq!(titles(&second), ["GAMMA nodes"]);
     assert_eq!(second.next_offset, None);
+}
+
+#[tokio::test]
+async fn filters_and_together() {
+    let store = MemoryStore::new();
+    let ada = person(&store, Some("Ada"), Some("Lovelace")).await;
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+
+    // Every predicate alone matches several rows; only their intersection
+    // names one.
+    let mut waves = book_with(vec![(ada, None)], "alpha waves");
+    waves.published = published_with(1_000, "1999");
+    store.create_resource(waves).await.expect("create resource");
+    let mut nodes = book_with(vec![(ada, None)], "alpha nodes");
+    nodes.published = published_with(2_000, "2001");
+    store.create_resource(nodes).await.expect("create resource");
+    let mut notes = book_with(vec![(grace, None)], "alpha notes");
+    notes.published = published_with(2_000, "2000");
+    store.create_resource(notes).await.expect("create resource");
+    let mut beta = book_with(vec![(grace, None)], "beta waves");
+    beta.published = published_with(1_000, "1998");
+    store.create_resource(beta).await.expect("create resource");
+
+    let query = ResourceQuery {
+        sort: None,
+        filter: ResourceFilter {
+            title: Some(NonEmptyStr::try_new("ALPHA").expect("needle non-empty")),
+            creator: Some(ada),
+            published: Some(PublishedRange {
+                from: Some(UtcMillis::from_unix_ms(1_500)),
+                to: Some(UtcMillis::from_unix_ms(3_500)),
+            }),
+        },
+    };
+    let page = store
+        .list_resources_query_page(&query, 0, 10)
+        .await
+        .expect("anded page");
+    assert_eq!(titles(&page), ["alpha nodes"]);
+    assert_eq!(page.next_offset, None);
 }
 
 fn state_with_sink(sink: &MemorySink) -> AppState {
@@ -835,6 +898,48 @@ async fn filtered_query_page_command_emits_filter_event() {
         ev.get("resource.filter_published_to"),
         Some(&FieldValue::from(2i64))
     );
+
+    // All three filters land on one listing and one event: every field
+    // the query carries shows up together. The seeded books are undated,
+    // so the active window excludes them and the narrowing itself is the
+    // demonstration.
+    let Outcome::ListResourcesQueryPage(and_page) = state
+        .execute(query_page_call(
+            ResourceQuery {
+                sort: None,
+                filter: ResourceFilter {
+                    title: Some(NonEmptyStr::try_new("MODE").expect("needle non-empty")),
+                    creator: Some(author_id),
+                    published: Some(PublishedRange {
+                        from: Some(UtcMillis::from_unix_ms(1)),
+                        to: None,
+                    }),
+                },
+            },
+            0,
+            10,
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("expected ListResourcesQueryPage");
+    };
+    assert!(and_page.rows.is_empty());
+
+    let events = sink.take();
+    assert_eq!(events.len(), 1);
+    let ev = &events[0];
+    assert_eq!(ev.get("resource.filter_title"), Some(&FieldValue::from("MODE")));
+    assert_eq!(
+        ev.get("resource.filter_creator"),
+        Some(&FieldValue::from(author_id.to_string()))
+    );
+    assert_eq!(
+        ev.get("resource.filter_published_from"),
+        Some(&FieldValue::from(1i64))
+    );
+    // An open to-bound never appears.
+    assert_eq!(ev.get("resource.filter_published_to"), None);
 
     // An unfiltered listing carries no filter field.
     let Outcome::ListResourcesQueryPage(_) = state
