@@ -6,7 +6,7 @@ use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use oeuvre_core::{format_published_label, CreatorRole, ResourceDetail};
+use oeuvre_core::{format_published_label, format_recorded_date, CreatorRole, ResourceDetail};
 
 use crate::kind::{kind_color, kind_label};
 
@@ -104,6 +104,16 @@ pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
             vec![number.as_str().to_owned()],
         ));
     }
+    // Record-keeping stamps close the panel: they describe the library
+    // record, not the work, and are always present on a stored record.
+    rows.push((
+        "Added".to_string(),
+        vec![format_recorded_date(detail.date_added)],
+    ));
+    rows.push((
+        "Edited".to_string(),
+        vec![format_recorded_date(detail.date_edited)],
+    ));
     rows
 }
 
@@ -275,13 +285,19 @@ mod tests {
 
         let rows = field_rows(&detail);
         let labels: Vec<&str> = rows.iter().map(|(label, _)| label.as_str()).collect();
-        assert_eq!(labels, ["Title", "Kind", "Author", "Published", "In"]);
+        assert_eq!(
+            labels,
+            ["Title", "Kind", "Author", "Published", "In", "Added", "Edited"]
+        );
         assert_eq!(rows[0].1, vec!["Quantum bibliometrics"]);
         assert_eq!(rows[1].1, vec!["Journal article"]);
         // Creator groups carry one line per name; the panel stacks them.
         assert_eq!(rows[2].1, vec!["Ada Lovelace", "G. Hopper"]);
         assert_eq!(rows[3].1, vec!["Summer 2021"]);
         assert_eq!(rows[4].1, vec!["Journal of Citation Studies"]);
+        // The record-keeping stamps read as day labels.
+        assert_eq!(rows[5].1, vec!["Jan 1, 2021"]);
+        assert_eq!(rows[6].1, vec!["Jan 1, 2021"]);
     }
 
     #[test]

@@ -92,6 +92,10 @@ struct ListResourceRow {
     published: Option<BibliographicDate>,
     #[surreal(default)]
     parent: Option<RecordId>,
+    #[surreal(default)]
+    date_added: Option<i64>,
+    #[surreal(default)]
+    date_edited: Option<i64>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -447,6 +451,7 @@ impl SurrealStore {
                 }
                 None => None,
             };
+            let (date_added, date_edited) = Self::recorded_dates(row.date_added, row.date_edited, id);
             summaries.push(ResourceSummary {
                 id,
                 kind: row.kind,
@@ -455,6 +460,8 @@ impl SurrealStore {
                 published_label: published_label_from(row.published.as_ref()),
                 publisher: row.publisher,
                 container_title,
+                date_added,
+                date_edited,
             });
         }
         Ok(summaries)
@@ -793,7 +800,7 @@ impl Store for SurrealStore {
             Some(before) => self
                 .db
                 .query(
-                    "SELECT id, kind, title, publisher, published, parent FROM resource \
+                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited FROM resource \
                      WHERE id < $before ORDER BY id DESC LIMIT $limit",
                 )
                 .bind(("before", Self::resource_key(before)))
@@ -802,7 +809,7 @@ impl Store for SurrealStore {
             None => self
                 .db
                 .query(
-                    "SELECT id, kind, title, publisher, published, parent FROM resource \
+                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited FROM resource \
                      ORDER BY id DESC LIMIT $limit",
                 )
                 .bind(("limit", fetch_limit))
@@ -852,20 +859,20 @@ impl Store for SurrealStore {
         let sql = match query.sort {
             // The default listing order, paged by offset instead of cursor.
             None => format!(
-                "SELECT id, kind, title, publisher, published, parent FROM {from_sql}{where_sql} \
+                "SELECT id, kind, title, publisher, published, parent, date_added, date_edited FROM {from_sql}{where_sql} \
                  ORDER BY id DESC LIMIT $limit START $offset"
             ),
             Some((ResourceSort::Title, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent FROM {from_sql}{where_sql} \
+                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited FROM {from_sql}{where_sql} \
                      ORDER BY title COLLATE {dir}, id DESC LIMIT $limit START $offset"
                 )
             }
             Some((ResourceSort::Published, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, \
+                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
                             published.instant AS sort_key, \
                             (IF published THEN false ELSE true END) AS sort_missing \
                      FROM {from_sql}{where_sql} \
@@ -881,7 +888,7 @@ impl Store for SurrealStore {
             Some((ResourceSort::PrimaryCreator, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, sort_key, \
+                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, sort_key, \
                             (IF sort_key THEN false ELSE true END) AS sort_missing \
                      FROM ( \
                          SELECT *, \
@@ -2439,6 +2446,17 @@ mod tests {
             (reloaded.date_added, reloaded.date_edited),
             (updated.date_added, updated.date_edited)
         );
+
+        // The listing path serves the same stamps to the table columns.
+        let page = store
+            .list_resources_query_page(&ResourceQuery::newest_first(), 0, 10)
+            .await
+            .unwrap();
+        let row = page.rows.iter().find(|row| row.id == created.id).unwrap();
+        assert_eq!(
+            (row.date_added, row.date_edited),
+            (updated.date_added, updated.date_edited)
+        );
     }
 
     #[tokio::test]
@@ -2483,6 +2501,16 @@ mod tests {
         // as edited the day it was added.
         assert_eq!(loaded.date_added.as_unix_ms(), id.timestamp_ms());
         assert_eq!(loaded.date_edited, loaded.date_added);
+
+        // The same backfill flows through listings, so a legacy row shows
+        // its true write day in the table columns without any migration.
+        let page = store
+            .list_resources_query_page(&ResourceQuery::newest_first(), 0, 10)
+            .await
+            .unwrap();
+        let row = page.rows.iter().find(|row| row.id == id).unwrap();
+        assert_eq!(row.date_added.as_unix_ms(), id.timestamp_ms());
+        assert_eq!(row.date_edited, row.date_added);
 
         // An edit of a legacy row keeps the backfilled added date.
         let mut edit = loaded.to_new();

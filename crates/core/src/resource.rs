@@ -272,6 +272,10 @@ pub struct ResourceSummary {
     pub publisher: Option<String>,
     /// Parent resource title when a parent link is set.
     pub container_title: Option<NonEmptyStr>,
+    /// Record-keeping stamps, always present on a stored record; shells
+    /// label them with [`format_recorded_date`].
+    pub date_added: UtcMillis,
+    pub date_edited: UtcMillis,
 }
 
 /// One newest-first page of summary rows from `Store::list_resources_page`.

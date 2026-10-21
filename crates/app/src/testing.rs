@@ -186,6 +186,8 @@ impl MemoryStore {
                 published_label: published_label_from(row.published.as_ref()),
                 publisher: row.publisher.clone(),
                 container_title,
+                date_added: row.date_added,
+                date_edited: row.date_edited,
             });
         }
         Ok(summaries)

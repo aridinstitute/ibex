@@ -444,6 +444,8 @@ mod tests {
             publisher: None,
             container_title: container
                 .map(|c| NonEmptyStr::try_new(c).expect("container non-empty")),
+            date_added: UtcMillis::from_unix_ms(0),
+            date_edited: UtcMillis::from_unix_ms(0),
         }
     }
 

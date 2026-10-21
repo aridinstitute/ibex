@@ -17,9 +17,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use oeuvre_core::{
-    NonEmptyStr, ParentRule, Person, PersonId, PublishedRange, Resource, ResourceDetail,
-    ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort,
-    ResourceSummary, SortDirection, UtcMillis,
+    format_recorded_date, NonEmptyStr, ParentRule, Person, PersonId, PublishedRange, Resource,
+    ResourceDetail, ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery,
+    ResourceSort, ResourceSummary, SortDirection, UtcMillis,
 };
 
 use crate::db::DbWorker;
@@ -46,12 +46,23 @@ const COL_KIND: usize = 0;
 const COL_TITLE: usize = 1;
 const COL_CREATORS: usize = 2;
 const COL_PUBLISHED: usize = 3;
-const COLUMNS: usize = 4;
+const COL_ADDED: usize = 4;
+const COL_EDITED: usize = 5;
+const COL_PUBLISHER: usize = 6;
+const COLUMNS: usize = 7;
 
 /// Stable key for each column, indexed like the COL_ constants above.
 /// Settings persist column widths under these names, so widths survive any
 /// future column reordering.
-const COLUMN_KEYS: [&str; COLUMNS] = ["kind", "title", "creators", "published"];
+const COLUMN_KEYS: [&str; COLUMNS] = [
+    "kind",
+    "title",
+    "creators",
+    "published",
+    "added",
+    "edited",
+    "publisher",
+];
 
 /// The title column's built-in width, half of its former 620 px, so the
 /// grid opens readable on narrower windows.
@@ -410,6 +421,15 @@ impl TableDelegate for LibraryDelegate {
                     140.,
                 ))
                 .min_width(px(50.)),
+            COL_ADDED => Column::new(COLUMN_KEYS[COL_ADDED], "Added")
+                .width(stored_width(&self.settings.column_widths, COL_ADDED, 110.))
+                .min_width(px(50.)),
+            COL_EDITED => Column::new(COLUMN_KEYS[COL_EDITED], "Edited")
+                .width(stored_width(&self.settings.column_widths, COL_EDITED, 110.))
+                .min_width(px(50.)),
+            COL_PUBLISHER => Column::new(COLUMN_KEYS[COL_PUBLISHER], "Publisher")
+                .width(stored_width(&self.settings.column_widths, COL_PUBLISHER, 160.))
+                .min_width(px(60.)),
             _ => unreachable!("columns_count is {COLUMNS}"),
         }
     }
@@ -538,9 +558,22 @@ impl TableDelegate for LibraryDelegate {
                     .truncate()
                     .child(row.creators_label.clone()),
             ),
-            _ => cell
+            COL_PUBLISHED => cell
                 .text_color(muted)
                 .children(row.published_label.as_ref().map(|p| p.as_str().to_owned())),
+            COL_ADDED => cell
+                .text_color(muted)
+                .child(format_recorded_date(row.date_added)),
+            COL_EDITED => cell
+                .text_color(muted)
+                .child(format_recorded_date(row.date_edited)),
+            COL_PUBLISHER => cell.text_color(muted).child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(row.publisher.clone().unwrap_or_default()),
+            ),
+            _ => unreachable!("columns_count is {COLUMNS}"),
         }
     }
     fn cell_text(&self, row_ix: usize, col_ix: usize, _cx: &App) -> String {
@@ -551,11 +584,15 @@ impl TableDelegate for LibraryDelegate {
             COL_KIND => kind_label(row.kind),
             COL_TITLE => row.title.as_str().to_owned(),
             COL_CREATORS => row.creators_label.clone(),
-            _ => row
+            COL_PUBLISHED => row
                 .published_label
                 .as_ref()
                 .map(|p| p.as_str().to_owned())
                 .unwrap_or_default(),
+            COL_ADDED => format_recorded_date(row.date_added),
+            COL_EDITED => format_recorded_date(row.date_edited),
+            COL_PUBLISHER => row.publisher.clone().unwrap_or_default(),
+            _ => unreachable!("columns_count is {COLUMNS}"),
         }
     }
 
@@ -665,7 +702,9 @@ fn sort_field_for_col(col_ix: usize) -> Option<ResourceSort> {
 }
 
 /// The filter a column header carries, mirroring the sort mapping above;
-/// every column filters its own field.
+/// the kind, title, creators, and published columns each filter their own
+/// field, while the record-keeping and publisher columns carry none — the
+/// store exposes no predicate for them yet.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FilterField {
     Kind,
@@ -1978,18 +2017,27 @@ mod column_width_tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
     use super::{
-        COL_CREATORS, COL_PUBLISHED, COL_TITLE, COLUMN_KEYS, COLUMNS, DEFAULT_TITLE_WIDTH,
-        stored_width, widths_by_key,
+        COL_CREATORS, COL_PUBLISHED, COL_PUBLISHER, COL_TITLE, COLUMN_KEYS, COLUMNS,
+        DEFAULT_TITLE_WIDTH, stored_width, widths_by_key,
     };
     use gpui_kit::px;
     use std::collections::BTreeMap;
 
     #[test]
     fn widths_by_key_keys_each_column_by_its_config_key() {
-        let map = widths_by_key(&[px(28.), px(310.), px(260.), px(140.)]);
+        let map = widths_by_key(&[
+            px(28.),
+            px(310.),
+            px(260.),
+            px(140.),
+            px(110.),
+            px(110.),
+            px(160.),
+        ]);
         assert_eq!(map.len(), COLUMNS);
         assert_eq!(map[COLUMN_KEYS[COL_TITLE]], 310.);
         assert_eq!(map[COLUMN_KEYS[COL_PUBLISHED]], 140.);
+        assert_eq!(map[COLUMN_KEYS[COL_PUBLISHER]], 160.);
         assert!(COLUMN_KEYS.iter().all(|key| map.contains_key(*key)));
     }
 
@@ -2282,7 +2330,7 @@ mod parent_options_tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
     use super::{ParentItem, SearchableListItem, parent_options};
-    use oeuvre_core::{NonEmptyStr, ResourceId, ResourceKind, ResourceSummary};
+    use oeuvre_core::{NonEmptyStr, ResourceId, ResourceKind, ResourceSummary, UtcMillis};
 
     fn summary(title: &str) -> ResourceSummary {
         ResourceSummary {
@@ -2293,6 +2341,8 @@ mod parent_options_tests {
             published_label: None,
             publisher: None,
             container_title: None,
+            date_added: UtcMillis::from_unix_ms(0),
+            date_edited: UtcMillis::from_unix_ms(0),
         }
     }
 
