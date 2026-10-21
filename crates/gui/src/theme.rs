@@ -1,75 +1,48 @@
-//! Oeuvre's blue-accented light and dark palettes.
+//! Oeuvre's light and dark palettes: the kit's neutral surfaces with the
+//! macOS system blue as the one accent.
 
 use gpui_kit::component::{Theme, ThemeColor, ThemeMode};
-use gpui_kit::{App, px, rgb};
+use gpui_kit::{App, px, rgb, rgba};
 
 pub fn apply(mode: ThemeMode, cx: &mut App) {
     Theme::change(mode, None, cx);
     Theme::update(cx, |theme| {
         theme.colors = palette(mode, theme.colors);
+        // Root sets the window rem size from this, so every rem-based size
+        // in the kit shrinks with it.
         theme.font_size = px(12.);
     });
 }
 
+/// Recolors only accent-bearing fields; backgrounds, text, borders, and
+/// hover fills keep the kit's neutral values. Light and dark use AppKit's
+/// `systemBlue` for each appearance.
 fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     let dark = mode.is_dark();
-    let color = |light, dark_color| rgb(if dark { dark_color } else { light }).into();
-    colors.background = color(0xf5f8ff, 0x111827);
-    colors.foreground = color(0x17243b, 0xe5edfa);
-    colors.primary = color(0x1764db, 0x5b9dff);
-    colors.primary_hover = color(0x1254bd, 0x80b4ff);
-    colors.primary_active = color(0x10469e, 0x3884ee);
-    colors.primary_foreground = color(0xffffff, 0x0b1628);
-    colors.accent = color(0xe1edff, 0x213a60);
-    colors.accent_foreground = color(0x144fa8, 0xc5ddff);
-    colors.muted = color(0xe8eef8, 0x202d43);
-    colors.muted_foreground = color(0x536580, 0xa3b4ce);
-    colors.border = color(0xcbd7e9, 0x31425e);
-    colors.input = colors.border;
-    colors.ring = colors.primary;
-    colors.caret = colors.primary;
-    colors.selection = color(0xc9dfff, 0x294f80);
-    colors.link = colors.primary;
-    colors.link_hover = colors.primary_hover;
-    colors.link_active = colors.primary_active;
-    colors.button = color(0xffffff, 0x1b2940);
-    colors.button_foreground = colors.foreground;
-    colors.button_hover = colors.accent;
-    colors.button_active = colors.selection;
+    let pick = |light: u32, dark_value: u32| if dark { dark_value } else { light };
+    let blue = rgb(pick(0x007aff, 0x0a84ff)).into();
+    // Selections tint the neutral surface instead of filling it, so row
+    // text keeps the theme foreground in both appearances.
+    let tint = rgba(pick(0x007aff2e, 0x0a84ff4d)).into();
+
+    colors.primary = blue;
+    colors.primary_hover = rgb(pick(0x0069db, 0x3b9cff)).into();
+    colors.primary_active = rgb(pick(0x0058b8, 0x0071db)).into();
+    colors.primary_foreground = rgb(0xffffff).into();
     colors.button_primary = colors.primary;
     colors.button_primary_hover = colors.primary_hover;
     colors.button_primary_active = colors.primary_active;
     colors.button_primary_foreground = colors.primary_foreground;
-    colors.secondary = colors.muted;
-    colors.secondary_foreground = colors.foreground;
-    colors.secondary_hover = colors.accent;
-    colors.secondary_active = colors.selection;
-    colors.table = color(0xffffff, 0x141e30);
-    colors.table_even = color(0xf0f5fd, 0x19263b);
-    colors.table_head = color(0xe4ecf9, 0x22324c);
-    colors.table_head_foreground = colors.foreground;
-    colors.table_hover = color(0xe6f0ff, 0x233b5e);
-    colors.table_active = color(0xcce1ff, 0x284c79);
-    colors.table_active_border = colors.primary;
-    colors.table_row_border = color(0xe3eaf5, 0x24334a);
-    colors.table_foot = colors.table_head;
-    colors.table_foot_foreground = colors.foreground;
-    colors.list = colors.table;
-    colors.list_even = colors.table_even;
-    colors.list_head = colors.table_head;
-    colors.list_hover = colors.table_hover;
-    colors.list_active = colors.table_active;
-    colors.list_active_border = colors.primary;
-    colors.popover = colors.table;
-    colors.popover_foreground = colors.foreground;
-    colors.description_list_label = colors.table_head;
-    colors.description_list_label_foreground = colors.muted_foreground;
-    colors.title_bar = colors.background;
-    colors.title_bar_border = colors.border;
-    colors.scrollbar_thumb = color(0xa6bad8, 0x496181);
-    colors.scrollbar_thumb_hover = colors.primary;
-    colors.switch = colors.muted;
-    colors.skeleton = colors.muted;
+    colors.ring = blue;
+    colors.caret = blue;
+    colors.link = blue;
+    colors.link_hover = colors.primary_hover;
+    colors.link_active = colors.primary_active;
+    colors.selection = tint;
+    colors.table_active = tint;
+    colors.table_active_border = blue;
+    colors.list_active = tint;
+    colors.list_active_border = blue;
     colors
 }
 
@@ -77,23 +50,52 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
 mod tests {
     use super::palette;
     use gpui_kit::component::{ThemeColor, ThemeMode};
+    use gpui_kit::{Hsla, rgb};
+
+    fn neutral_base() -> ThemeColor {
+        let grey = |l| Hsla {
+            h: 0.,
+            s: 0.,
+            l,
+            a: 1.,
+        };
+        ThemeColor {
+            background: grey(0.98),
+            foreground: grey(0.1),
+            border: grey(0.85),
+            accent: grey(0.93),
+            table: grey(0.99),
+            table_even: grey(0.96),
+            table_head: grey(0.95),
+            table_hover: grey(0.94),
+            muted: grey(0.92),
+            ..ThemeColor::default()
+        }
+    }
 
     #[test]
-    fn both_palettes_use_blue_accents_and_distinct_readable_surfaces() {
-        for mode in [ThemeMode::Light, ThemeMode::Dark] {
-            let colors = palette(mode, ThemeColor::default());
-            assert!(colors.primary.h > 0.55 && colors.primary.h < 0.65);
-            assert!(colors.primary.s > 0.7);
-            assert_ne!(colors.table, colors.table_even);
-            assert_ne!(colors.table, colors.table_head);
-            assert_eq!(colors.ring, colors.primary);
-            assert_eq!(colors.table_active_border, colors.primary);
-            if mode.is_dark() {
-                assert!(colors.background.l < 0.15);
-                assert!(colors.foreground.l > 0.85);
-            } else {
-                assert!(colors.background.l > 0.95);
-                assert!(colors.foreground.l < 0.2);
+    fn accent_is_system_blue_and_surfaces_stay_neutral() {
+        for (mode, blue) in [(ThemeMode::Light, 0x007aff), (ThemeMode::Dark, 0x0a84ff)] {
+            let base = neutral_base();
+            let colors = palette(mode, base);
+            let blue: Hsla = rgb(blue).into();
+            assert_eq!(colors.primary, blue);
+            assert_eq!(colors.ring, blue);
+            assert_eq!(colors.table_active_border, blue);
+            assert!(colors.primary.s > 0.95, "accent must be fully saturated");
+            assert!(colors.table_active.a < 1., "selection tints, not fills");
+            for (field, after, before) in [
+                ("background", colors.background, base.background),
+                ("foreground", colors.foreground, base.foreground),
+                ("border", colors.border, base.border),
+                ("accent", colors.accent, base.accent),
+                ("table", colors.table, base.table),
+                ("table_even", colors.table_even, base.table_even),
+                ("table_head", colors.table_head, base.table_head),
+                ("table_hover", colors.table_hover, base.table_hover),
+                ("muted", colors.muted, base.muted),
+            ] {
+                assert_eq!(after, before, "{field} must keep the neutral base");
             }
         }
     }

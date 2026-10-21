@@ -85,8 +85,9 @@ mod native {
             let renderer = SvgRenderer::new(Arc::new(()));
             let image = renderer.render_single_frame(&svg, 1.).expect("valid SVG");
             let pixels = image.as_bytes(0).expect("first frame");
-            assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
-            assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] == 0));
+            let (pixels, _) = pixels.as_chunks::<4>();
+            assert!(pixels.iter().any(|pixel| pixel[3] > 0));
+            assert!(pixels.iter().any(|pixel| pixel[3] == 0));
         }
     }
 }
