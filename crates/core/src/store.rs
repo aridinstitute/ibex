@@ -101,6 +101,7 @@ pub trait Store: Send + Sync + 'static {
     /// Filter contract, shared by every adapter:
     /// - `filter.title` holds when the title contains the needle,
     ///   comparing case-insensitively;
+    /// - `filter.kind` holds when the row's kind equals it;
     /// - set predicates AND together: a row must satisfy every one.
     ///
     /// `offset` is a 0-based window into the ordered list; the page returns

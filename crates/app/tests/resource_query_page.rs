@@ -28,6 +28,7 @@ fn titled(needle: &str) -> ResourceQuery {
             title: Some(NonEmptyStr::try_new(needle).expect("needle non-empty")),
             creator: None,
             published: None,
+            kind: None,
         },
     }
 }
@@ -41,6 +42,7 @@ fn by_creator(person: PersonId) -> ResourceQuery {
             title: None,
             creator: Some(person),
             published: None,
+            kind: None,
         },
     }
 }
@@ -57,7 +59,16 @@ fn ranged(from: Option<i64>, to: Option<i64>) -> ResourceQuery {
                 from: from.map(UtcMillis::from_unix_ms),
                 to: to.map(UtcMillis::from_unix_ms),
             }),
+            kind: None,
         },
+    }
+}
+
+/// An unsorted listing narrowed to one kind of resource.
+fn of_kind(kind: ResourceKind) -> ResourceQuery {
+    ResourceQuery {
+        sort: None,
+        filter: ResourceFilter::by_kind(kind),
     }
 }
 
@@ -459,6 +470,7 @@ async fn title_filter_keeps_the_sort_order_within_matches() {
             title: Some(NonEmptyStr::try_new("DE").expect("needle non-empty")),
             creator: None,
             published: None,
+            kind: None,
         },
     };
     let first = store
@@ -556,6 +568,7 @@ async fn creator_filter_keeps_the_sort_order_within_matches() {
             title: None,
             creator: Some(ada),
             published: None,
+            kind: None,
         },
     };
     let first = store
@@ -675,6 +688,7 @@ async fn published_range_keeps_sort_order_within_matches() {
                 from: Some(UtcMillis::from_unix_ms(1_500)),
                 to: Some(UtcMillis::from_unix_ms(3_500)),
             }),
+            kind: None,
         },
     };
     let first = store
@@ -722,6 +736,7 @@ async fn filters_and_together() {
                 from: Some(UtcMillis::from_unix_ms(1_500)),
                 to: Some(UtcMillis::from_unix_ms(3_500)),
             }),
+            kind: None,
         },
     };
     let page = store
@@ -730,6 +745,41 @@ async fn filters_and_together() {
         .expect("anded page");
     assert_eq!(titles(&page), ["alpha nodes"]);
     assert_eq!(page.next_offset, None);
+}
+
+#[tokio::test]
+async fn kind_filter_yields_only_that_kind() {
+    let store = MemoryStore::new();
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+    // One container among books: the kind predicate narrows to exactly the
+    // journal, whatever else the library holds.
+    store
+        .create_resource(container("Journal of Nothing"))
+        .await
+        .expect("create container");
+    for title in ["alpha waves", "Beta modes"] {
+        store
+            .create_resource(book(Some(grace), title))
+            .await
+            .expect("create resource");
+    }
+
+    let page = store
+        .list_resources_query_page(&of_kind(ResourceKind::Journal), 0, 10)
+        .await
+        .expect("query page");
+    assert_eq!(titles(&page), ["Journal of Nothing"]);
+
+    // The kind predicate ANDs with the others like any set field. Books
+    // created back to back can interleave under newest-first ids, so the
+    // assertion reads as a set.
+    let page = store
+        .list_resources_query_page(&of_kind(ResourceKind::Book), 0, 10)
+        .await
+        .expect("query page");
+    let mut got = titles(&page);
+    got.sort();
+    assert_eq!(got, ["Beta modes", "alpha waves"]);
 }
 
 fn state_with_sink(sink: &MemorySink) -> AppState {
@@ -914,6 +964,7 @@ async fn filtered_query_page_command_emits_filter_event() {
                         from: Some(UtcMillis::from_unix_ms(1)),
                         to: None,
                     }),
+                    kind: Some(ResourceKind::Book),
                 },
             },
             0,
@@ -940,6 +991,11 @@ async fn filtered_query_page_command_emits_filter_event() {
     );
     // An open to-bound never appears.
     assert_eq!(ev.get("resource.filter_published_to"), None);
+    // The kind predicate lands as its slug, alongside the others.
+    assert_eq!(
+        ev.get("resource.filter_kind"),
+        Some(&FieldValue::from("book"))
+    );
 
     // An unfiltered listing carries no filter field.
     let Outcome::ListResourcesQueryPage(_) = state
@@ -952,6 +1008,7 @@ async fn filtered_query_page_command_emits_filter_event() {
     let events = sink.take();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].get("resource.filter_title"), None);
+    assert_eq!(events[0].get("resource.filter_kind"), None);
 }
 
 #[tokio::test]

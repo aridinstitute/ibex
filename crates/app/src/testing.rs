@@ -300,6 +300,11 @@ impl MemoryStore {
                 let resource = resources
                     .get(id)
                     .expect("ids come from the resources map keys");
+                if let Some(kind) = filter.kind {
+                    if resource.kind != kind {
+                        return false;
+                    }
+                }
                 if let Some(needle) = needle.as_deref() {
                     if !resource.title.as_str().to_lowercase().contains(needle) {
                         return false;

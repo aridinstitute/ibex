@@ -353,6 +353,10 @@ pub struct ResourceFilter {
     pub creator: Option<PersonId>,
     /// Window the published instant must fall in.
     pub published: Option<PublishedRange>,
+    /// The exact kind a row must carry, so kind-scoped listings (a parent
+    /// picker's candidates, for instance) narrow at the store instead of
+    /// paging the whole library.
+    pub kind: Option<ResourceKind>,
 }
 
 impl ResourceFilter {
@@ -362,6 +366,15 @@ impl ResourceFilter {
             title: None,
             creator: None,
             published: None,
+            kind: None,
+        }
+    }
+
+    /// The filter matching every resource of one kind.
+    pub fn by_kind(kind: ResourceKind) -> Self {
+        Self {
+            kind: Some(kind),
+            ..Self::none()
         }
     }
 
@@ -369,6 +382,7 @@ impl ResourceFilter {
     pub fn is_active(&self) -> bool {
         self.title.is_some()
             || self.creator.is_some()
+            || self.kind.is_some()
             || self
                 .published
                 .as_ref()
@@ -1279,5 +1293,16 @@ mod tests {
 
         assert_eq!(utc_year_from_millis(0), 1970);
         assert_eq!(utc_year_from_millis(-1), 1969);
+    }
+
+    #[test]
+    fn by_kind_sets_only_kind_and_narrows_the_listing() {
+        let filter = ResourceFilter::by_kind(ResourceKind::Journal);
+        assert_eq!(filter.title, None);
+        assert_eq!(filter.creator, None);
+        assert_eq!(filter.published, None);
+        assert_eq!(filter.kind, Some(ResourceKind::Journal));
+        assert!(filter.is_active());
+        assert!(!ResourceFilter::none().is_active());
     }
 }

@@ -881,6 +881,11 @@ impl Store for SurrealStore {
         if let Some(creator) = query.filter.creator {
             statement = statement.bind(("creator_id", Self::person_key(creator)));
         }
+        // The kind binds as its slug, the same wrapped-enum string the
+        // create path stores, so the clause compares like against like.
+        if let Some(kind) = query.filter.kind {
+            statement = statement.bind(("kind", kind.as_str()));
+        }
         if let Some(range) = query.filter.published {
             if let Some(from) = range.from {
                 statement = statement.bind(("published_from", from.as_unix_ms()));
@@ -932,6 +937,10 @@ fn filter_where(filter: &ResourceFilter) -> String {
     let mut clauses: Vec<&str> = Vec::new();
     if filter.title.is_some() {
         clauses.push("string::lowercase(title) CONTAINS $title_needle");
+    }
+    // The kind clause compares against the wrapped enum's stored slug.
+    if filter.kind.is_some() {
+        clauses.push("kind = $kind");
     }
     // The creator predicate lives in `filter_from`: membership rides the
     // `created` relation, and the source-position traversal is what keeps
@@ -1571,7 +1580,15 @@ mod tests {
                 title: Some(NonEmptyStr::try_new(needle).unwrap()),
                 creator: None,
                 published: None,
+                kind: None,
             },
+        }
+    }
+
+    fn kind_query(kind: ResourceKind) -> ResourceQuery {
+        ResourceQuery {
+            sort: None,
+            filter: ResourceFilter::by_kind(kind),
         }
     }
 
@@ -1608,6 +1625,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kind_filter_yields_only_that_kind() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        for title in ["alpha waves", "Beta modes"] {
+            sortable_resource(&store, vec![(grace.id, None)], title, None).await;
+        }
+        sortable_container(&store, "Journal of Nothing").await;
+
+        // Only the journal carries the queried kind; the books fall
+        // outside the predicate.
+        let page = store
+            .list_resources_query_page(&kind_query(ResourceKind::Journal), 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&page), ["Journal of Nothing"]);
+        assert_eq!(page.next_offset, None);
+
+        // A kind with no rows pages to an honest end, not an error.
+        let none = store
+            .list_resources_query_page(&kind_query(ResourceKind::Podcast), 0, 10)
+            .await
+            .unwrap();
+        assert!(none.rows.is_empty());
+        assert_eq!(none.next_offset, None);
+    }
+
+    #[tokio::test]
     async fn title_filter_keeps_sort_order_within_matches() {
         let store = SurrealStore::open_memory().await.unwrap();
         let grace = store
@@ -1628,6 +1679,7 @@ mod tests {
                 title: Some(NonEmptyStr::try_new("DE").unwrap()),
                 creator: None,
                 published: None,
+                kind: None,
             },
         };
         let first = store
@@ -1653,6 +1705,7 @@ mod tests {
                 title: None,
                 creator: Some(person),
                 published: None,
+                kind: None,
             },
         }
     }
@@ -1742,6 +1795,7 @@ mod tests {
                 title: None,
                 creator: Some(ada.id),
                 published: None,
+                kind: None,
             },
         };
         let first = store
@@ -1812,6 +1866,7 @@ mod tests {
                     from: from.map(oeuvre_core::UtcMillis::from_unix_ms),
                     to: to.map(oeuvre_core::UtcMillis::from_unix_ms),
                 }),
+                kind: None,
             },
         }
     }
@@ -1926,6 +1981,7 @@ mod tests {
                     from: Some(oeuvre_core::UtcMillis::from_unix_ms(1_500)),
                     to: Some(oeuvre_core::UtcMillis::from_unix_ms(3_500)),
                 }),
+                kind: None,
             },
         };
         let first = store
@@ -1981,6 +2037,7 @@ mod tests {
                     from: Some(oeuvre_core::UtcMillis::from_unix_ms(1_500)),
                     to: Some(oeuvre_core::UtcMillis::from_unix_ms(3_500)),
                 }),
+                kind: None,
             },
         };
         let page = store

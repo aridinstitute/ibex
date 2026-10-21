@@ -185,6 +185,7 @@ fn listing_query(args: &ListArgs) -> Result<Option<ResourceQuery>> {
             title,
             creator,
             published,
+            kind: None,
         },
     }))
 }

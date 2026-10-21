@@ -457,6 +457,9 @@ impl Handler for ListResourcesQueryPage {
         if let Some(creator) = self.query.filter.creator {
             ev.set(event::RESOURCE_FILTER_CREATOR, creator.to_string());
         }
+        if let Some(kind) = self.query.filter.kind {
+            ev.set(event::RESOURCE_FILTER_KIND, kind.as_str());
+        }
         if let Some(range) = self.query.filter.published {
             if let Some(from) = range.from {
                 ev.set(event::RESOURCE_FILTER_PUBLISHED_FROM, from.as_unix_ms());
