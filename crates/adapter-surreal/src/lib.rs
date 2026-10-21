@@ -699,16 +699,21 @@ impl Store for SurrealStore {
         // Filter predicates AND into one WHERE ahead of the order contract;
         // values are bound parameters, never interpolated text.
         let where_sql = filter_where(&query.filter);
+        // A creator filter narrows the row set at its source: traversing one
+        // person's `created` edges reaches exactly their works, where a
+        // membership predicate would instead scan every resource and test
+        // each row.
+        let from_sql = filter_from(&query.filter);
         let sql = match query.sort {
             // The default listing order, paged by offset instead of cursor.
             None => format!(
-                "SELECT id, kind, title, publisher, published, parent FROM resource{where_sql} \
+                "SELECT id, kind, title, publisher, published, parent FROM {from_sql}{where_sql} \
                  ORDER BY id DESC LIMIT $limit START $offset"
             ),
             Some((ResourceSort::Title, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent FROM resource{where_sql} \
+                    "SELECT id, kind, title, publisher, published, parent FROM {from_sql}{where_sql} \
                      ORDER BY title COLLATE {dir}, id DESC LIMIT $limit START $offset"
                 )
             }
@@ -718,7 +723,7 @@ impl Store for SurrealStore {
                     "SELECT id, kind, title, publisher, published, parent, \
                             published.instant AS sort_key, \
                             (IF published THEN false ELSE true END) AS sort_missing \
-                     FROM resource{where_sql} \
+                     FROM {from_sql}{where_sql} \
                      ORDER BY sort_missing {dir}, sort_key {dir}, id DESC \
                      LIMIT $limit START $offset"
                 )
@@ -743,7 +748,7 @@ impl Store for SurrealStore {
                          FROM ( \
                              SELECT *, (SELECT order, credited_as, in.name AS name FROM created \
                                   WHERE out = $parent.id ORDER BY order LIMIT 1) AS first \
-                             FROM resource{where_sql} \
+                             FROM {from_sql}{where_sql} \
                          ) \
                      ) \
                      ORDER BY sort_missing {dir}, sort_key COLLATE {dir}, id DESC \
@@ -795,6 +800,22 @@ fn dir_literal(direction: SortDirection) -> &'static str {
     }
 }
 
+/// Row source the query selects from. The creator predicate resolves by
+/// traversal from the person rather than by testing membership row by row:
+/// `array::distinct` collapses the one-row-per-`created`-edge traversal to
+/// one row per resource, so a person holding two roles on the same resource
+/// still yields that resource once.
+///
+/// Traversal from a record is only fast in the source position; the same
+/// expression inside `WHERE id IN …` still scans every resource.
+fn filter_from(filter: &ResourceFilter) -> &'static str {
+    if filter.creator.is_some() {
+        "array::distinct($creator_id->created->resource)"
+    } else {
+        "resource"
+    }
+}
+
 /// WHERE fragment for the set filter predicates, empty when none are set.
 /// Each fragment binds its own parameters in `list_resources_query_page`.
 fn filter_where(filter: &ResourceFilter) -> String {
@@ -802,11 +823,9 @@ fn filter_where(filter: &ResourceFilter) -> String {
     if filter.title.is_some() {
         clauses.push("string::lowercase(title) CONTAINS $title_needle");
     }
-    // Membership rides the created relation: one person's edges name
-    // exactly their works, so shared authorship counts.
-    if filter.creator.is_some() {
-        clauses.push("id IN (SELECT VALUE out FROM created WHERE in = $creator_id)");
-    }
+    // The creator predicate lives in `filter_from`: membership rides the
+    // `created` relation, and the source-position traversal is what keeps
+    // it off a full resource scan.
     // The window bounds the stored instant. Surreal orders NONE before
     // every value, so a bare `instant < to` would pass undated rows; the
     // published guard keeps the window about dated rows only, matching
@@ -869,6 +888,79 @@ mod tests {
             })
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn creator_filter_yields_each_resource_once() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let ada = store
+            .create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap()
+            .id;
+        // Two roles on one resource means two `created` edges. The filter
+        // traverses those edges, so without dedupe this resource would page
+        // as two identical rows.
+        store
+            .create_resource(NewResource {
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new("Two Roles").unwrap(),
+                creators: vec![
+                    CreatorSpec {
+                        person_id: ada,
+                        role: CreatorRole::Author,
+                        credited_as: None,
+                    },
+                    CreatorSpec {
+                        person_id: ada,
+                        role: CreatorRole::Editor,
+                        credited_as: None,
+                    },
+                ],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap();
+        store
+            .create_resource(NewResource {
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new("Single Role").unwrap(),
+                creators: vec![CreatorSpec {
+                    person_id: ada,
+                    role: CreatorRole::Author,
+                    credited_as: None,
+                }],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap();
+
+        let query = ResourceQuery {
+            sort: None,
+            filter: ResourceFilter {
+                creator: Some(ada),
+                ..ResourceFilter::none()
+            },
+        };
+        let page = store
+            .list_resources_query_page(&query, 0, 50)
+            .await
+            .unwrap();
+        let titles: Vec<&str> = page.rows.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, vec!["Single Role", "Two Roles"]);
     }
 
     #[tokio::test]
@@ -1550,6 +1642,48 @@ mod tests {
             .unwrap();
         assert_eq!(sorted_titles(&second), ["Gamma Nodes"]);
         assert_eq!(second.next_offset, None);
+    }
+
+    #[tokio::test]
+    async fn creator_filter_composes_with_primary_creator_sort() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let ada = store
+            .create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // Ada co-authors one resource whose first creator is Grace, so the
+        // filter key and the sort key deliberately differ.
+        sortable_resource(&store, vec![(grace.id, None)], "Grace Solo", None).await;
+        sortable_resource(&store, vec![(grace.id, None), (ada.id, None)], "Shared Work", None)
+            .await;
+        sortable_resource(&store, vec![(ada.id, None)], "Ada Solo", None).await;
+
+        let query = ResourceQuery {
+            sort: Some((ResourceSort::PrimaryCreator, SortDirection::Ascending)),
+            filter: ResourceFilter {
+                creator: Some(ada.id),
+                ..ResourceFilter::none()
+            },
+        };
+        let page = store
+            .list_resources_query_page(&query, 0, 10)
+            .await
+            .unwrap();
+        // Only Ada's two works, ordered by their first creator's family name:
+        // "Shared Work" (Hopper, Grace is first) before "Ada Solo" (Lovelace).
+        assert_eq!(sorted_titles(&page), ["Shared Work", "Ada Solo"]);
+        assert_eq!(page.next_offset, None);
     }
 
     fn ranged_query(from: Option<i64>, to: Option<i64>) -> ResourceQuery {
