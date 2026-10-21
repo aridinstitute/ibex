@@ -46,9 +46,9 @@ const COL_KIND: usize = 0;
 const COL_TITLE: usize = 1;
 const COL_CREATORS: usize = 2;
 const COL_PUBLISHED: usize = 3;
-const COL_ADDED: usize = 4;
-const COL_EDITED: usize = 5;
-const COL_PUBLISHER: usize = 6;
+const COL_PUBLISHER: usize = 4;
+const COL_ADDED: usize = 5;
+const COL_EDITED: usize = 6;
 const COLUMNS: usize = 7;
 
 /// Stable key for each column, indexed like the COL_ constants above.
@@ -59,9 +59,9 @@ const COLUMN_KEYS: [&str; COLUMNS] = [
     "title",
     "creators",
     "published",
+    "publisher",
     "added",
     "edited",
-    "publisher",
 ];
 
 /// The title column's built-in width, half of its former 620 px, so the
@@ -697,6 +697,9 @@ fn sort_field_for_col(col_ix: usize) -> Option<ResourceSort> {
         COL_TITLE => Some(ResourceSort::Title),
         COL_CREATORS => Some(ResourceSort::PrimaryCreator),
         COL_PUBLISHED => Some(ResourceSort::Published),
+        COL_PUBLISHER => Some(ResourceSort::Publisher),
+        COL_ADDED => Some(ResourceSort::DateAdded),
+        COL_EDITED => Some(ResourceSort::DateEdited),
         _ => None,
     }
 }
@@ -2030,9 +2033,9 @@ mod column_width_tests {
             px(310.),
             px(260.),
             px(140.),
-            px(110.),
-            px(110.),
             px(160.),
+            px(110.),
+            px(110.),
         ]);
         assert_eq!(map.len(), COLUMNS);
         assert_eq!(map[COLUMN_KEYS[COL_TITLE]], 310.);
