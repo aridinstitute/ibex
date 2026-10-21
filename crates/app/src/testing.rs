@@ -1,7 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use oeuvre_core::{Name, NameKey, Person, PersonId, Store, StoreError, StoreHealth};
+use oeuvre_core::{
+    creator_label_name, format_creators_label, published_label_from, BibliographicDate, Creator,
+    CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource,
+    ResourceId, ResourceKind, ResourceSummary, Series, SeriesId, Store, StoreError, StoreHealth,
+};
 
 use crate::event::{EventSink, FinishedEvent};
 
@@ -66,14 +70,39 @@ impl PeopleState {
     }
 }
 
+struct ResourceRow {
+    kind: ResourceKind,
+    title: NonEmptyStr,
+    publisher: Option<String>,
+    published: Option<BibliographicDate>,
+    accessed: Option<BibliographicDate>,
+    parent_id: Option<ResourceId>,
+    series_id: Option<SeriesId>,
+    series_number: Option<NonEmptyStr>,
+}
+
+struct CreatedEdge {
+    person_id: PersonId,
+    resource_id: ResourceId,
+    role: CreatorRole,
+    order: u32,
+    credited_as: Option<NonEmptyStr>,
+}
+
 pub struct MemoryStore {
     people: Mutex<PeopleState>,
+    series: Mutex<HashMap<SeriesId, Series>>,
+    resources: Mutex<HashMap<ResourceId, ResourceRow>>,
+    created: Mutex<Vec<CreatedEdge>>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self {
             people: Mutex::new(PeopleState::new()),
+            series: Mutex::new(HashMap::new()),
+            resources: Mutex::new(HashMap::new()),
+            created: Mutex::new(Vec::new()),
         }
     }
 }
@@ -159,6 +188,154 @@ impl Store for MemoryStore {
         let state = self.people.lock().expect("MemoryStore lock");
         Ok(state.by_id.values().cloned().collect())
     }
+
+    async fn create_series(&self, new: NewSeries) -> Result<Series, StoreError> {
+        let series = Series::try_new(SeriesId::generate(), new);
+        self.series
+            .lock()
+            .expect("MemoryStore lock")
+            .insert(series.id, series.clone());
+        Ok(series)
+    }
+
+    async fn get_series(&self, id: SeriesId) -> Result<Series, StoreError> {
+        self.series
+            .lock()
+            .expect("MemoryStore lock")
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| StoreError::not_found(format!("series {id}")))
+    }
+
+    async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError> {
+        let resource = Resource::try_new(ResourceId::generate(), new)?;
+        let row = ResourceRow {
+            kind: resource.kind,
+            title: resource.title.clone(),
+            publisher: resource.publisher.clone(),
+            published: resource.published.clone(),
+            accessed: resource.accessed.clone(),
+            parent_id: resource.parent_id,
+            series_id: resource.series_id,
+            series_number: resource.series_number.clone(),
+        };
+        self.resources
+            .lock()
+            .expect("MemoryStore lock")
+            .insert(resource.id, row);
+
+        let mut edges = self.created.lock().expect("MemoryStore lock");
+        for creator in &resource.creators {
+            edges.push(CreatedEdge {
+                person_id: creator.person_id,
+                resource_id: resource.id,
+                role: creator.role,
+                order: creator.order,
+                credited_as: creator.credited_as.clone(),
+            });
+        }
+        Ok(resource)
+    }
+
+    async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError> {
+        let row = self
+            .resources
+            .lock()
+            .expect("MemoryStore lock")
+            .get(&id)
+            .map(|r| ResourceRow {
+                kind: r.kind,
+                title: r.title.clone(),
+                publisher: r.publisher.clone(),
+                published: r.published.clone(),
+                accessed: r.accessed.clone(),
+                parent_id: r.parent_id,
+                series_id: r.series_id,
+                series_number: r.series_number.clone(),
+            })
+            .ok_or_else(|| StoreError::not_found(format!("resource {id}")))?;
+
+        let mut creators: Vec<Creator> = self
+            .created
+            .lock()
+            .expect("MemoryStore lock")
+            .iter()
+            .filter(|e| e.resource_id == id)
+            .map(|e| Creator {
+                person_id: e.person_id,
+                role: e.role,
+                order: e.order,
+                credited_as: e.credited_as.clone(),
+            })
+            .collect();
+        creators.sort_by_key(|c| c.order);
+
+        Resource::from_stored(
+            id,
+            row.kind,
+            row.title,
+            creators,
+            row.publisher,
+            row.published,
+            row.accessed,
+            row.parent_id,
+            row.series_id,
+            row.series_number,
+        )
+        .map_err(StoreError::from)
+    }
+
+    async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError> {
+        let resources = self.resources.lock().expect("MemoryStore lock");
+        let created = self.created.lock().expect("MemoryStore lock");
+        let people = self.people.lock().expect("MemoryStore lock");
+
+        let mut ids: Vec<ResourceId> = resources.keys().copied().collect();
+        ids.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+
+        let mut summaries = Vec::with_capacity(ids.len());
+        for id in ids {
+            let row = resources
+                .get(&id)
+                .expect("id taken from resources keys");
+            let mut edges: Vec<&CreatedEdge> = created
+                .iter()
+                .filter(|e| e.resource_id == id)
+                .collect();
+            edges.sort_by_key(|e| e.order);
+
+            let names: Vec<String> = edges
+                .iter()
+                .map(|e| {
+                    let person = people.by_id.get(&e.person_id).ok_or_else(|| {
+                        StoreError::new(format!(
+                            "created edge references missing person {}",
+                            e.person_id
+                        ))
+                    })?;
+                    Ok(creator_label_name(e.credited_as.as_ref(), &person.name))
+                })
+                .collect::<Result<Vec<_>, StoreError>>()?;
+
+            let container_title = match row.parent_id {
+                Some(parent_id) => resources
+                    .get(&parent_id)
+                    .map(|parent| parent.title.clone()),
+                None => None,
+            };
+
+            summaries.push(ResourceSummary {
+                id,
+                kind: row.kind,
+                title: row.title.clone(),
+                creators_label: format_creators_label(&names),
+                published_label: published_label_from(row.published.as_ref()),
+                publisher: row.publisher.clone(),
+                container_title,
+            });
+        }
+        Ok(summaries)
+    }
 }
 
 pub struct StubStore {
@@ -226,5 +403,25 @@ impl Store for StubStore {
 
     async fn list_persons(&self) -> Result<Vec<Person>, StoreError> {
         Err(unsupported("list_persons"))
+    }
+
+    async fn create_series(&self, _new: NewSeries) -> Result<Series, StoreError> {
+        Err(unsupported("create_series"))
+    }
+
+    async fn get_series(&self, _id: SeriesId) -> Result<Series, StoreError> {
+        Err(unsupported("get_series"))
+    }
+
+    async fn create_resource(&self, _new: NewResource) -> Result<Resource, StoreError> {
+        Err(unsupported("create_resource"))
+    }
+
+    async fn get_resource(&self, _id: ResourceId) -> Result<Resource, StoreError> {
+        Err(unsupported("get_resource"))
+    }
+
+    async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError> {
+        Err(unsupported("list_resources"))
     }
 }

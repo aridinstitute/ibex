@@ -11,4 +11,5 @@ repository.workspace = true
 async-trait = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+time = { workspace = true }
 ulid = { workspace = true }

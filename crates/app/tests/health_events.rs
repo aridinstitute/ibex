@@ -10,7 +10,9 @@ use oeuvre_app::testing::{MemorySink, StubStore};
 use oeuvre_app::{
     AppState, Command, CommandError, FieldValue, Outcome, Status, Store, StoreError, StoreHealth,
 };
-use oeuvre_core::{Name, Person, PersonId};
+use oeuvre_core::{
+    Name, NewResource, NewSeries, Person, PersonId, Resource, ResourceId, Series, SeriesId,
+};
 
 #[tokio::test]
 async fn health_emits_exactly_one_ok_event() {
@@ -94,6 +96,26 @@ impl Store for HangStore {
     }
 
     async fn list_persons(&self) -> Result<Vec<Person>, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn create_series(&self, _new: NewSeries) -> Result<Series, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn get_series(&self, _id: SeriesId) -> Result<Series, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn create_resource(&self, _new: NewResource) -> Result<Resource, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn get_resource(&self, _id: ResourceId) -> Result<Resource, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn list_resources(&self) -> Result<Vec<oeuvre_core::ResourceSummary>, StoreError> {
         std::future::pending().await
     }
 }

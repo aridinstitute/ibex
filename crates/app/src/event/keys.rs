@@ -29,6 +29,8 @@ pub(crate) const PERSON_DISPLAY: Key = Key::new("person.display");
 pub(crate) const RESOURCE_ID: Key = Key::new("resource.id");
 pub(crate) const RESOURCE_KIND: Key = Key::new("resource.kind");
 pub(crate) const RESOURCE_TITLE: Key = Key::new("resource.title");
+pub(crate) const SERIES_ID: Key = Key::new("series.id");
+pub(crate) const SERIES_TITLE: Key = Key::new("series.title");
 
 #[cfg(test)]
 mod tests {
@@ -51,6 +53,8 @@ mod tests {
         RESOURCE_ID,
         RESOURCE_KIND,
         RESOURCE_TITLE,
+        SERIES_ID,
+        SERIES_TITLE,
     ];
 
     #[test]
