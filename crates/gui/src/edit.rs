@@ -16,28 +16,30 @@ use crate::kind::kind_label;
 
 /// One value per scalar the form edits. The panel reads its input entities
 /// into this plain shape at save time, so the payload build below stays
-/// window-free and unit-testable.
+/// window-free and unit-testable. Parent and series are ids, not free
+/// text: the parent arrives from a dropdown keyed by id, the series rides
+/// through until series storage lands a listing API.
 pub struct EditDraft {
     pub title: String,
     pub kind: ResourceKind,
+    pub parent: Option<ResourceId>,
     pub publisher: String,
     pub published_year: String,
     pub accessed_year: String,
-    pub parent: String,
     pub series: String,
     pub series_number: String,
 }
 
-/// The text each input opens with: the stored record's own values,
-/// optional fields empty when the record carries nothing.
+/// The value each input opens with: the stored record's own values,
+/// optional fields empty (or none) when the record carries nothing.
 pub fn prefill_draft(record: &Resource) -> EditDraft {
     EditDraft {
         title: record.title.as_str().to_owned(),
         kind: record.kind,
+        parent: record.parent_id,
         publisher: record.publisher.clone().unwrap_or_default(),
         published_year: date_year(record.published.as_ref()),
         accessed_year: date_year(record.accessed.as_ref()),
-        parent: record.parent_id.map(|id| id.to_string()).unwrap_or_default(),
         series: record.series_id.map(|id| id.to_string()).unwrap_or_default(),
         series_number: record
             .series_number
@@ -49,26 +51,24 @@ pub fn prefill_draft(record: &Resource) -> EditDraft {
 
 /// Draft to full-replace payload, over the record's write-side twin: an
 /// emptied optional field clears exactly that field, the rest ride through
-/// as stored. The `String` errors are the form's to show.
+/// as stored. The `String` errors are the form's to show. Parent arrives
+/// already keyed by id from the dropdown, so it passes through unvalidated:
+/// the dropdown's options carry only stored ids.
 pub fn build_update(record: &Resource, draft: &EditDraft) -> Result<NewResource, String> {
     let mut edit = record.to_new();
 
     let title = draft.title.trim();
-    edit.title = NonEmptyStr::try_new(title.to_owned())
-        .map_err(|_| "Title must not be empty".to_owned())?;
+    edit.title =
+        NonEmptyStr::try_new(title).map_err(|_| "Title must not be empty".to_owned())?;
 
     edit.kind = draft.kind;
+    edit.parent_id = draft.parent;
 
     let publisher = draft.publisher.trim();
     edit.publisher = (!publisher.is_empty()).then(|| publisher.to_owned());
 
     edit.published = year_field("Published year", &draft.published_year)?;
     edit.accessed = year_field("Accessed year", &draft.accessed_year)?;
-
-    let parent = draft.parent.trim();
-    edit.parent_id = (!parent.is_empty())
-        .then(|| ResourceId::parse(parent).map_err(|_| "Parent must be a resource id".to_owned()))
-        .transpose()?;
 
     let series = draft.series.trim();
     edit.series_id = (!series.is_empty())
@@ -78,7 +78,7 @@ pub fn build_update(record: &Resource, draft: &EditDraft) -> Result<NewResource,
     let number = draft.series_number.trim();
     edit.series_number = (!number.is_empty())
         .then(|| {
-            NonEmptyStr::try_new(number.to_owned())
+            NonEmptyStr::try_new(number)
                 .map_err(|_| "Series number must not be empty".to_owned())
         })
         .transpose()?;
@@ -115,7 +115,7 @@ pub fn kind_items() -> Vec<KindItem> {
             kind,
         })
         .collect();
-    items.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+    items.sort_by_key(|item| item.label.to_lowercase());
     items
 }
 
@@ -193,10 +193,10 @@ mod tests {
         EditDraft {
             title: title.into(),
             kind: ResourceKind::BookSection,
+            parent: None,
             publisher: "MIT Press".into(),
             published_year: "1991".into(),
             accessed_year: "2020".into(),
-            parent: "".into(),
             series: "".into(),
             series_number: "".into(),
         }
@@ -208,10 +208,10 @@ mod tests {
         let draft = prefill_draft(&record);
         assert_eq!(draft.title, "Citation Networks");
         assert_eq!(draft.kind, ResourceKind::BookSection);
+        assert_eq!(draft.parent, record.parent_id);
         assert_eq!(draft.publisher, "MIT Press");
         assert_eq!(draft.published_year, "1991");
         assert_eq!(draft.accessed_year, "2020");
-        assert_eq!(draft.parent, record.parent_id.expect("parent set").to_string());
         assert_eq!(draft.series, record.series_id.expect("series set").to_string());
         assert_eq!(draft.series_number, "LCL 26");
     }
@@ -229,10 +229,10 @@ mod tests {
         record = Resource::try_new(record.id, edit).expect("stripped record valid");
 
         let draft = prefill_draft(&record);
+        assert_eq!(draft.parent, None);
         assert_eq!(draft.publisher, "");
         assert_eq!(draft.published_year, "");
         assert_eq!(draft.accessed_year, "");
-        assert_eq!(draft.parent, "");
         assert_eq!(draft.series, "");
         assert_eq!(draft.series_number, "");
         // Title is never optional, so it still prefills.
@@ -244,10 +244,10 @@ mod tests {
         let record = loaded_record();
         let mut draft = draft_with("Retitled");
         draft.kind = ResourceKind::Book;
+        draft.parent = Some(ResourceId::generate());
         draft.publisher = "Penguin".into();
         draft.published_year = "2024".into();
         draft.accessed_year = "".into();
-        draft.parent = "".into();
         // Series rides through untouched text.
         draft.series = record.series_id.expect("series set").to_string();
         draft.series_number = "XL 1".into();
@@ -255,6 +255,7 @@ mod tests {
         let new = build_update(&record, &draft).expect("draft merges");
         assert_eq!(new.title.as_str(), "Retitled");
         assert_eq!(new.kind, ResourceKind::Book);
+        assert_eq!(new.parent_id, draft.parent);
         assert_eq!(new.publisher.as_deref(), Some("Penguin"));
         assert_eq!(
             new.published
@@ -265,7 +266,6 @@ mod tests {
             UtcMillis::jan_1_utc(2024).expect("year in calendar").as_unix_ms(),
         );
         assert_eq!(new.accessed, None);
-        assert_eq!(new.parent_id, None);
         assert_eq!(new.series_id, record.series_id);
         assert_eq!(new.series_number.as_ref().map(|n| n.as_str()), Some("XL 1"));
     }
@@ -281,6 +281,9 @@ mod tests {
             new.creators[0].credited_as.as_ref().map(|c| c.as_str()),
             Some("A. Author"),
         );
+        // The helper draft carries no parent, so the merge clears the
+        // record's: an unselected dropdown means no parent.
+        assert_eq!(new.parent_id, None);
     }
 
     #[test]
@@ -294,11 +297,6 @@ mod tests {
         draft.published_year = "soon".into();
         let err = build_update(&record, &draft).expect_err("bad year rejects");
         assert!(err.contains("Published year"), "message names the field: {err}");
-
-        let mut draft = draft_with("Retitled");
-        draft.parent = "not-an-id".into();
-        let err = build_update(&record, &draft).expect_err("bad parent rejects");
-        assert!(err.contains("Parent"), "message names the field: {err}");
 
         let mut draft = draft_with("Retitled");
         draft.series = "not-an-id".into();

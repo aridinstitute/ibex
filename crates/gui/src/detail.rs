@@ -2,7 +2,7 @@
 //! the way Zotero's item pane aligns them.
 
 use gpui_kit::component::description_list::{DescriptionItem, DescriptionList};
-use gpui_kit::component::{ActiveTheme as _, v_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -157,11 +157,14 @@ fn kind_tint(color: Hsla) -> Div {
         .bg(linear_gradient(180., from, to))
 }
 
-/// The right-side panel for the current [`DetailView`]. It overlaps the grid
-/// rather than sharing a row with it: anchored to the window's right edge,
-/// opaque so the covered columns do not show through, and scrollable when
-/// the field list outgrows the window.
-pub fn render_panel(view: DetailView<'_>, cx: &App) -> Div {
+/// The right-side sidebar for the current [`DetailView`]: a column beside
+/// the grid, sharing the row with it rather than overlapping it, so the
+/// grid's rows are never behind the sidebar's empty stretches. Opaque,
+/// fixed-width — the grid gives way when the window is too narrow to hold
+/// both — and scrollable when the field list outgrows the window.
+/// `actions`, when present, rides the sidebar's top-right corner over the
+/// kind tint.
+pub fn render_panel(view: DetailView<'_>, actions: Option<AnyElement>, cx: &App) -> Div {
     let muted = cx.theme().muted_foreground;
     let danger = cx.theme().danger;
     let border = cx.theme().border;
@@ -190,23 +193,36 @@ pub fn render_panel(view: DetailView<'_>, cx: &App) -> Div {
             .into_any_element(),
     };
 
-    div()
-        .absolute()
-        .top_0()
-        .right_0()
-        .bottom_0()
+    v_flex()
+        // The tint is absolutely positioned, so the sidebar must be its
+        // containing block: without `relative` the wash would escape into
+        // the nearest positioned ancestor and spill over the grid.
+        .relative()
+        .h_full()
+        .flex_shrink_0()
         .w(PANEL_WIDTH)
         .bg(cx.theme().background)
         .border_l_1()
         .border_color(border)
         .text_size(FIELD_TEXT_SIZE)
         // The tint is a sibling of the scroller, not a child, so it stays
-        // pinned to the panel's top edge as the fields scroll under it.
+        // pinned to the sidebar's top edge as the fields scroll under it.
         .when_some(tint, |el, tint| el.child(kind_tint(tint)))
+        .when_some(actions, |el, actions| {
+            el.child(
+                h_flex()
+                    .justify_end()
+                    .px_2()
+                    .pt_1()
+                    .flex_shrink_0()
+                    .child(actions),
+            )
+        })
         .child(
             div()
                 .id("detail-panel")
-                .size_full()
+                .flex_1()
+                .min_h_0()
                 .p_3()
                 .overflow_y_scroll()
                 .child(content),

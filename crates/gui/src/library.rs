@@ -10,8 +10,8 @@ use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IconName, IndexPath, Selectable as _,
-    Sizable as _, Size, ThemeColor, ThemeMode, TitleBar, h_flex, v_flex,
+    ActiveTheme as _, FocusableExt as _, Icon, IconName, IndexPath, Selectable as _, Sizable as _,
+    Size, ThemeColor, ThemeMode, TitleBar, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -33,6 +33,12 @@ use crate::settings::Settings;
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
 /// enough that the demo library spans several pages.
 pub const PAGE_SIZE: u32 = 50;
+
+/// First page of resources offered as parent options in the edit form. A
+/// parent beyond the page is still fetched by id when the record carries
+/// one, so every stored parent stays selectable; the cap keeps the form's
+/// extra fetch bounded on large libraries.
+const PARENT_OPTIONS_LIMIT: u32 = 100;
 
 const COL_KIND: usize = 0;
 const COL_TITLE: usize = 1;
@@ -716,6 +722,41 @@ impl SearchableListItem for CreatorItem {
     }
 }
 
+/// One dropdown row for the parent box: the title reads, the id keys.
+#[derive(Clone)]
+struct ParentItem {
+    label: SharedString,
+    id: ResourceId,
+}
+
+impl SearchableListItem for ParentItem {
+    type Value = ResourceId;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.id
+    }
+}
+
+/// Parent options from a listing page: the edited record itself is skipped
+/// (a resource cannot become its own parent), the rest sort by title so the
+/// dropdown reads alphabetically whatever order the store lists in.
+fn parent_options(rows: &[ResourceSummary], edited: ResourceId) -> Vec<ParentItem> {
+    let mut items: Vec<ParentItem> = rows
+        .iter()
+        .filter(|row| row.id != edited)
+        .map(|row| ParentItem {
+            label: row.title.as_str().into(),
+            id: row.id,
+        })
+        .collect();
+    items.sort_by_key(|item| item.label.to_lowercase());
+    items
+}
+
 /// Width column `col_ix` opens at: its saved width when settings have one,
 /// the built-in default otherwise.
 fn stored_width(widths: &BTreeMap<String, f64>, col_ix: usize, default: f32) -> Pixels {
@@ -866,15 +907,18 @@ enum EditFetch {
 
 /// The edit form's widgets plus the raw record they edit. Inputs are
 /// prefilled from the record at construction; saving reads them back into
-/// an [`EditDraft`] and builds the full-replace payload.
+/// an [`EditDraft`] and builds the full-replace payload. The parent box
+/// starts empty — its options need a listing, which is a second fetch —
+/// and fills in the same flow that opens the form (see
+/// [`LibraryApp::request_edit`]).
 struct EditForm {
     record: Box<Resource>,
     title: Entity<InputState>,
     kind: Entity<ComboboxState<SearchableVec<KindItem>>>,
+    parent: Entity<ComboboxState<SearchableVec<ParentItem>>>,
     publisher: Entity<InputState>,
     published_year: Entity<InputState>,
     accessed_year: Entity<InputState>,
-    parent: Entity<InputState>,
     series: Entity<InputState>,
     series_number: Entity<InputState>,
     /// The form's own line of complaint: a rejected payload or a failed
@@ -906,13 +950,17 @@ impl EditForm {
             )
             .searchable(true)
         });
+        let parent = cx.new(|cx| {
+            ComboboxState::new(SearchableVec::new(Vec::new()), Vec::new(), window, cx)
+                .searchable(true)
+        });
         Self {
             title: prefill_input(draft.title, "Title", window, cx),
             kind,
+            parent,
             publisher: prefill_input(draft.publisher, "Publisher", window, cx),
             published_year: prefill_input(draft.published_year, "Year", window, cx),
             accessed_year: prefill_input(draft.accessed_year, "Year", window, cx),
-            parent: prefill_input(draft.parent, "Resource id", window, cx),
             series: prefill_input(draft.series, "Series id", window, cx),
             series_number: prefill_input(draft.series_number, "e.g. LCL 26", window, cx),
             record: Box::new(record),
@@ -923,7 +971,8 @@ impl EditForm {
 
     /// The inputs' current values as one plain draft. A cleared kind box
     /// falls back to the stored kind: every resource carries one, so the
-    /// form never clears it.
+    /// form never clears it. A cleared parent box is exactly that: no
+    /// parent.
     fn draft(&self, cx: &App) -> EditDraft {
         let value =
             |input: &Entity<InputState>| input.read(cx).value().to_string();
@@ -936,10 +985,10 @@ impl EditForm {
                 .first()
                 .copied()
                 .unwrap_or(self.record.kind),
+            parent: self.parent.read(cx).selected_values().first().cloned(),
             publisher: value(&self.publisher),
             published_year: value(&self.published_year),
             accessed_year: value(&self.accessed_year),
-            parent: value(&self.parent),
             series: value(&self.series),
             series_number: value(&self.series_number),
         }
@@ -1275,8 +1324,9 @@ impl LibraryApp {
 
     /// Open the edit form for the selected resource: fetch the raw record
     /// (the panel's projection drops the ids the form needs), then open
-    /// the prefilled widgets. One form at a time; the panel swaps to it
-    /// while it exists.
+    /// the prefilled widgets — the parent box empty until its options land,
+    /// a second fetch in the same flow. One form at a time; the sidebar
+    /// swaps to it while it exists.
     fn request_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.selected else {
             return;
@@ -1295,10 +1345,80 @@ impl LibraryApp {
                         // The selection moved or re-clicked Edit since the
                         // request: the reply belongs to a form nobody is
                         // waiting for, so it is dropped.
-                        if app.selected == Some(id) && matches!(app.edit, Some(EditFetch::Loading(_)))
+                        if app.selected == Some(id)
+                            && matches!(app.edit, Some(EditFetch::Loading(_)))
                         {
+                            let parent_id = record.parent_id;
                             let form = EditForm::new(record, window, cx);
                             app.edit = Some(EditFetch::Ready(Box::new(form)));
+                            // The parent box opened empty: its options need
+                            // a listing, which is another fetch. One page of
+                            // titles covers the dropdown; a stored parent
+                            // outside that page is fetched by id so it stays
+                            // selected and visible whatever the library's
+                            // size.
+                            let worker = worker.clone();
+                            cx.spawn_in(window, async move |app, window| {
+                                let mut items: Vec<ParentItem> = Vec::new();
+                                let mut missing_parent = parent_id;
+                                if let Ok(page) =
+                                    worker.list_page(None, PARENT_OPTIONS_LIMIT).await
+                                {
+                                    items = parent_options(&page.rows, id);
+                                    missing_parent = parent_id
+                                        .filter(|parent| {
+                                            !items.iter().any(|item| item.id == *parent)
+                                        });
+                                }
+                                if let Some(parent) = missing_parent {
+                                    // The stored parent did not make the
+                                    // page. Its own record still names its
+                                    // title; if even that read fails, the
+                                    // raw id is the honest label — better
+                                    // than silently dropping the stored
+                                    // link on save.
+                                    let label = match worker.resource(parent).await {
+                                        Ok(record) => {
+                                            SharedString::from(record.title.as_str())
+                                        }
+                                        Err(_) => SharedString::from(parent.to_string()),
+                                    };
+                                    items.insert(0, ParentItem { label, id: parent });
+                                }
+                                let selection = parent_id.and_then(|parent| {
+                                    items
+                                        .iter()
+                                        .position(|item| item.id == parent)
+                                        .map(IndexPath::new)
+                                });
+                                _ = app.update_in(window, |app, window, cx| {
+                                    // The form closed, or a different
+                                    // record's form opened, since the fetch:
+                                    // the options belong to nobody.
+                                    let Some(EditFetch::Ready(form)) = &app.edit else {
+                                        return;
+                                    };
+                                    if form.record.id != id {
+                                        return;
+                                    }
+                                    form.parent.update(cx, |state, cx| {
+                                        state.set_items(
+                                            SearchableVec::new(items),
+                                            window,
+                                            cx,
+                                        );
+                                        if let Some(row) = selection {
+                                            state.set_selected_indices(
+                                                vec![row],
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    });
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
                         }
                     }
                     Err(err) => {
@@ -1402,31 +1522,48 @@ impl LibraryApp {
         }
     }
 
-    /// The right-side panel: the edit form while one is open, the detail
-    /// fields otherwise. The form keeps the panel's anchor, width, and
+    /// The right-side sidebar: the edit form while one is open, the detail
+    /// fields otherwise. The form keeps the sidebar's anchor, width, and
     /// surface but drops the kind tint, so its inputs sit on a plain
-    /// background.
+    /// background. The detail carries the edit pencil in its top-right
+    /// corner; no row selected means nothing to edit, and an open form
+    /// means the sidebar already is the editor.
     fn render_side_panel(&self, cx: &mut Context<Self>) -> Div {
         match &self.edit {
             Some(EditFetch::Ready(form)) => self.render_edit_panel(form, cx),
-            Some(EditFetch::Loading(_)) => render_panel(DetailView::Loading, cx),
-            None => render_panel(self.detail_view(), cx),
+            Some(EditFetch::Loading(_)) => {
+                render_panel(DetailView::Loading, None, cx)
+            }
+            None => {
+                let edit_button = self.selected.is_some().then(|| {
+                    Button::new("edit-resource")
+                        .ghost()
+                        .small()
+                        .icon(symbol("pencil", AssetIconName::PenLine))
+                        .tooltip("Edit resource")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.request_edit(window, cx)
+                        }))
+                        .into_any_element()
+                });
+                render_panel(self.detail_view(), edit_button, cx)
+            }
         }
     }
 
     /// The form: Save/Cancel above, one labelled row per scalar, the error
-    /// line under the buttons. Scrollable like the detail panel, so a
-    /// short window still reaches every row.
+    /// line under the buttons. Scrollable like the detail sidebar, so a
+    /// short window still reaches every row. Parent is a searchable
+    /// dropdown of library titles, not an id to type: users pick the
+    /// containing work by name.
     fn render_edit_panel(&self, form: &EditForm, cx: &mut Context<Self>) -> Div {
         let saving = form.saving;
         let error = form.error.clone();
         let danger = cx.theme().danger;
 
-        div()
-            .absolute()
-            .top_0()
-            .right_0()
-            .bottom_0()
+        v_flex()
+            .h_full()
+            .flex_shrink_0()
             .w(PANEL_WIDTH)
             .bg(cx.theme().background)
             .border_l_1()
@@ -1476,6 +1613,15 @@ impl LibraryApp {
                             .w_full(),
                     ))
                     .child(edit_field(
+                        "Parent",
+                        Combobox::new(&form.parent)
+                            .small()
+                            .placeholder("Parent")
+                            .search_placeholder("Search resources")
+                            .cleanable(true)
+                            .w_full(),
+                    ))
+                    .child(edit_field(
                         "Publisher",
                         Input::new(&form.publisher).small().w_full(),
                     ))
@@ -1487,7 +1633,6 @@ impl LibraryApp {
                         "Accessed",
                         Input::new(&form.accessed_year).small().w_full(),
                     ))
-                    .child(edit_field("Parent", Input::new(&form.parent).small().w_full()))
                     .child(edit_field("Series", Input::new(&form.series).small().w_full()))
                     .child(edit_field(
                         "Series no.",
@@ -1514,8 +1659,6 @@ impl Render for LibraryApp {
         let filters_visible = delegate.filters_visible;
         let filter_active = delegate.filter.is_active();
         let danger = cx.theme().danger;
-        // Editing needs a selected row and no form already open.
-        let can_edit = self.selected.is_some() && self.edit.is_none();
 
         v_flex()
             .size_full()
@@ -1545,17 +1688,6 @@ impl Render for LibraryApp {
                             .on_click(cx.listener(|this, _, _window, cx| this.toggle_filters(cx))),
                     )
                     .child(
-                        Button::new("edit-resource")
-                            .ghost()
-                            .small()
-                            .icon(symbol("pencil", AssetIconName::PenLine))
-                            .label("Edit")
-                            .disabled(!can_edit)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.request_edit(window, cx)
-                            })),
-                    )
-                    .child(
                         Button::new("toggle-theme")
                             .ghost()
                             .small()
@@ -1581,31 +1713,40 @@ impl Render for LibraryApp {
                     ),
             )
             .child(
+                // The grid and the sidebar share one row: the grid gives
+                // way by width when the window cannot hold both at full
+                // size. The sidebar never overlays the grid, so its empty
+                // stretches cannot swallow clicks aimed at (or through to)
+                // rows.
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .relative()
                     .child(
-                        DataTable::new(&self.table)
-                            .with_size(Size::XSmall)
-                            .bordered(false)
-                            .stripe(true)
-                            // The table holds focus from the first frame (so
-                            // the detail-panel key works), which makes the
-                            // kit's keyboard focus ring draw on every arrow
-                            // key. The table fills this container edge to
-                            // edge, so only the ring's top edge is inside
-                            // the window, and it reads as a stray bar under
-                            // the toolbar. The row highlight already shows
-                            // where focus is; the ring adds nothing.
-                            .focus_ring(false)
-                            .when_some(header_row_height(filters_visible), |table, height| {
-                                table.header_row_height(height)
-                            }),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                DataTable::new(&self.table)
+                                    .with_size(Size::XSmall)
+                                    .bordered(false)
+                                    .stripe(true)
+                                    // The table holds focus from the first frame (so
+                                    // the detail-panel key works), which makes the
+                                    // kit's keyboard focus ring draw on every arrow
+                                    // key. The table fills this container edge to
+                                    // edge, so only the ring's top edge is inside
+                                    // the window, and it reads as a stray bar under
+                                    // the toolbar. The row highlight already shows
+                                    // where focus is; the ring adds nothing.
+                                    .focus_ring(false)
+                                    .when_some(header_row_height(filters_visible), |table, height| {
+                                        table.header_row_height(height)
+                                    }),
+                            ),
                     )
-                    // Keep the toolbar accessible while the panel overlays
-                    // the grid; the panel shows the edit form while one is
-                    // open, the detail fields otherwise.
+                    // The sidebar is the edit form while one is open, the
+                    // detail fields otherwise; hidden entirely while the
+                    // panel is toggled off.
                     .when(self.detail_open, |el| {
                         el.child(self.render_side_panel(cx))
                     }),
@@ -1923,5 +2064,42 @@ mod detail_prefetch_tests {
     #[test]
     fn prefetch_window_is_empty_without_rows() {
         assert_eq!(prefetch_window(0, 0), 0..0);
+    }
+}
+
+#[cfg(test)]
+mod parent_options_tests {
+    // No `use super::*`: the glob would re-import gpui's `test` proc
+    // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
+    use super::{ParentItem, SearchableListItem, parent_options};
+    use oeuvre_core::{NonEmptyStr, ResourceId, ResourceKind, ResourceSummary};
+
+    fn summary(title: &str) -> ResourceSummary {
+        ResourceSummary {
+            id: ResourceId::generate(),
+            kind: ResourceKind::Book,
+            title: NonEmptyStr::try_new(title).expect("title non-empty"),
+            creators_label: String::new(),
+            published_label: None,
+            publisher: None,
+            container_title: None,
+        }
+    }
+
+    #[test]
+    fn parent_options_sort_by_title_and_skip_the_record_itself() {
+        let zzz = summary("Zzz Weekly");
+        let aaa = summary("Aaa Book");
+        let mut edited = summary("The edited record");
+        edited.id = ResourceId::generate();
+        let edited_id = edited.id;
+
+        let options = parent_options(&[zzz, edited, aaa], edited_id);
+        let labels: Vec<String> = options.iter().map(ParentItem::title).map(String::from).collect();
+        // Alphabetical whatever order the store lists in, and a resource
+        // cannot become its own parent, so the edited record never
+        // appears among its own options.
+        assert_eq!(labels, ["Aaa Book", "Zzz Weekly"]);
+        assert!(options.iter().all(|item| *item.value() != edited_id));
     }
 }
