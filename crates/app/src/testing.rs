@@ -453,6 +453,47 @@ impl Store for MemoryStore {
         Ok(resource)
     }
 
+    async fn update_resource(
+        &self,
+        id: ResourceId,
+        new: NewResource,
+    ) -> Result<Resource, StoreError> {
+        let resource = Resource::try_new(id, new)?;
+        let mut resources = self.resources.lock().expect("MemoryStore lock");
+        if !resources.contains_key(&id) {
+            return Err(StoreError::not_found(format!("resource {id}")));
+        }
+        resources.insert(
+            id,
+            ResourceRow {
+                kind: resource.kind,
+                title: resource.title.clone(),
+                publisher: resource.publisher.clone(),
+                published: resource.published.clone(),
+                accessed: resource.accessed.clone(),
+                parent_id: resource.parent_id,
+                series_id: resource.series_id,
+                series_number: resource.series_number.clone(),
+            },
+        );
+        drop(resources);
+
+        // Creators are replaced wholesale: stale edges go first, then the
+        // new list lands with exactly the orders try_new assigned.
+        let mut edges = self.created.lock().expect("MemoryStore lock");
+        edges.retain(|e| e.resource_id != id);
+        for creator in &resource.creators {
+            edges.push(CreatedEdge {
+                person_id: creator.person_id,
+                resource_id: id,
+                role: creator.role,
+                order: creator.order,
+                credited_as: creator.credited_as.clone(),
+            });
+        }
+        Ok(resource)
+    }
+
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError> {
         let row = self
             .resources
@@ -640,6 +681,14 @@ impl Store for StubStore {
 
     async fn create_resource(&self, _new: NewResource) -> Result<Resource, StoreError> {
         Err(unsupported("create_resource"))
+    }
+
+    async fn update_resource(
+        &self,
+        _id: ResourceId,
+        _new: NewResource,
+    ) -> Result<Resource, StoreError> {
+        Err(unsupported("update_resource"))
     }
 
     async fn get_resource(&self, _id: ResourceId) -> Result<Resource, StoreError> {

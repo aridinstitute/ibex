@@ -294,6 +294,35 @@ impl SurrealStore {
         Ok(creators)
     }
 
+    /// RELATE one `created` edge per creator with role / order / credited_as.
+    /// Callers own the surrounding transaction; this only writes the new
+    /// edges (deleting stale ones is the updater's job).
+    async fn relate_creators(
+        &self,
+        id: ResourceId,
+        creators: &[Creator],
+    ) -> Result<(), StoreError> {
+        for creator in creators {
+            let credited = creator
+                .credited_as
+                .as_ref()
+                .map(|s| s.as_str().to_owned());
+            self.db
+                .query(
+                    "RELATE $from -> created -> $to \
+                     SET role = $role, order = $order, credited_as = $credited",
+                )
+                .bind(("from", Self::person_key(creator.person_id)))
+                .bind(("to", Self::resource_key(id)))
+                .bind(("role", SerdeWrapper(creator.role)))
+                .bind(("order", creator.order))
+                .bind(("credited", credited))
+                .await
+                .map_err(map_err)?;
+        }
+        Ok(())
+    }
+
     /// Project page rows into summary rows: creator labels from the created
     /// edges, container titles from in-page parents plus one follow-up
     /// query for parents outside the page.
@@ -589,26 +618,69 @@ impl Store for SurrealStore {
                 )));
             }
 
-            for creator in &resource.creators {
-                let credited = creator
-                    .credited_as
-                    .as_ref()
-                    .map(|s| s.as_str().to_owned());
-                let from = Self::person_key(creator.person_id);
-                let to = Self::resource_key(id);
+            self.relate_creators(id, &resource.creators).await?;
+            Ok(())
+        }
+        .await;
+
+        match persist {
+            Ok(()) => {
                 self.db
-                    .query(
-                        "RELATE $from -> created -> $to \
-                         SET role = $role, order = $order, credited_as = $credited",
-                    )
-                    .bind(("from", from))
-                    .bind(("to", to))
-                    .bind(("role", SerdeWrapper(creator.role)))
-                    .bind(("order", creator.order))
-                    .bind(("credited", credited))
+                    .query("COMMIT TRANSACTION")
                     .await
                     .map_err(map_err)?;
+                Ok(resource)
             }
+            Err(err) => {
+                let _ = self.db.query("CANCEL TRANSACTION").await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn update_resource(
+        &self,
+        id: ResourceId,
+        new: NewResource,
+    ) -> Result<Resource, StoreError> {
+        // Row select proves existence without loading edges: not-found must
+        // fire before any write, and the caller already validated references.
+        let existing: Option<ResourceDoc> = self
+            .db
+            .select(Self::resource_key(id))
+            .await
+            .map_err(map_err)?;
+        if existing.is_none() {
+            return Err(StoreError::not_found(format!("resource {id}")));
+        }
+        let resource = Resource::try_new(id, new)?;
+
+        self.db
+            .query("BEGIN TRANSACTION")
+            .await
+            .map_err(map_err)?;
+
+        let persist = async {
+            let updated: Option<ResourceDoc> = self
+                .db
+                .update(Self::resource_key(id))
+                .content(Self::resource_doc_from(&resource))
+                .await
+                .map_err(map_err)?;
+            if updated.is_none() {
+                return Err(StoreError::new(format!(
+                    "update_resource returned empty for {id}"
+                )));
+            }
+
+            // Creators are replaced wholesale: the stale edges go before the
+            // new list lands, so an update can never leave both behind.
+            self.db
+                .query("DELETE created WHERE out = $resource")
+                .bind(("resource", Self::resource_key(id)))
+                .await
+                .map_err(map_err)?;
+            self.relate_creators(id, &resource.creators).await?;
             Ok(())
         }
         .await;
@@ -2140,6 +2212,144 @@ mod tests {
             loaded.creators[1].credited_as.as_ref().map(NonEmptyStr::as_str),
             Some("ed.")
         );
+    }
+
+    #[tokio::test]
+    async fn resource_update_replaces_row_and_edges() {
+        let store = SurrealStore::open_memory().await.unwrap();
+
+        let author = store
+            .create_person(
+                Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let editor = store
+            .create_person(
+                Name::try_new(Some("Henry"), Some("Chadwick"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let created = store
+            .create_resource(NewResource {
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new("Confessions").unwrap(),
+                creators: vec![CreatorSpec {
+                    person_id: author.id,
+                    role: CreatorRole::Author,
+                    credited_as: None,
+                }],
+                publisher: Some("Harvard University Press".into()),
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap();
+
+        let mut edit = created.to_new();
+        edit.title = NonEmptyStr::try_new("Retitled").unwrap();
+        edit.publisher = Some("Penguin".into());
+        edit.creators = vec![
+            CreatorSpec {
+                person_id: editor.id,
+                role: CreatorRole::Editor,
+                credited_as: Some(NonEmptyStr::try_new("ed.").unwrap()),
+            },
+            CreatorSpec {
+                person_id: author.id,
+                role: CreatorRole::Author,
+                credited_as: None,
+            },
+        ];
+
+        let updated = store.update_resource(created.id, edit).await.unwrap();
+        assert_eq!(updated.title.as_str(), "Retitled");
+        assert_eq!(updated.creators.len(), 2);
+        assert_eq!(updated.creators[0].person_id, editor.id);
+        assert_eq!(updated.creators[0].role, CreatorRole::Editor);
+        assert_eq!(
+            updated.creators[0].credited_as.as_ref().map(NonEmptyStr::as_str),
+            Some("ed.")
+        );
+        assert_eq!(updated.creators[1].person_id, author.id);
+        assert_eq!(updated.creators[1].order, 1);
+
+        let loaded = store.get_resource(created.id).await.unwrap();
+        assert_eq!(loaded.title.as_str(), "Retitled");
+        assert_eq!(loaded.publisher.as_deref(), Some("Penguin"));
+        // get_resource reconstructs creators from the created edges, so two
+        // slots keyed to the new people prove the stale author-only edge is
+        // gone rather than lingering next to the new ones.
+        assert_eq!(loaded.creators.len(), 2);
+        assert_eq!(loaded.creators[0].person_id, editor.id);
+        assert_eq!(loaded.creators[1].person_id, author.id);
+
+        let err = store
+            .update_resource(ResourceId::generate(), created.to_new())
+            .await
+            .unwrap_err();
+        assert!(err.is_not_found());
+    }
+
+    #[tokio::test]
+    async fn resource_update_persists_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SurrealStore::open(dir.path()).await.unwrap();
+
+        let author = store
+            .create_person(
+                Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let created = store
+            .create_resource(NewResource {
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new("Confessions").unwrap(),
+                creators: vec![CreatorSpec {
+                    person_id: author.id,
+                    role: CreatorRole::Author,
+                    credited_as: None,
+                }],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap();
+
+        let mut edit = created.to_new();
+        edit.title = NonEmptyStr::try_new("Retitled").unwrap();
+        store.update_resource(created.id, edit).await.unwrap();
+
+        drop(store);
+
+        // 3.x releases the SurrealKv directory lock on the engine's own task
+        // once the last handle drops, so the reopen races an in-flight
+        // shutdown (same retry as the person CRUD disk round trip).
+        let reopened = loop {
+            match SurrealStore::open(dir.path()).await {
+                Ok(store) => break store,
+                Err(err) if err.message.contains("already locked") => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(err) => panic!("reopen failed without a lock race: {err}"),
+            }
+        };
+        let loaded = reopened.get_resource(created.id).await.unwrap();
+        assert_eq!(loaded.title.as_str(), "Retitled");
+        assert_eq!(loaded.creators.len(), 1);
+        assert_eq!(loaded.creators[0].person_id, author.id);
     }
 
     #[tokio::test]

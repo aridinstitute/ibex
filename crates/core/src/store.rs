@@ -49,6 +49,21 @@ pub trait Store: Send + Sync + 'static {
     /// (`CreateResource`) does that before invoke.
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError>;
 
+    /// Replace every stored field of `id` with `new`: the row's content plus
+    /// its whole creator list. Missing → [`StoreError::not_found`].
+    ///
+    /// Rebuilds via [`Resource::try_new`] so the replacement passes the same
+    /// shape validation as create; creators are replaced wholesale, with
+    /// `order` re-assigned 0..n from `new.creators` position (stale edges are
+    /// gone afterwards). Like [`Store::create_resource`], does **not** check
+    /// parent kind or series existence — the caller (`UpdateResource`) does
+    /// that before invoke.
+    async fn update_resource(
+        &self,
+        id: ResourceId,
+        new: NewResource,
+    ) -> Result<Resource, StoreError>;
+
     /// Load resource row + reconstruct `creators` from edges ordered by `order`.
     /// Missing resource → [`StoreError::not_found`].
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError>;

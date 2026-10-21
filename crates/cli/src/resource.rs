@@ -1,10 +1,12 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Subcommand};
-use oeuvre_app::command::{ListResources, ListResourcesQueryPage};
+use oeuvre_app::command::{
+    GetResource, ListResources, ListResourcesQueryPage, UpdateResource,
+};
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
-    NonEmptyStr, PersonId, PublishedRange, ResourceFilter, ResourceQuery, ResourceSummary,
-    UtcMillis,
+    NonEmptyStr, PersonId, PublishedRange, ResourceFilter, ResourceId, ResourceQuery,
+    ResourceSummary, UtcMillis,
 };
 
 #[derive(Debug, Args)]
@@ -18,6 +20,9 @@ pub enum ResourceAction {
     /// List resources as summary rows, newest first; every set filter
     /// flag narrows the same listing additively.
     List(ListArgs),
+    /// Update a resource by id. Only the fields whose flags are set change;
+    /// the rest keep their stored values.
+    Update(UpdateArgs),
 }
 
 /// Filter flags for `resource list`.
@@ -40,12 +45,25 @@ pub struct ListArgs {
     pub published_to: Option<u16>,
 }
 
+/// Field flags for `resource update`: each set flag replaces that field,
+/// the rest keep their stored values.
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Resource id.
+    pub id: String,
+
+    /// New title.
+    #[arg(long)]
+    pub title: Option<String>,
+}
+
 /// Rows per query-page fetch while walking a filtered listing.
 const QUERY_PAGE: u32 = 500;
 
 pub async fn run(state: &AppState, cmd: ResourceCmd) -> Result<()> {
     match cmd.action {
         ResourceAction::List(args) => list(state, args).await,
+        ResourceAction::Update(args) => update(state, args).await,
     }
 }
 
@@ -138,6 +156,41 @@ async fn list(state: &AppState, args: ListArgs) -> Result<()> {
     for row in &rows {
         println!("{}", format_summary_row(row));
     }
+    Ok(())
+}
+
+/// Full-replace edit: fetch the record, merge the set flags into its
+/// write-side twin, send it back. Unchanged fields ride through untouched,
+/// the same merge `person update` performs.
+async fn update(state: &AppState, args: UpdateArgs) -> Result<()> {
+    let id = ResourceId::parse(&args.id)
+        .with_context(|| format!("invalid resource id '{}'", args.id))?;
+
+    let Outcome::GetResource(existing) = state
+        .execute(Command::GetResource(GetResource { id }))
+        .await?
+    else {
+        bail!("unexpected outcome from get_resource");
+    };
+
+    let Some(title) = args.title else {
+        bail!("nothing to update; pass --title");
+    };
+    let mut edit = existing.to_new();
+    edit.title = NonEmptyStr::try_new(title).map_err(|_| anyhow!("--title must not be empty"))?;
+
+    let Outcome::UpdateResource(updated) = state
+        .execute(Command::UpdateResource(UpdateResource { id, new: edit }))
+        .await?
+    else {
+        bail!("unexpected outcome from update_resource");
+    };
+    println!(
+        "{}  {}  {}",
+        updated.id,
+        updated.kind.as_str(),
+        updated.title.as_str()
+    );
     Ok(())
 }
 

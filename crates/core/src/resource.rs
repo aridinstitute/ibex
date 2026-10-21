@@ -509,6 +509,16 @@ impl Creator {
             credited_as: spec.credited_as,
         }
     }
+
+    /// Write-side twin of this slot. Drops `order`: the update re-derives it
+    /// from list position, the same rule create applies.
+    pub fn to_spec(&self) -> CreatorSpec {
+        CreatorSpec {
+            person_id: self.person_id,
+            role: self.role,
+            credited_as: self.credited_as.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -648,6 +658,25 @@ impl Resource {
             series_id,
             series_number,
         })
+    }
+
+    /// Write-side twin of the stored record for
+    /// [`Store::update_resource`](crate::store::Store::update_resource):
+    /// shells merge field edits into it and send it back as the full
+    /// replacement. Creator order drops out; position is the order, the
+    /// same rule create applies.
+    pub fn to_new(&self) -> NewResource {
+        NewResource {
+            kind: self.kind,
+            title: self.title.clone(),
+            creators: self.creators.iter().map(Creator::to_spec).collect(),
+            publisher: self.publisher.clone(),
+            published: self.published.clone(),
+            accessed: self.accessed.clone(),
+            parent_id: self.parent_id,
+            series_id: self.series_id,
+            series_number: self.series_number.clone(),
+        }
     }
 }
 
@@ -995,6 +1024,42 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, ResourceError::EmptyCreators);
+    }
+
+    #[test]
+    fn to_new_round_trips_every_field() {
+        let author = PersonId::generate();
+        let editor = PersonId::generate();
+        let new = NewResource {
+            kind: ResourceKind::BookSection,
+            title: title("Nested editing"),
+            creators: vec![
+                CreatorSpec {
+                    person_id: author,
+                    role: CreatorRole::Author,
+                    credited_as: Some(title("A. Author")),
+                },
+                CreatorSpec {
+                    person_id: editor,
+                    role: CreatorRole::Editor,
+                    credited_as: None,
+                },
+            ],
+            publisher: Some("MIT".into()),
+            published: Some(
+                BibliographicDate::try_new(
+                    UtcMillis::jan_1_utc(2021).expect("2021 in calendar"),
+                    Some(title("Spring 2021")),
+                )
+                .expect("valid date"),
+            ),
+            accessed: None,
+            parent_id: Some(ResourceId::generate()),
+            series_id: Some(SeriesId::generate()),
+            series_number: Some(title("3")),
+        };
+        let stored = Resource::try_new(ResourceId::generate(), new.clone()).unwrap();
+        assert_eq!(stored.to_new(), new);
     }
 
     #[test]

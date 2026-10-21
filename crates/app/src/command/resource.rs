@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use oeuvre_core::{
-    creator_label_name, detail_creator_groups, NewResource, PersonId, Resource, ResourceDetail,
-    ResourceError, ResourceId, ResourcePage, ResourceQuery, ResourceSummary, SeriesId,
-    SortedResourcePage, StoreError,
+    creator_label_name, detail_creator_groups, Creator, NewResource, PersonId, Resource,
+    ResourceDetail, ResourceError, ResourceId, ResourcePage, ResourceQuery, ResourceSummary,
+    SeriesId, SortedResourcePage, StoreError,
 };
 
 use crate::event::{self, Event};
@@ -11,6 +11,15 @@ use crate::{AppState, CommandError, Handler, Outcome};
 
 #[derive(Debug, Clone)]
 pub struct CreateResource {
+    pub new: NewResource,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateResource {
+    /// Id of the record being replaced. The payload in `new` is the full
+    /// replacement, not a delta: shells merge a fetched record's fields with
+    /// the user's edits before invoking.
+    pub id: ResourceId,
     pub new: NewResource,
 }
 
@@ -46,6 +55,7 @@ pub struct ListResourcesQueryPage {
 }
 
 pub(crate) struct Created(pub Resource);
+pub(crate) struct Updated(pub Resource);
 pub(crate) struct Fetched(pub Resource);
 pub(crate) struct FetchedDetail(pub ResourceDetail);
 pub(crate) struct Listed(pub Vec<ResourceSummary>);
@@ -55,6 +65,12 @@ pub(crate) struct ListedQueryPage(pub SortedResourcePage);
 impl From<Created> for Outcome {
     fn from(Created(resource): Created) -> Self {
         Outcome::CreateResource(resource)
+    }
+}
+
+impl From<Updated> for Outcome {
+    fn from(Updated(resource): Updated) -> Self {
+        Outcome::UpdateResource(resource)
     }
 }
 
@@ -132,6 +148,46 @@ fn map_store(err: StoreError) -> CommandError {
     }
 }
 
+/// Field names that differ between the stored record and its replacement,
+/// in a fixed column order. The update's wide event joins them into
+/// `resource.changed_fields`; an empty vec means the write is a no-op.
+fn changed_fields(old: &Resource, new: &NewResource) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+    if old.kind != new.kind {
+        changed.push("kind");
+    }
+    if old.title != new.title {
+        changed.push("title");
+    }
+    if !old
+        .creators
+        .iter()
+        .map(Creator::to_spec)
+        .eq(new.creators.iter().cloned())
+    {
+        changed.push("creators");
+    }
+    if old.publisher != new.publisher {
+        changed.push("publisher");
+    }
+    if old.published != new.published {
+        changed.push("published");
+    }
+    if old.accessed != new.accessed {
+        changed.push("accessed");
+    }
+    if old.parent_id != new.parent_id {
+        changed.push("parent");
+    }
+    if old.series_id != new.series_id {
+        changed.push("series");
+    }
+    if old.series_number != new.series_number {
+        changed.push("series_number");
+    }
+    changed
+}
+
 #[async_trait::async_trait]
 impl Handler for CreateResource {
     const NAME: &'static str = "create_resource";
@@ -181,6 +237,70 @@ impl Handler for CreateResource {
         ev.set(event::RESOURCE_KIND, resource.kind.as_str());
         ev.set(event::RESOURCE_TITLE, resource.title.as_str().to_owned());
         Ok(Created(resource))
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for UpdateResource {
+    const NAME: &'static str = "update_resource";
+    type Output = Updated;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::RESOURCE_ID, self.id.to_string());
+        ev.set(event::RESOURCE_KIND, self.new.kind.as_str());
+        ev.set(event::RESOURCE_TITLE, self.new.title.as_str().to_owned());
+    }
+
+    async fn run(self, state: &AppState, ev: &mut Event) -> Result<Updated, CommandError> {
+        // One read covers both the not-found check and the changed-field
+        // diff, so the event records what the update would have changed even
+        // when reference validation later rejects it.
+        let old = state
+            .store()
+            .get_resource(self.id)
+            .await
+            .map_err(|e| map_resource_lookup(e, self.id))?;
+        ev.set(
+            event::RESOURCE_CHANGED_FIELDS,
+            changed_fields(&old, &self.new).join(","),
+        );
+
+        // Same reference checks as CreateResource, against the replacement.
+        for spec in &self.new.creators {
+            state
+                .store()
+                .get_person(spec.person_id)
+                .await
+                .map_err(|e| map_person_lookup(e, spec.person_id))?;
+        }
+
+        if let Some(parent_id) = self.new.parent_id {
+            let parent = state
+                .store()
+                .get_resource(parent_id)
+                .await
+                .map_err(|e| map_resource_lookup(e, parent_id))?;
+            self.new
+                .kind
+                .accept_parent(parent.kind)
+                .map_err(map_resource_err)?;
+        }
+
+        if let Some(series_id) = self.new.series_id {
+            state
+                .store()
+                .get_series(series_id)
+                .await
+                .map_err(|e| map_series_lookup(e, series_id))?;
+        }
+
+        let resource = state
+            .store()
+            .update_resource(self.id, self.new)
+            .await
+            .map_err(map_store)?;
+
+        Ok(Updated(resource))
     }
 }
 
