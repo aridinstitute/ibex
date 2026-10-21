@@ -173,6 +173,22 @@ impl LibraryDelegate {
         self.reload_from_top(selected_id, window, cx);
     }
 
+    /// Re-key the listing under a new kind predicate; mirrors the title
+    /// box's never-drop-a-change contract.
+    fn request_kind_filter(
+        &mut self,
+        kind: Option<ResourceKind>,
+        selected_id: Option<ResourceId>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        if self.filter.kind == kind {
+            return;
+        }
+        self.filter.kind = kind;
+        self.reload_from_top(selected_id, window, cx);
+    }
+
     /// Re-key the listing under a new published window; mirrors the title
     /// box's never-drop-a-change contract.
     fn request_published_filter(
@@ -286,6 +302,40 @@ impl LibraryDelegate {
             return cell.into_any_element();
         };
         match field {
+            FilterField::Kind => cell
+                // The icon column is 28 px and the trigger carries its own
+                // 4 px input padding, so this one cell tightens below the
+                // row's usual padding to keep the funnel whole.
+                .px(px(2.))
+                .child(
+                    Combobox::new(&inputs.kind)
+                        .xsmall()
+                        .appearance(false)
+                        .search_placeholder("Search kinds")
+                        // The trigger is a funnel icon in the 28 px icon
+                        // column: muted with no kind picked, primary while
+                        // one narrows the listing — the same metaphor and
+                        // glyph as the toolbar's Filters button. A custom
+                        // trigger drops the kit's chevron and clear button,
+                        // so picking the selected kind again is the clear.
+                        .render_trigger(|trigger, _window, cx| {
+                            let active = !trigger.selection().is_empty();
+                            symbol("line.3.horizontal.decrease", IconName::Settings2)
+                                .xsmall()
+                                .when(active, |icon| {
+                                    icon.text_color(cx.theme().primary)
+                                })
+                                .when(!active, |icon| {
+                                    icon.text_color(cx.theme().muted_foreground)
+                                })
+                        })
+                        // The popup reads kinds, not the funnel it hangs
+                        // off: a fixed width keeps it from collapsing to
+                        // the icon column's 28 px.
+                        .menu_width(px(200.))
+                        .w_full(),
+                )
+                .into_any_element(),
             FilterField::Title => cell
                 .child(
                     Input::new(&inputs.title)
@@ -615,9 +665,10 @@ fn sort_field_for_col(col_ix: usize) -> Option<ResourceSort> {
 }
 
 /// The filter a column header carries, mirroring the sort mapping above;
-/// the kind column's icon header stays inert.
+/// every column filters its own field.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FilterField {
+    Kind,
     Title,
     Creators,
     Published,
@@ -625,6 +676,7 @@ enum FilterField {
 
 fn filter_field_for_col(col_ix: usize) -> Option<FilterField> {
     match col_ix {
+        COL_KIND => Some(FilterField::Kind),
         COL_TITLE => Some(FilterField::Title),
         COL_CREATORS => Some(FilterField::Creators),
         COL_PUBLISHED => Some(FilterField::Published),
@@ -643,6 +695,7 @@ fn header_row_height(filters_visible: bool) -> Option<Pixels> {
 /// through its wiring.
 #[derive(Clone)]
 struct FilterInputs {
+    kind: Entity<ComboboxState<SearchableVec<KindItem>>>,
     title: Entity<InputState>,
     creator: Entity<ComboboxState<SearchableVec<CreatorItem>>>,
     published_from: Entity<InputState>,
@@ -1123,6 +1176,38 @@ impl LibraryApp {
         })
         .detach();
 
+        // The kind box is the header's one static dropdown: every kind is
+        // known without a fetch, so it opens fully populated. Picking or
+        // clearing a kind re-keys the listing through the same reload the
+        // title box uses.
+        let kind_box = cx.new(|cx| {
+            ComboboxState::new(SearchableVec::new(kind_items()), Vec::new(), window, cx)
+                .searchable(true)
+        });
+        cx.subscribe_in(
+            &kind_box,
+            window,
+            |this, _box, event: &ComboboxEvent<SearchableVec<KindItem>>, window, cx| {
+                // The box is single-select: one kind narrows, none clears.
+                let ComboboxEvent::Change(values) = event else {
+                    return;
+                };
+                let kind = values.first().copied();
+                let selected_id = this
+                    .table
+                    .read(cx)
+                    .selected_row()
+                    .and_then(|ix| this.table.read(cx).delegate().row_id(ix));
+                this.table.update(cx, |table, cx| {
+                    table
+                        .delegate_mut()
+                        .request_kind_filter(kind, selected_id, window, cx);
+                });
+                cx.notify();
+            },
+        )
+        .detach();
+
         // The box re-keys the listing on every change, clear button
         // included; the listing generation keeps a late reply from
         // clobbering the rows a newer keystroke asked for.
@@ -1227,6 +1312,7 @@ impl LibraryApp {
         // above unchanged.
         table.update(cx, |table, _| {
             table.delegate_mut().filter_inputs = Some(FilterInputs {
+                kind: kind_box,
                 title: title_input,
                 creator: creator_box,
                 published_from: published_from_input.clone(),
@@ -2043,7 +2129,7 @@ mod sort_cycle_tests {
 
     #[test]
     fn header_columns_map_to_filter_fields() {
-        assert_eq!(filter_field_for_col(COL_KIND), None);
+        assert_eq!(filter_field_for_col(COL_KIND), Some(FilterField::Kind));
         assert_eq!(
             filter_field_for_col(COL_TITLE),
             Some(FilterField::Title)
