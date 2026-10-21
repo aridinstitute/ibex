@@ -165,6 +165,23 @@ impl SurrealStore {
             .query("DEFINE INDEX IF NOT EXISTS created_in ON TABLE created FIELDS in")
             .await;
 
+        // Title orders the title-sorted listing and the title filter probes
+        // it, so both stay index walks instead of full resource scans.
+        let _ = self
+            .db
+            .query("DEFINE INDEX IF NOT EXISTS resource_title ON TABLE resource FIELDS title")
+            .await;
+
+        // The published window brackets dated rows; the index lets the range
+        // seek straight into the window instead of scanning every resource.
+        let _ = self
+            .db
+            .query(
+                "DEFINE INDEX IF NOT EXISTS resource_published \
+                 ON TABLE resource FIELDS published.instant",
+            )
+            .await;
+
         let _ = self
             .db
             .query("DEFINE TABLE IF NOT EXISTS series SCHEMALESS")
@@ -1956,6 +1973,31 @@ mod tests {
         };
         let got = reopened.get_person(created.id).await.unwrap();
         assert_eq!(got.name.display(), "Jane Doe, Jr.");
+    }
+
+    /// `ensure_schema` discards each `DEFINE` result, so a statement that fails
+    /// to apply would silently leave the listing unindexed. Read the applied
+    /// schema back instead of trusting that the statements landed.
+    #[tokio::test]
+    async fn schema_defines_the_title_and_published_indexes() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let mut response = store.db.query("INFO FOR TABLE resource").await.unwrap();
+        let info: Option<surrealdb::types::Value> = response.take(0).unwrap();
+        let names: Vec<String> = match info {
+            Some(surrealdb::types::Value::Object(table)) => match table.get("indexes") {
+                Some(surrealdb::types::Value::Object(indexes)) => indexes.keys().cloned().collect(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        assert!(
+            names.iter().any(|n| n == "resource_title"),
+            "resource_title index missing; applied indexes: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "resource_published"),
+            "resource_published index missing; applied indexes: {names:?}"
+        );
     }
 
     #[tokio::test]
