@@ -9,8 +9,8 @@ use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, Size, ThemeColor, ThemeMode,
-    TitleBar, h_flex, v_flex,
+    ActiveTheme as _, FocusableExt as _, Icon, IconName, Selectable as _, Sizable as _, Size,
+    ThemeColor, ThemeMode, TitleBar, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -1087,6 +1087,15 @@ impl Render for LibraryApp {
                             .with_size(Size::XSmall)
                             .bordered(false)
                             .stripe(true)
+                            // The table holds focus from the first frame (so
+                            // the detail-panel key works), which makes the
+                            // kit's keyboard focus ring draw on every arrow
+                            // key. The table fills this container edge to
+                            // edge, so only the ring's top edge is inside
+                            // the window, and it reads as a stray bar under
+                            // the toolbar. The row highlight already shows
+                            // where focus is; the ring adds nothing.
+                            .focus_ring(false)
                             .when_some(header_row_height(filters_visible), |table, height| {
                                 table.header_row_height(height)
                             }),
