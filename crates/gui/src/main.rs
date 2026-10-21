@@ -3,6 +3,7 @@ mod detail;
 mod icons;
 mod kind;
 mod library;
+mod settings;
 mod theme;
 
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ use gpui_kit::{AppContext as _, *};
 use crate::db::DbWorker;
 use crate::kind::AppAssets;
 use crate::library::{LibraryApp, LibraryDelegate, ToggleDetailPanel, PAGE_SIZE};
+use crate::settings::Settings;
 
 #[derive(Debug, Parser)]
 #[command(name = "ovr-gui", version, about = "Oeuvre library GUI")]
@@ -46,6 +48,11 @@ fn run() -> Result<()> {
     let args = Args::parse();
     let state = setup_state(&args)?;
     let worker = DbWorker::spawn(state);
+
+    // Settings are app-level, so they live in the default app data
+    // directory even when the library itself opens from --data elsewhere.
+    let settings_dir = default_data_dir();
+    let settings = Settings::load(&settings_dir);
 
     // Fetch the first page before the window opens so the grid renders full
     // immediately; scrolling drives every later page.
@@ -75,7 +82,7 @@ fn run() -> Result<()> {
             },
             cx,
             |window, cx| {
-                let delegate = LibraryDelegate::new(worker, first);
+                let delegate = LibraryDelegate::new(worker, first, settings);
                 let table = cx.new(|cx| {
                     TableState::new(delegate, window, cx)
                         .col_movable(false)
@@ -86,7 +93,7 @@ fn run() -> Result<()> {
                 // before any click.
                 let focus_handle = table.focus_handle(cx);
                 window.focus(&focus_handle, cx);
-                cx.new(|cx| LibraryApp::new(table, window, cx))
+                cx.new(|cx| LibraryApp::new(table, settings_dir, window, cx))
             },
         ) {
             eprintln!("error: failed to open window: {err}");

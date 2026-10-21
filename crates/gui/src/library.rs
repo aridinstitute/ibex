@@ -1,5 +1,7 @@
 //! Library grid: resource summary rows, one page at a time.
 
+use std::{collections::BTreeMap, path::PathBuf};
+
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -22,6 +24,7 @@ use crate::db::DbWorker;
 use crate::detail::{render_panel, DetailFetch, DetailView};
 use crate::icons::symbol;
 use crate::kind::{kind_label, kind_symbol};
+use crate::settings::Settings;
 
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
 /// enough that the demo library spans several pages.
@@ -32,6 +35,15 @@ const COL_TITLE: usize = 1;
 const COL_CREATORS: usize = 2;
 const COL_PUBLISHED: usize = 3;
 const COLUMNS: usize = 4;
+
+/// Stable key for each column, indexed like the COL_ constants above.
+/// Settings persist column widths under these names, so widths survive any
+/// future column reordering.
+const COLUMN_KEYS: [&str; COLUMNS] = ["kind", "title", "creators", "published"];
+
+/// The title column's built-in width, half of its former 620 px, so the
+/// grid opens readable on narrower windows.
+const DEFAULT_TITLE_WIDTH: f32 = 310.;
 
 const CELL_TEXT_SIZE: Pixels = px(13.);
 /// Header labels are one step below the cell text: the table default is 9px
@@ -65,6 +77,10 @@ pub struct LibraryDelegate {
     /// Mirrors the table's selected row from its selection events, because
     /// `render_td` runs while the table state is borrowed and cannot ask it.
     selected_row: Option<usize>,
+    /// Persisted GUI settings: column widths loaded from config.toml ride
+    /// through `column`, and finished resizes are written back by
+    /// `LibraryApp`.
+    settings: Settings,
     /// Bumped on every accepted sort or filter change. Each fetch carries
     /// the generation it was issued for, so a reply landing after a newer
     /// change is dropped instead of clobbering the newer listing.
@@ -74,7 +90,7 @@ pub struct LibraryDelegate {
 impl LibraryDelegate {
     /// Start from a first page fetched before the window opens, so the grid
     /// never renders an empty bootstrap state.
-    pub fn new(worker: DbWorker, first: ResourcePage) -> Self {
+    pub fn new(worker: DbWorker, first: ResourcePage, settings: Settings) -> Self {
         Self {
             worker,
             rows: first.rows,
@@ -86,6 +102,7 @@ impl LibraryDelegate {
             filters_visible: false,
             error: None,
             selected_row: None,
+            settings,
             listing_gen: 0,
         }
     }
@@ -302,14 +319,35 @@ impl TableDelegate for LibraryDelegate {
     }
 
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
+        // The table reads its columns only on prepare and refresh, so the
+        // width here (saved setting or built-in default) is the width the
+        // table opens at.
         match col_ix {
-            COL_KIND => Column::new("kind", "")
+            COL_KIND => Column::new(COLUMN_KEYS[COL_KIND], "")
                 .width(px(28.))
                 .resizable(false)
                 .text_center(),
-            COL_TITLE => Column::new("title", "Title").width(px(620.)).min_width(px(160.)),
-            COL_CREATORS => Column::new("creators", "Authors").width(px(260.)).min_width(px(80.)),
-            COL_PUBLISHED => Column::new("published", "Published").width(px(140.)).min_width(px(50.)),
+            COL_TITLE => Column::new(COLUMN_KEYS[COL_TITLE], "Title")
+                .width(stored_width(
+                    &self.settings.column_widths,
+                    COL_TITLE,
+                    DEFAULT_TITLE_WIDTH,
+                ))
+                .min_width(px(160.)),
+            COL_CREATORS => Column::new(COLUMN_KEYS[COL_CREATORS], "Authors")
+                .width(stored_width(
+                    &self.settings.column_widths,
+                    COL_CREATORS,
+                    260.,
+                ))
+                .min_width(px(80.)),
+            COL_PUBLISHED => Column::new(COLUMN_KEYS[COL_PUBLISHED], "Published")
+                .width(stored_width(
+                    &self.settings.column_widths,
+                    COL_PUBLISHED,
+                    140.,
+                ))
+                .min_width(px(50.)),
             _ => unreachable!("columns_count is {COLUMNS}"),
         }
     }
@@ -666,6 +704,25 @@ impl SearchableListItem for CreatorItem {
     }
 }
 
+/// Width column `col_ix` opens at: its saved width when settings have one,
+/// the built-in default otherwise.
+fn stored_width(widths: &BTreeMap<String, f64>, col_ix: usize, default: f32) -> Pixels {
+    widths
+        .get(COLUMN_KEYS[col_ix])
+        .map(|width| px(*width as f32))
+        .unwrap_or_else(|| px(default))
+}
+
+/// All column widths keyed by column key, as a finished resize reports
+/// them: position `col_ix` becomes `COLUMN_KEYS[col_ix]`.
+fn widths_by_key(widths: &[Pixels]) -> BTreeMap<String, f64> {
+    COLUMN_KEYS
+        .iter()
+        .zip(widths)
+        .map(|(key, width)| ((*key).to_string(), f64::from(f32::from(*width))))
+        .collect()
+}
+
 /// (primary, secondary) cell text for a row. The selected row sits on a
 /// solid accent fill, so both turn to the accent's foreground, with the
 /// secondary columns slightly dimmed to keep their hierarchy.
@@ -693,6 +750,8 @@ gpui_kit::actions!([ToggleDetailPanel]);
 
 pub struct LibraryApp {
     table: Entity<TableState<LibraryDelegate>>,
+    /// App data directory holding config.toml, where settings persist.
+    settings_dir: PathBuf,
     /// Year boxes bracketing the published window; either side alone
     /// bounds the listing, so both re-key on every edit.
     published_from_input: Entity<InputState>,
@@ -707,12 +766,32 @@ pub struct LibraryApp {
 }
 
 impl LibraryApp {
+    /// Persist a finished column resize to config.toml. The table emits
+    /// [`TableEvent::ColumnWidthsChanged`] once per completed drag or fit,
+    /// so this is one small write per user action; the delegate's copy is
+    /// updated too, so a later refresh reads the same widths back.
+    fn save_column_widths(&mut self, widths: &[Pixels], cx: &mut Context<Self>) {
+        let settings = self.table.update(cx, |table, _cx| {
+            let settings = &mut table.delegate_mut().settings;
+            settings.column_widths = widths_by_key(widths);
+            settings.clone()
+        });
+        if let Err(err) = settings.save(&self.settings_dir) {
+            eprintln!("warning: could not save column widths: {err:#}");
+        }
+    }
+
     pub fn new(
         table: Entity<TableState<LibraryDelegate>>,
+        settings_dir: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.subscribe_in(&table, window, |this, _table, event: &TableEvent, window, cx| {
+            if let TableEvent::ColumnWidthsChanged(widths) = event {
+                this.save_column_widths(widths, cx);
+                return;
+            }
             let selected_row = match event {
                 TableEvent::SelectRow(row_ix) => Some(*row_ix),
                 TableEvent::ClearSelection => None,
@@ -842,6 +921,7 @@ impl LibraryApp {
 
         Self {
             table,
+            settings_dir,
             published_from_input,
             published_to_input,
             detail_open: false,
@@ -1029,6 +1109,39 @@ impl Render for LibraryApp {
                         .child(error),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod column_width_tests {
+    // No `use super::*`: the glob would re-import gpui's `test` proc
+    // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
+    use super::{
+        COL_CREATORS, COL_PUBLISHED, COL_TITLE, COLUMN_KEYS, COLUMNS, DEFAULT_TITLE_WIDTH,
+        stored_width, widths_by_key,
+    };
+    use gpui_kit::px;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn widths_by_key_keys_each_column_by_its_config_key() {
+        let map = widths_by_key(&[px(28.), px(310.), px(260.), px(140.)]);
+        assert_eq!(map.len(), COLUMNS);
+        assert_eq!(map[COLUMN_KEYS[COL_TITLE]], 310.);
+        assert_eq!(map[COLUMN_KEYS[COL_PUBLISHED]], 140.);
+        assert!(COLUMN_KEYS.iter().all(|key| map.contains_key(*key)));
+    }
+
+    #[test]
+    fn stored_width_prefers_saved_widths_over_defaults() {
+        let saved = BTreeMap::from([("title".to_owned(), 480.)]);
+        assert_eq!(
+            stored_width(&saved, COL_TITLE, DEFAULT_TITLE_WIDTH),
+            px(480.)
+        );
+        assert_eq!(stored_width(&BTreeMap::new(), COL_CREATORS, 260.), px(260.));
+        // The title's built-in width is half its former 620 px.
+        assert_eq!(DEFAULT_TITLE_WIDTH, 310.);
     }
 }
 
