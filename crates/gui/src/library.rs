@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     ops::Range,
     path::PathBuf,
+    time::{Duration, Instant},
 };
 
 use gpui_kit::assets::IconName as AssetIconName;
@@ -940,7 +941,15 @@ fn sort_marker(direction: SortDirection, cx: &App) -> Icon {
     .text_color(cx.theme().muted_foreground)
 }
 
-gpui_kit::actions!([ToggleDetailPanel, CycleColumnSort]);
+gpui_kit::actions!([
+    ToggleDetailPanel,
+    CycleColumnSort,
+    ToggleEditMode,
+    FocusColumnFilter,
+]);
+
+/// Two Esc presses within this window clear filters and hide the filter row.
+const CLEAR_FILTERS_DOUBLE_ESC: Duration = Duration::from_millis(400);
 
 /// Rows on either side of the selection whose details prefetch warms.
 /// Arrow-key walking moves one row at a time, so a small radius covers
@@ -1037,6 +1046,10 @@ pub struct LibraryApp {
     /// generation; a reply from a fetch issued before the bump is dropped
     /// instead of re-caching the pre-edit detail.
     detail_gens: HashMap<ResourceId, u64>,
+    /// First Esc of a double-tap; cleared after the pair fires or times out.
+    /// Observed after action dispatch so it still works while an Input owns
+    /// the single-Esc binding.
+    last_escape_at: Option<Instant>,
 }
 
 /// The edit flow's two states: fetching the raw record the form edits,
@@ -1414,6 +1427,28 @@ impl LibraryApp {
             });
         });
 
+        // After-dispatch observer: Input/DataTable may consume a single Esc,
+        // but a second within the window still clears filters from anywhere.
+        cx.observe_keystrokes(|this, event, window, cx| {
+            if event.keystroke.key != "escape"
+                || event.keystroke.modifiers.modified()
+            {
+                this.last_escape_at = None;
+                return;
+            }
+            let now = Instant::now();
+            if this
+                .last_escape_at
+                .is_some_and(|prev| now.duration_since(prev) <= CLEAR_FILTERS_DOUBLE_ESC)
+            {
+                this.last_escape_at = None;
+                this.clear_all_filters(window, cx);
+            } else {
+                this.last_escape_at = Some(now);
+            }
+        })
+        .detach();
+
         Self {
             table,
             settings_dir,
@@ -1426,6 +1461,7 @@ impl LibraryApp {
             detail_inflight: HashSet::new(),
             edit: None,
             detail_gens: HashMap::new(),
+            last_escape_at: None,
         }
     }
 
@@ -1568,6 +1604,82 @@ impl LibraryApp {
         cx.notify();
     }
 
+    /// Drop every predicate, empty the header controls, hide the filter
+    /// row, and reload when a predicate was active. Widget clears use
+    /// silent setters so they do not stack extra fetches.
+    fn clear_all_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected_id = self.selected;
+        let inputs = self.table.read(cx).delegate().filter_inputs.clone();
+        if let Some(inputs) = inputs {
+            inputs.title.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
+            inputs.published_from.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
+            inputs.published_to.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
+            inputs.kind.update(cx, |state, cx| {
+                state.set_selected_values(&[] as &[ResourceKind], window, cx);
+            });
+            inputs.creator.update(cx, |state, cx| {
+                state.set_selected_values(&[] as &[PersonId], window, cx);
+            });
+        }
+        self.table.update(cx, |table, cx| {
+            let delegate = table.delegate_mut();
+            let was_active = delegate.filter.is_active();
+            delegate.filters_visible = false;
+            if was_active {
+                delegate.filter = ResourceFilter::none();
+                delegate.reload_from_top(selected_id, None, window, cx);
+            } else {
+                cx.notify();
+            }
+        });
+        cx.notify();
+    }
+
+    /// With a filterable column selected, show the filter row and focus
+    /// that column's control. Columns without a filter are a no-op.
+    fn focus_selected_column_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(col_ix) = self.table.read(cx).selected_col() else {
+            return;
+        };
+        let Some(field) = filter_field_for_col(col_ix) else {
+            return;
+        };
+        let inputs = self.table.read(cx).delegate().filter_inputs.clone();
+        let Some(inputs) = inputs else {
+            return;
+        };
+        self.table.update(cx, |table, cx| {
+            let delegate = table.delegate_mut();
+            if !delegate.filters_visible {
+                delegate.filters_visible = true;
+                cx.notify();
+            }
+        });
+        match field {
+            FilterField::Kind => {
+                let handle = inputs.kind.focus_handle(cx);
+                window.focus(&handle, cx);
+            }
+            FilterField::Title => inputs.title.update(cx, |state, cx| {
+                state.focus(window, cx);
+            }),
+            FilterField::Creators => {
+                let handle = inputs.creator.focus_handle(cx);
+                window.focus(&handle, cx);
+            }
+            FilterField::Published => inputs.published_from.update(cx, |state, cx| {
+                state.focus(window, cx);
+            }),
+        }
+        cx.notify();
+    }
+
     /// Space on a highlighted sortable column steps that column's sort
     /// cycle. Kind has no sort field, so Space is a no-op there.
     fn cycle_column_sort(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1590,6 +1702,16 @@ impl LibraryApp {
         // so opening it never waits on a fetch.
         self.detail_open = !self.detail_open;
         cx.notify();
+    }
+
+    /// `e` opens the edit form (and the sidebar if it was closed) and focuses
+    /// the title field; a second press closes the form without saving.
+    fn toggle_edit_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.edit {
+            Some(EditFetch::Ready(_)) => self.cancel_edit(cx),
+            Some(EditFetch::Loading(_)) => {}
+            None => self.request_edit(window, cx),
+        }
     }
 
     /// Open the edit form for the selected resource: fetch the raw record
@@ -1621,10 +1743,13 @@ impl LibraryApp {
                             let parent_id = record.parent_id;
                             let rule = record.kind.parent_rule();
                             let form = EditForm::new(record, &worker, window, cx);
+                            let title = form.title.clone();
                             app.edit = Some(EditFetch::Ready(Box::new(form)));
-                            // The parent box opened empty: its options come
-                            // from a listing narrowed to the kinds this
-                            // record's rule allows, fetched next.
+                            // Land the caret in the title so `e` opens ready
+                            // to type; parent options load in the background.
+                            title.update(cx, |state, cx| {
+                                state.focus(window, cx);
+                            });
                             app.load_parent_options(
                                 worker.clone(),
                                 id,
@@ -1990,15 +2115,20 @@ impl Render for LibraryApp {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            // `]` toggles the detail panel and Space cycles the selected
-            // column's sort; the context must cover the focused table,
-            // which renders below this root.
+            // Handlers sit on this ancestor so bindings fire for any focused
+            // descendant (table, toolbar, sidebar), not only the DataTable.
             .key_context("LibraryApp")
             .on_action(cx.listener(|this, _: &ToggleDetailPanel, _window, cx| {
                 this.toggle_detail_panel(cx);
             }))
             .on_action(cx.listener(|this, _: &CycleColumnSort, window, cx| {
                 this.cycle_column_sort(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleEditMode, window, cx| {
+                this.toggle_edit_mode(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusColumnFilter, window, cx| {
+                this.focus_selected_column_filter(window, cx);
             }))
             .child(
                 // The toolbar doubles as the window's title bar: the traffic
