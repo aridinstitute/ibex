@@ -1722,9 +1722,18 @@ impl Render for LibraryApp {
                     .flex_1()
                     .min_h_0()
                     .child(
+                        // `h_flex` centers its children on the cross axis
+                        // instead of stretching them, so the wrapper must
+                        // claim the row's height itself: without `h_full`
+                        // it falls back to content height, every
+                        // percentage height below it (the table, its
+                        // scroll body, the rows list) collapses, and the
+                        // header-only strip floats mid-window with no
+                        // rows and no empty state.
                         div()
                             .flex_1()
                             .min_w_0()
+                            .h_full()
                             .child(
                                 DataTable::new(&self.table)
                                     .with_size(Size::XSmall)
