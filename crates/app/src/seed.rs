@@ -10,9 +10,10 @@ use oeuvre_core::{
     ResourceKind, Store, StoreError, UtcMillis,
 };
 
-/// Demo library size: enough rows to force several scroll pages at 50 rows
-/// per page.
-pub const DEFAULT_DEMO_LIBRARY_SIZE: usize = 200;
+/// Demo library size: large enough that scrolling, filtering, and sorting
+/// behave like they do against a real library, while still seeding in well
+/// under a second so `--memory` starts promptly.
+pub const DEFAULT_DEMO_LIBRARY_SIZE: usize = 5_000;
 
 const DEMO_PEOPLE: [(&str, &str); 8] = [
     ("Ada", "Lovelace"),
