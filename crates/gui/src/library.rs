@@ -228,15 +228,22 @@ impl LibraryDelegate {
         &self.worker
     }
 
-    /// The column's slot in the filter row. Clicks into a control belong to
-    /// the control: the header's column selection and double-click sort
-    /// must never see them.
-    fn filter_control(&self, col_ix: usize) -> AnyElement {
+    /// The column's cell in the filter row: edge to edge, divided like a
+    /// body row, with borderless controls filling it. Clicks into a control
+    /// belong to the control: the header's column selection and
+    /// double-click sort must never see them.
+    fn filter_control(&self, col_ix: usize, cx: &App) -> AnyElement {
+        let pad = Size::XSmall.table_cell_padding();
         let cell = h_flex()
             .id(("th-filter", col_ix))
             .w_full()
-            .flex_1()
+            .h(Size::XSmall.table_row_height())
             .items_center()
+            .px(pad.left)
+            .border_t_1()
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(|_, _, cx| cx.stop_propagation());
         let (Some(inputs), Some(field)) = (self.filter_inputs.as_ref(), filter_field_for_col(col_ix))
@@ -245,29 +252,43 @@ impl LibraryDelegate {
         };
         match field {
             FilterField::Title => cell
-                .child(Input::new(&inputs.title).xsmall().cleanable(true).w_full())
+                .child(
+                    Input::new(&inputs.title)
+                        .xsmall()
+                        .appearance(false)
+                        .cleanable(true)
+                        .w_full(),
+                )
                 .into_any_element(),
             FilterField::Creators => cell
                 .child(
                     Combobox::new(&inputs.creator)
                         .xsmall()
+                        .appearance(false)
                         .cleanable(true)
                         .placeholder("Creator")
                         .search_placeholder("Search creators")
                         .w_full(),
                 )
                 .into_any_element(),
+            // The year pair splits the cell with a divider of its own, so
+            // the two bounds read as two cells.
             FilterField::Published => cell
-                .gap_1()
-                .child(Input::new(&inputs.published_from).xsmall().w_full())
-                .child(Input::new(&inputs.published_to).xsmall().w_full())
+                .child(
+                    Input::new(&inputs.published_from)
+                        .xsmall()
+                        .appearance(false)
+                        .w_full(),
+                )
+                .child(div().w(px(1.)).h_full().flex_shrink_0().bg(cx.theme().border))
+                .child(Input::new(&inputs.published_to).xsmall().appearance(false).w_full())
                 .into_any_element(),
         }
     }
 }
 
-impl TableDelegate for LibraryDelegate {    fn columns_count(&self, _cx: &App) -> usize {
-        COLUMNS
+impl TableDelegate for LibraryDelegate {
+    fn columns_count(&self, _cx: &App) -> usize {        COLUMNS
     }
 
     fn rows_count(&self, _cx: &App) -> usize {
@@ -342,16 +363,26 @@ impl TableDelegate for LibraryDelegate {    fn columns_count(&self, _cx: &App) -
                     .into_any_element()
             }
         };
-        // The filter row stacks under the names inside each header cell, so
-        // every control spans exactly its column through resizes and
-        // horizontal scroll.
+        if !self.filters_visible {
+            return v_flex().size_full().child(label);
+        }
+        // The filter row lives inside each header cell, so every control
+        // spans exactly its column through resizes and horizontal scroll.
+        // Negative margins cancel the kit's cell padding so the row runs
+        // edge to edge as a row of its own; the label takes the padding
+        // back.
+        let pad = Size::XSmall.table_cell_padding();
         v_flex()
-            .size_full()
-            .child(label)
-            .when(self.filters_visible, |el| el.child(self.filter_control(col_ix)))
+            .flex_1()
+            .h(Size::XSmall.table_row_height() * 2.)
+            .ml(-pad.left)
+            .mr(-pad.right)
+            .child(div().flex_1().w_full().flex().px(pad.left).child(label))
+            .child(self.filter_control(col_ix, cx))
     }
 
-    fn render_td(        &mut self,
+    fn render_td(
+        &mut self,
         row_ix: usize,
         col_ix: usize,
         _window: &mut Window,
