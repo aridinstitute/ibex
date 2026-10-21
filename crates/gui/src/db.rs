@@ -408,6 +408,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_filters_query_pages_by_kind() {
+        let store = MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        let state = AppState::builder(store).surface(Surface::Test).build();
+        let worker = DbWorker::spawn(state);
+
+        // The demo library holds exactly one journal among its articles
+        // and books, so a kind-scoped retrieval — the parent picker's
+        // narrowing — returns only the parentable kind.
+        let page = worker
+            .list_query_page(
+                oeuvre_core::ResourceQuery {
+                    sort: None,
+                    filter: oeuvre_core::ResourceFilter::by_kind(
+                        oeuvre_core::ResourceKind::Journal,
+                    ),
+                },
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].title.as_str(), "Journal of Citation Studies");
+        assert_eq!(page.rows[0].kind, oeuvre_core::ResourceKind::Journal);
+        assert_eq!(page.next_offset, None);
+    }
+
+    #[tokio::test]
     async fn worker_filters_query_pages_by_creator() {
         let store = MemoryStore::new();
         oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();

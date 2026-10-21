@@ -17,8 +17,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use oeuvre_core::{
-    NonEmptyStr, Person, PersonId, PublishedRange, Resource, ResourceDetail, ResourceFilter,
-    ResourceId, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, SortDirection, UtcMillis,
+    NonEmptyStr, ParentRule, Person, PersonId, PublishedRange, Resource, ResourceDetail,
+    ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort,
+    ResourceSummary, SortDirection, UtcMillis,
 };
 
 use crate::db::DbWorker;
@@ -34,10 +35,11 @@ use crate::settings::Settings;
 /// enough that the demo library spans several pages.
 pub const PAGE_SIZE: u32 = 50;
 
-/// First page of resources offered as parent options in the edit form. A
-/// parent beyond the page is still fetched by id when the record carries
-/// one, so every stored parent stays selectable; the cap keeps the form's
-/// extra fetch bounded on large libraries.
+/// First page of parent candidates the edit form fetches, already narrowed
+/// to the edited kind's expected parent kind at the store. A parent beyond
+/// the page is still fetched by id when the record carries one, so every
+/// stored parent stays selectable; the cap keeps the form's extra fetch
+/// bounded on large libraries.
 const PARENT_OPTIONS_LIMIT: u32 = 100;
 
 const COL_KIND: usize = 0;
@@ -741,13 +743,23 @@ impl SearchableListItem for ParentItem {
     }
 }
 
-/// Parent options from a listing page: the edited record itself is skipped
-/// (a resource cannot become its own parent), the rest sort by title so the
-/// dropdown reads alphabetically whatever order the store lists in.
-fn parent_options(rows: &[ResourceSummary], edited: ResourceId) -> Vec<ParentItem> {
+/// Parent options from a listing page, narrowed to what the edited record's
+/// rule allows: off-kind rows never appear however the page was fetched, the
+/// edited record itself is skipped (a resource cannot become its own
+/// parent), and the rest sort by title so the dropdown reads
+/// alphabetically whatever order the store lists in.
+fn parent_options(
+    rows: &[ResourceSummary],
+    edited: ResourceId,
+    rule: ParentRule,
+) -> Vec<ParentItem> {
+    // A rule that forbids parents offers none at all.
+    let (ParentRule::Optional { expected } | ParentRule::Required { expected }) = rule else {
+        return Vec::new();
+    };
     let mut items: Vec<ParentItem> = rows
         .iter()
-        .filter(|row| row.id != edited)
+        .filter(|row| row.id != edited && row.kind == expected)
         .map(|row| ParentItem {
             label: row.title.as_str().into(),
             id: row.id,
@@ -926,12 +938,25 @@ struct EditForm {
     error: Option<String>,
     /// While the save is in flight: the Save button busy, no double sends.
     saving: bool,
+    /// The expected parent kind the box's current options target, `None`
+    /// when the kind forbids parents or the options have not landed: a
+    /// kind change re-keys the box only when this value moves.
+    parent_options_kind: Option<ResourceKind>,
+    /// Bumped on every options load; a reply carries the generation it was
+    /// issued for, so a late fetch cannot clobber a newer kind's options.
+    parent_gen: u64,
 }
 
 impl EditForm {
     /// Prefilled widgets for `record`: every scalar opens with its stored
-    /// value, the kind box with the record's kind selected.
-    fn new(record: Resource, window: &mut Window, cx: &mut Context<LibraryApp>) -> Self {
+    /// value, the kind box with the record's kind selected. The kind box's
+    /// changes re-key the parent options through `worker`.
+    fn new(
+        record: Resource,
+        worker: &DbWorker,
+        window: &mut Window,
+        cx: &mut Context<LibraryApp>,
+    ) -> Self {
         let draft = prefill_draft(&record);
         let items = kind_items();
         // The box keys rows by position: the kind's row in the alphabetized
@@ -954,6 +979,51 @@ impl EditForm {
             ComboboxState::new(SearchableVec::new(Vec::new()), Vec::new(), window, cx)
                 .searchable(true)
         });
+        // A parent valid for the old kind is off-kind for the new one, and
+        // a kind that forbids parents empties the box outright, so every
+        // kind change re-keys the parent options.
+        cx.subscribe_in(&kind, window, {
+            let worker = worker.clone();
+            move |app, _kind, event: &ComboboxEvent<SearchableVec<KindItem>>, window, cx| {
+                let ComboboxEvent::Change(values) = event else {
+                    return;
+                };
+                let Some(EditFetch::Ready(form)) = &app.edit else {
+                    return;
+                };
+                // A cleared kind box falls back to the stored kind, the
+                // same rule the draft applies on save.
+                let new_kind = values.first().copied().unwrap_or(form.record.kind);
+                let rule = new_kind.parent_rule();
+                let expected = match rule {
+                    ParentRule::Optional { expected } | ParentRule::Required { expected } => {
+                        Some(expected)
+                    }
+                    ParentRule::Forbidden => None,
+                };
+                // The expected kind has not moved: a bookSection and a
+                // dictionaryEntry share a book, so the options already
+                // target the right kind.
+                if expected == form.parent_options_kind {
+                    return;
+                }
+                let id = form.record.id;
+                // Returning to the record's own kind restores its stored
+                // parent's selection; any other kind starts the box clean,
+                // since a parent of the old kind is off-kind for the new.
+                let stored_parent = (new_kind == form.record.kind)
+                    .then_some(form.record.parent_id)
+                    .flatten();
+                app.load_parent_options(worker.clone(), id, rule, stored_parent, window, cx);
+            }
+        })
+        .detach();
+        let parent_options_kind = match draft.kind.parent_rule() {
+            ParentRule::Optional { expected } | ParentRule::Required { expected } => {
+                Some(expected)
+            }
+            ParentRule::Forbidden => None,
+        };
         Self {
             title: prefill_input(draft.title, "Title", window, cx),
             kind,
@@ -966,6 +1036,8 @@ impl EditForm {
             record: Box::new(record),
             error: None,
             saving: false,
+            parent_options_kind,
+            parent_gen: 0,
         }
     }
 
@@ -1349,76 +1421,20 @@ impl LibraryApp {
                             && matches!(app.edit, Some(EditFetch::Loading(_)))
                         {
                             let parent_id = record.parent_id;
-                            let form = EditForm::new(record, window, cx);
+                            let rule = record.kind.parent_rule();
+                            let form = EditForm::new(record, &worker, window, cx);
                             app.edit = Some(EditFetch::Ready(Box::new(form)));
-                            // The parent box opened empty: its options need
-                            // a listing, which is another fetch. One page of
-                            // titles covers the dropdown; a stored parent
-                            // outside that page is fetched by id so it stays
-                            // selected and visible whatever the library's
-                            // size.
-                            let worker = worker.clone();
-                            cx.spawn_in(window, async move |app, window| {
-                                let mut items: Vec<ParentItem> = Vec::new();
-                                let mut missing_parent = parent_id;
-                                if let Ok(page) =
-                                    worker.list_page(None, PARENT_OPTIONS_LIMIT).await
-                                {
-                                    items = parent_options(&page.rows, id);
-                                    missing_parent = parent_id
-                                        .filter(|parent| {
-                                            !items.iter().any(|item| item.id == *parent)
-                                        });
-                                }
-                                if let Some(parent) = missing_parent {
-                                    // The stored parent did not make the
-                                    // page. Its own record still names its
-                                    // title; if even that read fails, the
-                                    // raw id is the honest label — better
-                                    // than silently dropping the stored
-                                    // link on save.
-                                    let label = match worker.resource(parent).await {
-                                        Ok(record) => {
-                                            SharedString::from(record.title.as_str())
-                                        }
-                                        Err(_) => SharedString::from(parent.to_string()),
-                                    };
-                                    items.insert(0, ParentItem { label, id: parent });
-                                }
-                                let selection = parent_id.and_then(|parent| {
-                                    items
-                                        .iter()
-                                        .position(|item| item.id == parent)
-                                        .map(IndexPath::new)
-                                });
-                                _ = app.update_in(window, |app, window, cx| {
-                                    // The form closed, or a different
-                                    // record's form opened, since the fetch:
-                                    // the options belong to nobody.
-                                    let Some(EditFetch::Ready(form)) = &app.edit else {
-                                        return;
-                                    };
-                                    if form.record.id != id {
-                                        return;
-                                    }
-                                    form.parent.update(cx, |state, cx| {
-                                        state.set_items(
-                                            SearchableVec::new(items),
-                                            window,
-                                            cx,
-                                        );
-                                        if let Some(row) = selection {
-                                            state.set_selected_indices(
-                                                vec![row],
-                                                window,
-                                                cx,
-                                            );
-                                        }
-                                    });
-                                    cx.notify();
-                                });
-                            })
-                            .detach();
+                            // The parent box opened empty: its options come
+                            // from a listing narrowed to the kinds this
+                            // record's rule allows, fetched next.
+                            app.load_parent_options(
+                                worker.clone(),
+                                id,
+                                rule,
+                                parent_id,
+                                window,
+                                cx,
+                            );
                         }
                     }
                     Err(err) => {
@@ -1428,6 +1444,103 @@ impl LibraryApp {
                         }
                     }
                 }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Fill the parent box with options for `id`'s current kind rule: the
+    /// listing narrows to the rule's expected kind at the store, so a
+    /// sparse kind still fills the dropdown instead of losing a race with
+    /// the library's newest rows. `stored_parent` names a parent beyond the
+    /// fetched page so it stays selectable and a save never silently drops
+    /// the link; a rule that forbids parents empties the box instead of
+    /// fetching. The form's generation guard drops a late reply once a
+    /// newer kind change has re-keyed the options.
+    fn load_parent_options(
+        &mut self,
+        worker: DbWorker,
+        id: ResourceId,
+        rule: ParentRule,
+        stored_parent: Option<ResourceId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        if form.record.id != id {
+            return;
+        }
+        let expected = match rule {
+            ParentRule::Optional { expected } | ParentRule::Required { expected } => {
+                Some(expected)
+            }
+            ParentRule::Forbidden => None,
+        };
+        form.parent_options_kind = expected;
+        form.parent_gen += 1;
+        let options_gen = form.parent_gen;
+        let (ParentRule::Optional { expected } | ParentRule::Required { expected }) = rule else {
+            // Nothing can parent this kind, and a selection left over
+            // from the previous kind would ride into a doomed save: both
+            // go now rather than after the next fetch.
+            form.parent.update(cx, |state, cx| {
+                state.set_items(SearchableVec::new(Vec::new()), window, cx);
+                state.set_selected_indices(Vec::new(), window, cx);
+            });
+            cx.notify();
+            return;
+        };
+        let query = ResourceQuery {
+            sort: None,
+            filter: ResourceFilter::by_kind(expected),
+        };
+        cx.spawn_in(window, async move |app, window| {
+            let mut items: Vec<ParentItem> = Vec::new();
+            let mut missing_parent = stored_parent;
+            if let Ok(page) = worker.list_query_page(query, 0, PARENT_OPTIONS_LIMIT).await {
+                items = parent_options(&page.rows, id, rule);
+                missing_parent = stored_parent
+                    .filter(|parent| !items.iter().any(|item| item.id == *parent));
+            }
+            if let Some(parent) = missing_parent {
+                // The stored parent did not make the page. Its own record
+                // still names its title; if even that read fails, the raw
+                // id is the honest label — better than silently dropping
+                // the stored link on save.
+                let label = match worker.resource(parent).await {
+                    Ok(record) => SharedString::from(record.title.as_str()),
+                    Err(_) => SharedString::from(parent.to_string()),
+                };
+                items.insert(0, ParentItem { label, id: parent });
+            }
+            // A stored parent opens selected; any other caller changed the
+            // kind, and the stale selection clears with the options.
+            let selection = stored_parent.and_then(|parent| {
+                items
+                    .iter()
+                    .position(|item| item.id == parent)
+                    .map(IndexPath::new)
+            });
+            _ = app.update_in(window, |app, window, cx| {
+                // The form closed, a different record's form opened, or a
+                // newer kind change re-keyed the options since the fetch:
+                // this reply belongs to nobody.
+                let Some(EditFetch::Ready(form)) = &app.edit else {
+                    return;
+                };
+                if form.record.id != id || form.parent_gen != options_gen {
+                    return;
+                }
+                form.parent.update(cx, |state, cx| {
+                    state.set_items(SearchableVec::new(items), window, cx);
+                    match selection {
+                        Some(row) => state.set_selected_indices(vec![row], window, cx),
+                        None => state.set_selected_indices(Vec::new(), window, cx),
+                    }
+                });
                 cx.notify();
             });
         })
@@ -2103,12 +2216,36 @@ mod parent_options_tests {
         edited.id = ResourceId::generate();
         let edited_id = edited.id;
 
-        let options = parent_options(&[zzz, edited, aaa], edited_id);
+        let options = parent_options(
+            &[zzz, edited, aaa],
+            edited_id,
+            ResourceKind::BookSection.parent_rule(),
+        );
         let labels: Vec<String> = options.iter().map(ParentItem::title).map(String::from).collect();
         // Alphabetical whatever order the store lists in, and a resource
         // cannot become its own parent, so the edited record never
         // appears among its own options.
         assert_eq!(labels, ["Aaa Book", "Zzz Weekly"]);
         assert!(options.iter().all(|item| *item.value() != edited_id));
+    }
+
+    #[test]
+    fn parent_options_keep_only_the_expected_kind() {
+        let mut journal = summary("Zzz Journal");
+        journal.kind = ResourceKind::Journal;
+        let mut article = summary("An article is not a parent");
+        article.kind = ResourceKind::JournalArticle;
+        let edited = summary("The edited record");
+        let edited_id = edited.id;
+
+        // A journal article's parent is a journal: articles and anything
+        // else never appear among the options, whatever page served them.
+        let options = parent_options(
+            &[journal, article, edited],
+            edited_id,
+            ResourceKind::JournalArticle.parent_rule(),
+        );
+        let labels: Vec<String> = options.iter().map(ParentItem::title).map(String::from).collect();
+        assert_eq!(labels, ["Zzz Journal"]);
     }
 }
