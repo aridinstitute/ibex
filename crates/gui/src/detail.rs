@@ -3,11 +3,12 @@
 
 use gpui_kit::component::description_list::{DescriptionItem, DescriptionList};
 use gpui_kit::component::{ActiveTheme as _, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use oeuvre_core::{format_published_label, CreatorRole, ResourceDetail};
 
-use crate::kind::kind_label;
+use crate::kind::{kind_color, kind_label};
 
 /// Panel width on the right side of the library grid.
 pub const PANEL_WIDTH: Pixels = px(320.);
@@ -15,6 +16,22 @@ pub const PANEL_WIDTH: Pixels = px(320.);
 const FIELD_LABEL_WIDTH: Pixels = px(88.);
 /// Matches the grid's cell text so the two panes read as one view.
 const FIELD_TEXT_SIZE: Pixels = px(13.);
+/// Opacity of the kind tint at the panel's top edge. A hint of the kind's
+/// color rather than a wash: the field labels stay above 13:1 contrast on
+/// it in both palettes.
+const TINT_ALPHA: f32 = 0.16;
+/// Fraction of the panel's height the tint fades across. It reaches fully
+/// transparent before the bottom, so a short field list still fades out
+/// rather than ending on a hard band.
+const TINT_FADE: f32 = 0.2;
+
+// Compile-time guard on the two knobs above: the tint must stay short of
+// opaque so the field text keeps its contrast, and finish fading at or
+// before the bottom edge.
+const _: () = {
+    assert!(TINT_ALPHA > 0. && TINT_ALPHA <= 0.6);
+    assert!(TINT_FADE > 0. && TINT_FADE <= 1.);
+};
 
 /// Detail fetch state for the selected resource. The loaded detail is boxed
 /// to keep the enum small; only one exists at a time.
@@ -102,14 +119,53 @@ fn value_element(lines: &[String]) -> AnyElement {
     }
 }
 
+/// Kind color the panel tints toward, or `None` while no resource is
+/// loaded. Pure so the tint's source is unit-testable without a window.
+fn tint_color(view: &DetailView<'_>, dark: bool) -> Option<Hsla> {
+    match view {
+        DetailView::Fields(detail) => Some(kind_color(detail.kind, dark)),
+        DetailView::Empty | DetailView::Loading | DetailView::Failed(_) => None,
+    }
+}
+
+/// The tint's two gradient stops: the kind color at [`TINT_ALPHA`] at the
+/// panel's top edge, fading to fully transparent at [`TINT_FADE`] of the way
+/// down. Positions are fractions of the panel's height, not percentages out
+/// of 100 — `LinearColorStop::percentage` is documented as 0.0 to 1.0, and a
+/// value past 1 pushes the second stop off the end of the gradient, which
+/// collapses the ramp into one flat color.
+fn tint_stops(color: Hsla) -> [LinearColorStop; 2] {
+    [
+        linear_color_stop(color.opacity(TINT_ALPHA), 0.),
+        linear_color_stop(color.opacity(0.), TINT_FADE),
+    ]
+}
+
+/// The kind-colored wash over the panel's top edge, fading top to bottom.
+/// It ends fully transparent, so the panel's own opaque background still
+/// keeps the covered grid columns from showing through.
+fn kind_tint(color: Hsla) -> Div {
+    let [from, to] = tint_stops(color);
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        // Angle 180 runs stop 0 to stop 1 top to bottom, so the color sits
+        // at the panel's top edge.
+        .bg(linear_gradient(180., from, to))
+}
+
 /// The right-side panel for the current [`DetailView`]. It overlaps the grid
 /// rather than sharing a row with it: anchored to the window's right edge,
 /// opaque so the covered columns do not show through, and scrollable when
 /// the field list outgrows the window.
-pub fn render_panel(view: DetailView<'_>, cx: &App) -> Stateful<Div> {
+pub fn render_panel(view: DetailView<'_>, cx: &App) -> Div {
     let muted = cx.theme().muted_foreground;
     let danger = cx.theme().danger;
     let border = cx.theme().border;
+    let tint = tint_color(&view, cx.theme().is_dark());
 
     let content: AnyElement = match view {
         DetailView::Empty => div()
@@ -135,7 +191,6 @@ pub fn render_panel(view: DetailView<'_>, cx: &App) -> Stateful<Div> {
     };
 
     div()
-        .id("detail-panel")
         .absolute()
         .top_0()
         .right_0()
@@ -144,25 +199,36 @@ pub fn render_panel(view: DetailView<'_>, cx: &App) -> Stateful<Div> {
         .bg(cx.theme().background)
         .border_l_1()
         .border_color(border)
-        .p_3()
         .text_size(FIELD_TEXT_SIZE)
-        .overflow_y_scroll()
-        .child(content)
+        // The tint is a sibling of the scroller, not a child, so it stays
+        // pinned to the panel's top edge as the fields scroll under it.
+        .when_some(tint, |el, tint| el.child(kind_tint(tint)))
+        .child(
+            div()
+                .id("detail-panel")
+                .size_full()
+                .p_3()
+                .overflow_y_scroll()
+                .child(content),
+        )
 }
 
 #[cfg(test)]
 mod tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
-    use super::{field_rows, role_label};
+    use super::{
+        DetailView, TINT_ALPHA, TINT_FADE, field_rows, role_label, tint_color, tint_stops,
+    };
+    use crate::kind::kind_color;
     use oeuvre_core::{
         BibliographicDate, CreatorRole, DetailCreators, NonEmptyStr, ResourceDetail, ResourceId,
         ResourceKind, UtcMillis,
     };
 
-    #[test]
-    fn field_rows_keep_field_order_and_skip_absent_fields() {
-        let detail = ResourceDetail {
+    /// A journal article carrying every optional field the panel can show.
+    fn journal_article() -> ResourceDetail {
+        ResourceDetail {
             id: ResourceId::generate(),
             kind: ResourceKind::JournalArticle,
             title: NonEmptyStr::try_new("Quantum bibliometrics").unwrap(),
@@ -182,7 +248,12 @@ mod tests {
             container_title: Some(NonEmptyStr::try_new("Journal of Citation Studies").unwrap()),
             series_title: None,
             series_number: None,
-        };
+        }
+    }
+
+    #[test]
+    fn field_rows_keep_field_order_and_skip_absent_fields() {
+        let detail = journal_article();
 
         let rows = field_rows(&detail);
         let labels: Vec<&str> = rows.iter().map(|(label, _)| label.as_str()).collect();
@@ -200,5 +271,55 @@ mod tests {
         assert_eq!(role_label(CreatorRole::Author), "Author");
         assert_eq!(role_label(CreatorRole::Contributor), "Contributor");
         assert_eq!(role_label(CreatorRole::Translator), "Translator");
+    }
+
+    #[test]
+    fn tint_follows_the_loaded_kind_and_vanishes_without_one() {
+        let mut detail = journal_article();
+        for kind in [ResourceKind::JournalArticle, ResourceKind::Dataset] {
+            detail.kind = kind;
+            for dark in [false, true] {
+                assert_eq!(
+                    tint_color(&DetailView::Fields(&detail), dark),
+                    Some(kind_color(kind, dark)),
+                    "{kind:?} (dark: {dark})"
+                );
+            }
+        }
+        // No loaded resource means no kind to tint with, so the panel stays
+        // plain rather than guessing.
+        assert_eq!(tint_color(&DetailView::Empty, false), None);
+        assert_eq!(tint_color(&DetailView::Loading, false), None);
+        assert_eq!(tint_color(&DetailView::Failed("boom"), false), None);
+    }
+
+    #[test]
+    fn tint_stops_fade_within_the_panel() {
+        let color = kind_color(ResourceKind::Book, false);
+        let [from, to] = tint_stops(color);
+
+        assert_eq!(from.percentage, 0., "the tint starts at the top edge");
+        assert_eq!(to.percentage, TINT_FADE);
+
+        // `LinearColorStop::percentage` is a fraction of the gradient's
+        // length, not a percentage out of 100. A stop past 1 runs off the
+        // end and the shader clamps the whole panel to the first stop's
+        // color, which is how this shipped as a solid wash once.
+        for stop in [from, to] {
+            assert!(
+                (0. ..=1.).contains(&stop.percentage),
+                "stop {} is outside the gradient",
+                stop.percentage
+            );
+        }
+
+        // Strong at the top, gone at the fade line, and the same hue
+        // throughout rather than a blend toward another color.
+        assert_eq!(from.color.a, TINT_ALPHA);
+        assert_eq!(to.color.a, 0.);
+        assert_eq!(
+            (from.color.h, from.color.s, from.color.l),
+            (color.h, color.s, color.l)
+        );
     }
 }
