@@ -297,11 +297,20 @@ pub struct ResourcePage {
 ///   order keys on its family name ([`primary_creator_sort_key`]).
 /// - [`ResourceSort::Published`] — the chronological instant, never the
 ///   display label ("Summer 397" has no order).
+/// - [`ResourceSort::Publisher`] — case-insensitive text order over the
+///   publisher name.
+/// - [`ResourceSort::DateAdded`] — the instant the record joined the
+///   library, a record-keeping stamp present on every stored record.
+/// - [`ResourceSort::DateEdited`] — the instant of the record's last
+///   change, likewise always present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceSort {
     Title,
     PrimaryCreator,
     Published,
+    Publisher,
+    DateAdded,
+    DateEdited,
 }
 
 /// Direction of a [`ResourceSort`]. Descending is the exact key-reversal of
@@ -319,6 +328,9 @@ impl ResourceSort {
             Self::Title => "title",
             Self::PrimaryCreator => "primaryCreator",
             Self::Published => "published",
+            Self::Publisher => "publisher",
+            Self::DateAdded => "dateAdded",
+            Self::DateEdited => "dateEdited",
         }
     }
 }

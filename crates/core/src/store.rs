@@ -94,6 +94,9 @@ pub trait Store: Send + Sync + 'static {
     /// - title rows order case-insensitively;
     /// - primary-creator rows order by the first creator's family name;
     /// - published rows order by the chronological instant;
+    /// - publisher rows order case-insensitively over the name;
+    /// - dateAdded / dateEdited rows order by their chronological
+    ///   instants, which every stored record carries;
     /// - rows without the sort field land at the no-data end (last
     ///   ascending, first descending);
     /// - ties keep newest-first (id descending) in both directions.

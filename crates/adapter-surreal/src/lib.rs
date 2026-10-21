@@ -41,6 +41,11 @@ struct PersonIdRow {
     id: RecordId,
 }
 
+#[derive(Debug, SurrealValue)]
+struct ResourceIdRow {
+    id: RecordId,
+}
+
 #[derive(Debug, Clone, SurrealValue)]
 struct SeriesDoc {
     #[surreal(wrap)]
@@ -190,6 +195,30 @@ impl SurrealStore {
             )
             .await;
 
+        // Each of the remaining order fields gets the same treatment: the
+        // sorted listings below order by them, so the index keeps each
+        // order a walk over an index instead of a full resource scan.
+        let _ = self
+            .db
+            .query(
+                "DEFINE INDEX IF NOT EXISTS resource_publisher ON TABLE resource FIELDS publisher",
+            )
+            .await;
+        let _ = self
+            .db
+            .query(
+                "DEFINE INDEX IF NOT EXISTS resource_date_added \
+                 ON TABLE resource FIELDS date_added",
+            )
+            .await;
+        let _ = self
+            .db
+            .query(
+                "DEFINE INDEX IF NOT EXISTS resource_date_edited \
+                 ON TABLE resource FIELDS date_edited",
+            )
+            .await;
+
         let _ = self
             .db
             .query("DEFINE TABLE IF NOT EXISTS series SCHEMALESS")
@@ -205,6 +234,39 @@ impl SurrealStore {
             )
             .await;
 
+        let _ = self.backfill_record_dates().await;
+
+        Ok(())
+    }
+
+    /// Persist record-keeping stamps for rows written before those fields
+    /// existed. The id's ULID encodes when the row was created, so the
+    /// backfill the read path derives ([`Self::recorded_dates`]) becomes a
+    /// one-time write here: afterwards every read and every date sort sees
+    /// plain stored values, and stored data matches what cells display.
+    ///
+    /// Best-effort like the DDL above — a failed pass only leaves reads
+    /// deriving the same values row by row. A row with no stamps never
+    /// changed since it was written, so its edited date is its added date.
+    async fn backfill_record_dates(&self) -> Result<(), StoreError> {
+        let mut response = self
+            .db
+            .query("SELECT id FROM resource WHERE date_added IS NONE")
+            .await
+            .map_err(map_err)?;
+        let rows: Vec<ResourceIdRow> = response.take(0).map_err(map_err)?;
+        for row in rows {
+            let id = Self::thing_to_resource_id(&row.id)?;
+            let added = id.timestamp_ms();
+            let _ = self
+                .db
+                .query(
+                    "UPDATE resource SET date_added = $added, date_edited = $added WHERE id = $id",
+                )
+                .bind(("id", row.id))
+                .bind(("added", added))
+                .await;
+        }
         Ok(())
     }
 
@@ -880,6 +942,43 @@ impl Store for SurrealStore {
                      LIMIT $limit START $offset"
                 )
             }
+            // Publisher is optional data, so its rows take the published
+            // sort's no-data marker: names order case-insensitively and a
+            // row without one lands at the direction's end.
+            Some((ResourceSort::Publisher, direction)) => {
+                let dir = dir_literal(direction);
+                format!(
+                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                            (IF publisher THEN false ELSE true END) AS sort_missing \
+                     FROM {from_sql}{where_sql} \
+                     ORDER BY sort_missing {dir}, publisher COLLATE {dir}, id DESC \
+                     LIMIT $limit START $offset"
+                )
+            }
+            // Record-keeping dates are stamped on every create and edit and
+            // backfilled at open, so both sorts are plain instant orders;
+            // the missing flag only guards a row a failed backfill left
+            // behind.
+            Some((ResourceSort::DateAdded, direction)) => {
+                let dir = dir_literal(direction);
+                format!(
+                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                            (IF date_added THEN false ELSE true END) AS sort_missing \
+                     FROM {from_sql}{where_sql} \
+                     ORDER BY sort_missing {dir}, date_added {dir}, id DESC \
+                     LIMIT $limit START $offset"
+                )
+            }
+            Some((ResourceSort::DateEdited, direction)) => {
+                let dir = dir_literal(direction);
+                format!(
+                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                            (IF date_edited THEN false ELSE true END) AS sort_missing \
+                     FROM {from_sql}{where_sql} \
+                     ORDER BY sort_missing {dir}, date_edited {dir}, id DESC \
+                     LIMIT $limit START $offset"
+                )
+            }
             // The primary-creator key needs the first created edge per row:
             // a correlated subquery aliases it, the middle level computes
             // the family-name key over that alias, and the outer level adds
@@ -1497,6 +1596,170 @@ mod tests {
             ["Old chronicle", "Middle era", "Modern notes", "Speculum"]
         );
         assert_eq!(page.next_offset, None);
+    }
+
+    /// A resource with an explicit publisher, the one lever the
+    /// publisher-sorted order test needs that `sortable_resource` lacks.
+    async fn published_resource(
+        store: &SurrealStore,
+        author: PersonId,
+        title: &str,
+        publisher: Option<&str>,
+    ) -> Resource {
+        store
+            .create_resource(NewResource {
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new(title).unwrap(),
+                creators: vec![CreatorSpec {
+                    person_id: author,
+                    role: CreatorRole::Author,
+                    credited_as: None,
+                }],
+                publisher: publisher.map(str::to_owned),
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sorted_publisher_orders_names_with_publisherless_at_the_end() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // Mixed case pins case-insensitive order: "mit press" precedes
+        // "Zed Books". The row with no publisher lands at the direction's
+        // end, like an undated row under the published sort.
+        published_resource(&store, grace.id, "Zed book", Some("Zed Books")).await;
+        published_resource(&store, grace.id, "MIT book", Some("MIT Press")).await;
+        published_resource(&store, grace.id, "Speculum", None).await;
+
+        let ascending = store
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::Publisher, SortDirection::Ascending),
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sorted_titles(&ascending),
+            ["MIT book", "Zed book", "Speculum"]
+        );
+
+        // Descending is the exact reversal: the no-data row moves first.
+        let descending = store
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::Publisher, SortDirection::Descending),
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sorted_titles(&descending),
+            ["Speculum", "Zed book", "MIT book"]
+        );
+    }
+
+    #[tokio::test]
+    async fn sorted_date_added_orders_by_creation_instant() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // date_added is the create clock, so a 3 ms gap keeps the stamps
+        // distinct the way explicit instants do for the published sort.
+        sortable_resource(&store, vec![(grace.id, None)], "Oldest", None).await;
+        std::thread::sleep(Duration::from_millis(3));
+        sortable_resource(&store, vec![(grace.id, None)], "Middle", None).await;
+        std::thread::sleep(Duration::from_millis(3));
+        sortable_resource(&store, vec![(grace.id, None)], "Newest", None).await;
+
+        let ascending = store
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::DateAdded, SortDirection::Ascending),
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&ascending), ["Oldest", "Middle", "Newest"]);
+
+        let descending = store
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::DateAdded, SortDirection::Descending),
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&descending), ["Newest", "Middle", "Oldest"]);
+    }
+
+    #[tokio::test]
+    async fn sorted_date_edited_orders_by_last_change() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let first =
+            sortable_resource(&store, vec![(grace.id, None)], "First", None).await;
+        std::thread::sleep(Duration::from_millis(3));
+        sortable_resource(&store, vec![(grace.id, None)], "Second", None).await;
+
+        // An edit restamps date_edited, so the older record becomes the
+        // most recently changed one.
+        std::thread::sleep(Duration::from_millis(3));
+        let mut edit = first.to_new();
+        edit.title = NonEmptyStr::try_new("First, retitled").unwrap();
+        store.update_resource(first.id, edit).await.unwrap();
+
+        let ascending = store
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::DateEdited, SortDirection::Ascending),
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sorted_titles(&ascending),
+            ["Second", "First, retitled"]
+        );
+
+        let descending = store
+            .list_resources_query_page(
+                &sorted_query(ResourceSort::DateEdited, SortDirection::Descending),
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            sorted_titles(&descending),
+            ["First, retitled", "Second"]
+        );
     }
 
     #[tokio::test]
@@ -2573,6 +2836,85 @@ mod tests {
         assert_eq!(loaded.title.as_str(), "Retitled");
         assert_eq!(loaded.creators.len(), 1);
         assert_eq!(loaded.creators[0].person_id, author.id);
+    }
+
+    /// Raw stored record-keeping stamps, to prove the open-time backfill
+    /// persisted them rather than a read deriving them on the fly.
+    #[derive(Debug, SurrealValue)]
+    struct RecordDatesRow {
+        date_added: Option<i64>,
+        date_edited: Option<i64>,
+    }
+
+    #[tokio::test]
+    async fn open_persists_the_legacy_date_backfill() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_id;
+        {
+            let store = SurrealStore::open(dir.path()).await.unwrap();
+            let author = store
+                .create_person(
+                    Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap(),
+                    vec![],
+                )
+                .await
+                .unwrap();
+            // A row from before record-keeping dates existed, written raw
+            // so nothing stamps the new fields.
+            legacy_id = ResourceId::generate();
+            store
+                .db
+                .query("CREATE type::record('resource', $id) SET kind = $kind, title = $title")
+                .bind(("id", legacy_id.to_string()))
+                .bind(("kind", SerdeWrapper(ResourceKind::Book)))
+                .bind((
+                    "title",
+                    SerdeWrapper(NonEmptyStr::try_new("Legacy Book").unwrap()),
+                ))
+                .await
+                .unwrap();
+            store
+                .relate_creators(
+                    legacy_id,
+                    &[Creator {
+                        person_id: author.id,
+                        role: CreatorRole::Author,
+                        order: 0,
+                        credited_as: None,
+                    }],
+                )
+                .await
+                .unwrap();
+        }
+
+        // Reopen, retrying the engine's lock-release race: the backfill
+        // runs at open.
+        let reopened = loop {
+            match SurrealStore::open(dir.path()).await {
+                Ok(store) => break store,
+                Err(err) if err.message.contains("already locked") => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(err) => panic!("reopen failed without a lock race: {err}"),
+            }
+        };
+
+        // The stored row now carries the id-derived stamps, so reads and
+        // date sorts see plain values.
+        let mut response = reopened
+            .db
+            .query("SELECT date_added, date_edited FROM resource WHERE id = $id")
+            .bind(("id", SurrealStore::resource_key(legacy_id)))
+            .await
+            .unwrap();
+        let rows: Vec<RecordDatesRow> = response.take(0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].date_added, Some(legacy_id.timestamp_ms()));
+        assert_eq!(rows[0].date_edited, Some(legacy_id.timestamp_ms()));
+
+        let loaded = reopened.get_resource(legacy_id).await.unwrap();
+        assert_eq!(loaded.date_added.as_unix_ms(), legacy_id.timestamp_ms());
+        assert_eq!(loaded.date_edited, loaded.date_added);
     }
 
     #[tokio::test]

@@ -251,6 +251,33 @@ impl MemoryStore {
                     ));
                 }
             }
+            // Publisher names order case-insensitively like titles; a row
+            // without one lands at the direction's no-data end.
+            ResourceSort::Publisher => {
+                for (id, row) in resources.iter() {
+                    keyed.push((
+                        *id,
+                        SortKey::Text(
+                            row.publisher
+                                .as_ref()
+                                .map(|p| p.as_str().to_lowercase()),
+                        ),
+                    ));
+                }
+            }
+            // Record-keeping stamps are always present on a stored record —
+            // create stamps both, edit restamps date_edited — so both date
+            // sorts are plain instant orders.
+            ResourceSort::DateAdded => {
+                for (id, row) in resources.iter() {
+                    keyed.push((*id, SortKey::Instant(Some(row.date_added.as_unix_ms()))));
+                }
+            }
+            ResourceSort::DateEdited => {
+                for (id, row) in resources.iter() {
+                    keyed.push((*id, SortKey::Instant(Some(row.date_edited.as_unix_ms()))));
+                }
+            }
         }
         keyed.sort_by(|(a_id, a_key), (b_id, b_key)| {
             a_key

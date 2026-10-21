@@ -365,6 +365,94 @@ async fn published_ascending_orders_by_instant_not_label() {
 }
 
 #[tokio::test]
+async fn publisher_ascending_orders_names_with_publisherless_last() {
+    let store = MemoryStore::new();
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+
+    // Mixed case pins case-insensitive order, and the row without a
+    // publisher lands at the direction's end.
+    for (title, publisher) in [
+        ("Zed book", Some("Zed Books")),
+        ("MIT book", Some("MIT Press")),
+        ("Self book", None),
+    ] {
+        let mut new = book(Some(grace), title);
+        new.publisher = publisher.map(str::to_owned);
+        store.create_resource(new).await.expect("create resource");
+    }
+
+    let ascending = store
+        .list_resources_query_page(
+            &sorted(ResourceSort::Publisher, SortDirection::Ascending),
+            0,
+            10,
+        )
+        .await
+        .expect("publisher page");
+    assert_eq!(titles(&ascending), ["MIT book", "Zed book", "Self book"]);
+
+    // Descending is the exact reversal: the no-data row moves first.
+    let descending = store
+        .list_resources_query_page(
+            &sorted(ResourceSort::Publisher, SortDirection::Descending),
+            0,
+            10,
+        )
+        .await
+        .expect("publisher page");
+    assert_eq!(titles(&descending), ["Self book", "Zed book", "MIT book"]);
+}
+
+#[tokio::test]
+async fn date_sorts_order_by_the_record_keeping_stamps() {
+    let store = MemoryStore::new();
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+
+    // The stamps come from the create clock, so a 3 ms gap keeps them
+    // distinct.
+    let first = store
+        .create_resource(book(Some(grace), "First"))
+        .await
+        .expect("create first");
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let second = store
+        .create_resource(book(Some(grace), "Second"))
+        .await
+        .expect("create second");
+
+    // date_added never moves: ascending added order stays creation order.
+    let added = store
+        .list_resources_query_page(
+            &sorted(ResourceSort::DateAdded, SortDirection::Ascending),
+            0,
+            10,
+        )
+        .await
+        .expect("dateAdded page");
+    assert_eq!(titles(&added), ["First", "Second"]);
+
+    // An edit restamps date_edited, so the older record becomes the most
+    // recently changed one and moves to the end of the ascending order.
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let mut edit = first.to_new();
+    edit.title = NonEmptyStr::try_new("First, retitled").expect("title non-empty");
+    store
+        .update_resource(first.id, edit)
+        .await
+        .expect("edit first");
+
+    let edited = store
+        .list_resources_query_page(
+            &sorted(ResourceSort::DateEdited, SortDirection::Ascending),
+            0,
+            10,
+        )
+        .await
+        .expect("dateEdited page");
+    assert_eq!(titles(&edited), ["Second", "First, retitled"]);
+}
+
+#[tokio::test]
 async fn descending_reverses_keys_and_moves_no_data_rows_to_the_front() {
     let store = MemoryStore::new();
     let hopper = person(&store, Some("Grace"), Some("Hopper")).await;
