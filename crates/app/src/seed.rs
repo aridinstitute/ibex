@@ -10,9 +10,10 @@ use oeuvre_core::{
     ResourceKind, Store, StoreError, UtcMillis,
 };
 
-/// Demo library size: enough rows to force several scroll pages at 50 rows
-/// per page.
-pub const DEFAULT_DEMO_LIBRARY_SIZE: usize = 200;
+/// Demo library size: large enough that scrolling, filtering, and sorting
+/// behave like they do against a real library, while still seeding in well
+/// under a second so `--memory` starts promptly.
+pub const DEFAULT_DEMO_LIBRARY_SIZE: usize = 5_000;
 
 const DEMO_PEOPLE: [(&str, &str); 8] = [
     ("Ada", "Lovelace"),
@@ -24,11 +25,6 @@ const DEMO_PEOPLE: [(&str, &str); 8] = [
     ("Kathleen", "Booth"),
     ("Edsger", "Dijkstra"),
 ];
-
-/// One instant for every published date; year labels come from the fuzzy
-/// display string, so a single anchor keeps dates deterministic without
-/// calendar math.
-const UNIX_MS_2021_01_01_UTC: i64 = 1_609_459_200_000;
 
 /// Populate a fresh store with a demo library: a few people, the containers
 /// parented kinds need, and `count` resources cycling kinds and creators.
@@ -207,10 +203,13 @@ fn authors_for(n: usize, people: &[PersonId]) -> Vec<CreatorSpec> {
 
 fn published(year: u16) -> Option<BibliographicDate> {
     Some(BibliographicDate::try_new(
-        UtcMillis::from_unix_ms(UNIX_MS_2021_01_01_UTC),
+        // Real year instants, not one shared anchor: published-range
+        // filters bracket whole years, so the seed must actually spread
+        // across the years its labels claim.
+        UtcMillis::jan_1_utc(i64::from(year)).expect("seed years are civil"),
         Some(non_empty(&year.to_string())),
     )
-    .expect("anchor instant is valid"))
+    .expect("year instants are valid"))
 }
 
 fn non_empty(s: &str) -> NonEmptyStr {

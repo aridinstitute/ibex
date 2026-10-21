@@ -1,11 +1,13 @@
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use oeuvre_core::{
-    creator_label_name, format_creators_label, published_label_from, BibliographicDate, Creator,
-    CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource,
-    ResourceId, ResourceKind, ResourcePage, ResourceSummary, Series, SeriesId, Store, StoreError,
-    StoreHealth,
+    creator_label_name, format_creators_label, primary_creator_sort_key, published_label_from,
+    BibliographicDate, Creator, CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr,
+    Person, PersonId, Resource, ResourceFilter, ResourceId, ResourceKind, ResourcePage,
+    ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage,
+    Store, StoreError, StoreHealth,
 };
 
 use crate::event::{EventSink, FinishedEvent};
@@ -90,6 +92,39 @@ struct CreatedEdge {
     credited_as: Option<NonEmptyStr>,
 }
 
+/// Key one resource sorts by, `None` inside marking the field absent.
+enum SortKey {
+    Text(Option<String>),
+    Instant(Option<i64>),
+}
+
+impl SortKey {
+    /// Key order only: rows without the field land at the no-data end (last
+    /// ascending, first descending). Ties are the caller's to break.
+    fn cmp(&self, other: &Self, direction: SortDirection) -> Ordering {
+        let ord = match (self, other) {
+            (SortKey::Text(a), SortKey::Text(b)) => cmp_field(a.as_deref(), b.as_deref()),
+            (SortKey::Instant(a), SortKey::Instant(b)) => cmp_field(*a, *b),
+            // One listing keys every row with the same variant.
+            _ => unreachable!("sort keys share one variant per listing"),
+        };
+        match direction {
+            SortDirection::Ascending => ord,
+            SortDirection::Descending => ord.reverse(),
+        }
+    }
+}
+
+/// Field order with absent values last: `None` is missing data, not smallest.
+fn cmp_field<T: Ord>(a: Option<T>, b: Option<T>) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+    }
+}
+
 pub struct MemoryStore {
     people: Mutex<PeopleState>,
     series: Mutex<HashMap<SeriesId, Series>>,
@@ -119,10 +154,8 @@ impl MemoryStore {
             let row = resources
                 .get(id)
                 .expect("ids come from the resources map keys");
-            let mut edges: Vec<&CreatedEdge> = created
-                .iter()
-                .filter(|e| e.resource_id == *id)
-                .collect();
+            let mut edges: Vec<&CreatedEdge> =
+                created.iter().filter(|e| e.resource_id == *id).collect();
             edges.sort_by_key(|e| e.order);
 
             let names: Vec<String> = edges
@@ -139,9 +172,7 @@ impl MemoryStore {
                 .collect::<Result<Vec<_>, StoreError>>()?;
 
             let container_title = match row.parent_id {
-                Some(parent_id) => resources
-                    .get(&parent_id)
-                    .map(|parent| parent.title.clone()),
+                Some(parent_id) => resources.get(&parent_id).map(|parent| parent.title.clone()),
                 None => None,
             };
 
@@ -156,6 +187,143 @@ impl MemoryStore {
             });
         }
         Ok(summaries)
+    }
+
+    /// Ids of every resource in `sort` order, per the port contract: key
+    /// order with no-data rows at the direction's end, ties newest-first.
+    fn sorted_ids(
+        &self,
+        sort: ResourceSort,
+        direction: SortDirection,
+    ) -> Result<Vec<ResourceId>, StoreError> {
+        let resources = self.resources.lock().expect("MemoryStore lock");
+        let mut keyed: Vec<(ResourceId, SortKey)> = Vec::with_capacity(resources.len());
+        match sort {
+            ResourceSort::Title => {
+                for (id, row) in resources.iter() {
+                    keyed.push((*id, SortKey::Text(Some(row.title.as_str().to_lowercase()))));
+                }
+            }
+            // The primary creator is the first edge in bibliography order;
+            // the key mirrors what the SurrealQL query computes, so both
+            // adapters order a library identically.
+            ResourceSort::PrimaryCreator => {
+                let created = self.created.lock().expect("MemoryStore lock");
+                let people = self.people.lock().expect("MemoryStore lock");
+                for id in resources.keys() {
+                    let key = match created
+                        .iter()
+                        .filter(|edge| edge.resource_id == *id)
+                        .min_by_key(|edge| edge.order)
+                    {
+                        Some(edge) => {
+                            let person = people.by_id.get(&edge.person_id).ok_or_else(|| {
+                                StoreError::new(format!(
+                                    "created edge references missing person {}",
+                                    edge.person_id
+                                ))
+                            })?;
+                            SortKey::Text(Some(primary_creator_sort_key(
+                                edge.credited_as.as_ref(),
+                                &person.name,
+                            )))
+                        }
+                        None => SortKey::Text(None),
+                    };
+                    keyed.push((*id, key));
+                }
+            }
+            // Chronological instants, never the display labels: "Summer 397"
+            // has no string order.
+            ResourceSort::Published => {
+                for (id, row) in resources.iter() {
+                    keyed.push((
+                        *id,
+                        SortKey::Instant(
+                            row.published
+                                .as_ref()
+                                .map(|date| date.instant().as_unix_ms()),
+                        ),
+                    ));
+                }
+            }
+        }
+        keyed.sort_by(|(a_id, a_key), (b_id, b_key)| {
+            a_key
+                .cmp(b_key, direction)
+                .then_with(|| b_id.as_ulid().cmp(&a_id.as_ulid()))
+        });
+        Ok(keyed.into_iter().map(|(id, _)| id).collect())
+    }
+
+    /// Keep ids whose rows satisfy every set filter predicate.
+    fn filter_ids(
+        &self,
+        ids: Vec<ResourceId>,
+        filter: &ResourceFilter,
+    ) -> Result<Vec<ResourceId>, StoreError> {
+        if !filter.is_active() {
+            return Ok(ids);
+        }
+        // The needle lowercases once, not per row; an unset predicate is a
+        // no-op so the window math stays untouched.
+        let needle = filter
+            .title
+            .as_ref()
+            .map(|title| title.as_str().to_lowercase());
+        // Creator membership resolves under its own lock, released before
+        // the resource rows lock, so no path holds both at once.
+        let by_creator: Option<HashSet<ResourceId>> = filter
+            .creator
+            .map(|creator| {
+                self.created
+                    .lock()
+                    .expect("MemoryStore lock")
+                    .iter()
+                    .filter(|edge| edge.person_id == creator)
+                    .map(|edge| edge.resource_id)
+                    .collect()
+            });
+        let published = filter
+            .published
+            .filter(|range| range.is_active())
+            .map(|range| {
+                (
+                    range.from.map(|from| from.as_unix_ms()),
+                    range.to.map(|to| to.as_unix_ms()),
+                )
+            });
+        let resources = self.resources.lock().expect("MemoryStore lock");
+        Ok(ids
+            .into_iter()
+            .filter(|id| {
+                let resource = resources
+                    .get(id)
+                    .expect("ids come from the resources map keys");
+                if let Some(needle) = needle.as_deref() {
+                    if !resource.title.as_str().to_lowercase().contains(needle) {
+                        return false;
+                    }
+                }
+                // Undated rows only match a window that bounds nothing.
+                if let Some((from, to)) = published {
+                    let Some(date) = resource.published.as_ref() else {
+                        return false;
+                    };
+                    let instant = date.instant().as_unix_ms();
+                    if from.is_some_and(|from| instant < from) {
+                        return false;
+                    }
+                    if to.is_some_and(|to| instant >= to) {
+                        return false;
+                    }
+                }
+                by_creator
+                    .as_ref()
+                    .map(|set| set.contains(id))
+                    .unwrap_or(true)
+            })
+            .collect())
     }
 }
 
@@ -174,11 +342,7 @@ impl Store for MemoryStore {
         })
     }
 
-    async fn create_person(
-        &self,
-        name: Name,
-        aliases: Vec<Name>,
-    ) -> Result<Person, StoreError> {
+    async fn create_person(&self, name: Name, aliases: Vec<Name>) -> Result<Person, StoreError> {
         let person = Person::try_new(PersonId::generate(), name, aliases)?;
         let mut state = self.people.lock().expect("MemoryStore lock");
         state.by_id.insert(person.id, person.clone());
@@ -368,6 +532,39 @@ impl Store for MemoryStore {
         let rows = self.summaries_in_order(&ids)?;
         Ok(ResourcePage { rows, next_before })
     }
+
+    async fn list_resources_query_page(
+        &self,
+        query: &ResourceQuery,
+        offset: u64,
+        limit: u32,
+    ) -> Result<SortedResourcePage, StoreError> {
+        // The order is the contract, so it is built once and windowed.
+        let ids = match query.sort {
+            // The default listing order: newest first by id.
+            None => {
+                let mut ids: Vec<ResourceId> = self
+                    .resources
+                    .lock()
+                    .expect("MemoryStore lock")
+                    .keys()
+                    .copied()
+                    .collect();
+                ids.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+                ids
+            }
+            Some((field, direction)) => self.sorted_ids(field, direction)?,
+        };
+        // Filters AND before the window: every set predicate must hold.
+        let ids = self.filter_ids(ids, &query.filter)?;
+        let start = (offset as usize).min(ids.len());
+        let end = start.saturating_add(limit as usize).min(ids.len());
+        let rows = self.summaries_in_order(&ids[start..end])?;
+        // A full window with rows behind it leaves a cursor; a short window
+        // is the end, so callers never land on an empty trailing page.
+        let next_offset = (end < ids.len()).then(|| offset.saturating_add(u64::from(limit)));
+        Ok(SortedResourcePage { rows, next_offset })
+    }
 }
 
 pub struct StubStore {
@@ -404,11 +601,7 @@ impl Store for StubStore {
         }
     }
 
-    async fn create_person(
-        &self,
-        _name: Name,
-        _aliases: Vec<Name>,
-    ) -> Result<Person, StoreError> {
+    async fn create_person(&self, _name: Name, _aliases: Vec<Name>) -> Result<Person, StoreError> {
         Err(unsupported("create_person"))
     }
 

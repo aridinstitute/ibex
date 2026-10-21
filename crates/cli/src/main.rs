@@ -109,7 +109,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Commands::Resource(ResourceCmd {
-                action: ResourceAction::List
+                action: ResourceAction::List(_)
             })
         ));
     }

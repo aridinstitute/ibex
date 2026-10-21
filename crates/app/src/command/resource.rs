@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use oeuvre_core::{
     creator_label_name, detail_creator_groups, NewResource, PersonId, Resource, ResourceDetail,
-    ResourceError, ResourceId, ResourcePage, ResourceSummary, SeriesId, StoreError,
+    ResourceError, ResourceId, ResourcePage, ResourceQuery, ResourceSummary, SeriesId,
+    SortedResourcePage, StoreError,
 };
 
 use crate::event::{self, Event};
@@ -34,11 +35,22 @@ pub struct ListResourcesPage {
     pub limit: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct ListResourcesQueryPage {
+    /// Order for the listing; `None` is the default newest-first order.
+    pub query: ResourceQuery,
+    /// 0-based window into the ordered list; `next_offset` continues.
+    pub offset: u64,
+    /// Page size in rows. Zero is rejected as invalid input.
+    pub limit: u32,
+}
+
 pub(crate) struct Created(pub Resource);
 pub(crate) struct Fetched(pub Resource);
 pub(crate) struct FetchedDetail(pub ResourceDetail);
 pub(crate) struct Listed(pub Vec<ResourceSummary>);
 pub(crate) struct ListedPage(pub ResourcePage);
+pub(crate) struct ListedQueryPage(pub SortedResourcePage);
 
 impl From<Created> for Outcome {
     fn from(Created(resource): Created) -> Self {
@@ -67,6 +79,12 @@ impl From<Listed> for Outcome {
 impl From<ListedPage> for Outcome {
     fn from(ListedPage(page): ListedPage) -> Self {
         Outcome::ListResourcesPage(page)
+    }
+}
+
+impl From<ListedQueryPage> for Outcome {
+    fn from(ListedQueryPage(page): ListedQueryPage) -> Self {
+        Outcome::ListResourcesQueryPage(page)
     }
 }
 
@@ -300,5 +318,51 @@ impl Handler for ListResourcesPage {
             .list_resources_page(self.before, self.limit)
             .await?;
         Ok(ListedPage(page))
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for ListResourcesQueryPage {
+    const NAME: &'static str = "list_resources_query_page";
+    type Output = ListedQueryPage;
+
+    fn annotate(&self, ev: &mut Event) {
+        if let Some((sort, direction)) = self.query.sort {
+            ev.set(event::RESOURCE_SORT_FIELD, sort.as_str());
+            ev.set(event::RESOURCE_SORT_DIRECTION, direction.as_str());
+        }
+        if let Some(title) = self.query.filter.title.as_ref() {
+            ev.set(event::RESOURCE_FILTER_TITLE, title.as_str().to_owned());
+        }
+        if let Some(creator) = self.query.filter.creator {
+            ev.set(event::RESOURCE_FILTER_CREATOR, creator.to_string());
+        }
+        if let Some(range) = self.query.filter.published {
+            if let Some(from) = range.from {
+                ev.set(event::RESOURCE_FILTER_PUBLISHED_FROM, from.as_unix_ms());
+            }
+            if let Some(to) = range.to {
+                ev.set(event::RESOURCE_FILTER_PUBLISHED_TO, to.as_unix_ms());
+            }
+        }
+        ev.set(event::RESOURCE_PAGE_OFFSET, self.offset);
+        ev.set(event::RESOURCE_PAGE_LIMIT, self.limit);
+    }
+
+    async fn run(
+        self,
+        state: &AppState,
+        _ev: &mut Event,
+    ) -> Result<ListedQueryPage, CommandError> {
+        // A zero limit has no meaning at the store layer, so reject it at
+        // the command boundary where invalid input maps to an exit code.
+        if self.limit == 0 {
+            return Err(CommandError::Invalid("page limit must be at least 1".into()));
+        }
+        let page = state
+            .store()
+            .list_resources_query_page(&self.query, self.offset, self.limit)
+            .await?;
+        Ok(ListedQueryPage(page))
     }
 }

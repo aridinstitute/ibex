@@ -1,7 +1,10 @@
 mod db;
 mod detail;
+mod icons;
 mod kind;
 mod library;
+mod settings;
+mod theme;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -11,13 +14,14 @@ use clap::Parser;
 use oeuvre_adapter_surreal::SurrealStore;
 use oeuvre_app::{AppState, Surface};
 
-use gpui_kit::component::Theme;
+use gpui_kit::component::TitleBar;
 use gpui_kit::component::table::TableState;
 use gpui_kit::{AppContext as _, *};
 
 use crate::db::DbWorker;
 use crate::kind::AppAssets;
 use crate::library::{LibraryApp, LibraryDelegate, ToggleDetailPanel, PAGE_SIZE};
+use crate::settings::Settings;
 
 #[derive(Debug, Parser)]
 #[command(name = "ovr-gui", version, about = "Oeuvre library GUI")]
@@ -46,6 +50,11 @@ fn run() -> Result<()> {
     let state = setup_state(&args)?;
     let worker = DbWorker::spawn(state);
 
+    // Settings are app-level, so they live in the default app data
+    // directory even when the library itself opens from --data elsewhere.
+    let settings_dir = default_data_dir();
+    let settings = Settings::load(&settings_dir);
+
     // Fetch the first page before the window opens so the grid renders full
     // immediately; scrolling drives every later page.
     let first = worker
@@ -54,15 +63,16 @@ fn run() -> Result<()> {
 
     gpui_kit::application().with_assets(AppAssets).run(move |cx| {
         gpui_kit::init(cx);
-        // Root sets the window rem size from this, so every rem-based size
-        // in the kit shrinks with it.
-        Theme::global_mut(cx).font_size = px(12.);
+        crate::theme::apply(cx.window_appearance().into(), cx);
         cx.bind_keys([KeyBinding::new(
             "]",
             ToggleDetailPanel,
             Some("LibraryApp"),
         )]);
         if let Err(err) = gpui_kit::open_window(
+            // The window draws its own title bar (the toolbar inside
+            // LibraryApp), so the native one is transparent with only the
+            // traffic lights left in place.
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: Default::default(),
@@ -70,13 +80,17 @@ fn run() -> Result<()> {
                 })),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Oeuvre".into()),
-                    ..Default::default()
+                    ..TitleBar::title_bar_options()
                 }),
+                // Required on macOS: otherwise the system also handles
+                // title bar double clicks and delays title bar clicks to
+                // disambiguate double clicks.
+                app_owns_titlebar_drag: true,
                 ..Default::default()
             },
             cx,
             |window, cx| {
-                let delegate = LibraryDelegate::new(worker, first);
+                let delegate = LibraryDelegate::new(worker, first, settings);
                 let table = cx.new(|cx| {
                     TableState::new(delegate, window, cx)
                         .col_movable(false)
@@ -87,7 +101,7 @@ fn run() -> Result<()> {
                 // before any click.
                 let focus_handle = table.focus_handle(cx);
                 window.focus(&focus_handle, cx);
-                cx.new(|cx| LibraryApp::new(table, window, cx))
+                cx.new(|cx| LibraryApp::new(table, settings_dir, window, cx))
             },
         ) {
             eprintln!("error: failed to open window: {err}");

@@ -147,6 +147,19 @@ impl UtcMillis {
     pub fn as_unix_ms(self) -> i64 {
         self.0
     }
+
+    /// The year's January 1, midnight UTC — the boundary a year-bracketed
+    /// range keys on. `None` when the year falls outside the calendar.
+    pub fn jan_1_utc(year: i64) -> Option<Self> {
+        let date = time::Date::from_calendar_date(
+            i32::try_from(year).ok()?,
+            time::Month::January,
+            1,
+        )
+        .ok()?;
+        let midnight = time::PrimitiveDateTime::new(date, time::Time::MIDNIGHT);
+        Some(Self::from_unix_ms(midnight.assume_utc().unix_timestamp() * 1_000))
+    }
 }
 
 /// Stored instant plus optional fuzzy display ("2020", "Summer 397").
@@ -196,6 +209,149 @@ pub struct ResourceSummary {
 pub struct ResourcePage {
     pub rows: Vec<ResourceSummary>,
     pub next_before: Option<ResourceId>,
+}
+
+/// Field a sorted library listing orders by.
+///
+/// Order keys, shared by every adapter:
+/// - [`ResourceSort::Title`] — case-insensitive text order.
+/// - [`ResourceSort::PrimaryCreator`] — the first creator in bibliography
+///   order keys on its family name ([`primary_creator_sort_key`]).
+/// - [`ResourceSort::Published`] — the chronological instant, never the
+///   display label ("Summer 397" has no order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ResourceSort {
+    Title,
+    PrimaryCreator,
+    Published,
+}
+
+/// Direction of a [`ResourceSort`]. Descending is the exact key-reversal of
+/// ascending: rows without the sort field move to the other end, and ties
+/// stay newest-first in both directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+impl ResourceSort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Title => "title",
+            Self::PrimaryCreator => "primaryCreator",
+            Self::Published => "published",
+        }
+    }
+}
+
+impl SortDirection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ascending => "ascending",
+            Self::Descending => "descending",
+        }
+    }
+}
+
+/// One library listing query: the order rows come back in, plus the
+/// additive predicates every returned row must satisfy.
+///
+/// `sort: None` is the default listing order — newest-first by id, the
+/// same order [`Store::list_resources_page`] walks by cursor — while
+/// `Some((field, direction))` applies that field's order contract (see
+/// [`ResourceSort`]). Because this seam pages by offset, every order
+/// composes with every filter through one window contract.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResourceQuery {
+    /// Field and direction to order by; `None` orders newest-first.
+    pub sort: Option<(ResourceSort, SortDirection)>,
+    /// Predicates every returned row must satisfy;
+    /// [`ResourceFilter::none`] matches every resource.
+    pub filter: ResourceFilter,
+}
+
+impl ResourceQuery {
+    /// The default listing: newest-first, unfiltered.
+    pub fn newest_first() -> Self {
+        Self {
+            sort: None,
+            filter: ResourceFilter::none(),
+        }
+    }
+
+    /// A sorted, unfiltered listing.
+    pub fn sorted(field: ResourceSort, direction: SortDirection) -> Self {
+        Self {
+            sort: Some((field, direction)),
+            filter: ResourceFilter::none(),
+        }
+    }
+}
+
+/// Additive predicates a library listing applies before ordering and
+/// paging: every set field must hold (AND). [`ResourceFilter::none`]
+/// matches every resource.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResourceFilter {
+    /// Case-insensitive substring the title must contain.
+    pub title: Option<NonEmptyStr>,
+    /// A person with a creator edge to the resource, sole or shared.
+    pub creator: Option<PersonId>,
+    /// Window the published instant must fall in.
+    pub published: Option<PublishedRange>,
+}
+
+impl ResourceFilter {
+    /// The filter that matches every resource.
+    pub fn none() -> Self {
+        Self {
+            title: None,
+            creator: None,
+            published: None,
+        }
+    }
+
+    /// True when at least one predicate is set, so the listing narrows.
+    pub fn is_active(&self) -> bool {
+        self.title.is_some()
+            || self.creator.is_some()
+            || self
+                .published
+                .as_ref()
+                .is_some_and(PublishedRange::is_active)
+    }
+}
+
+/// An instant window over published dates. The `from` bound includes its
+/// instant, the `to` bound excludes it, so whole years bracket as
+/// [January 1, next January 1) and never miss the year's final day.
+/// Either bound may be open; undated resources match only while the
+/// window bounds nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PublishedRange {
+    /// Earliest instant that still matches, if bounded below.
+    pub from: Option<UtcMillis>,
+    /// Instant after the last that matches, if bounded above.
+    pub to: Option<UtcMillis>,
+}
+
+impl PublishedRange {
+    /// True when either bound is set, so the window narrows.
+    pub fn is_active(&self) -> bool {
+        self.from.is_some() || self.to.is_some()
+    }
+}
+
+/// One window of a queried library listing from
+/// [`Store::list_resources_query_page`]: `limit` rows at a 0-based offset
+/// into the ordered list. The database query owns the ordering.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SortedResourcePage {
+    pub rows: Vec<ResourceSummary>,
+    /// Offset of the following page when more rows may exist; `None` at the
+    /// end of the ordered list.
+    pub next_offset: Option<u64>,
 }
 
 /// Creators of one role for a [`ResourceDetail`]: every credited name,
@@ -261,6 +417,27 @@ pub fn creator_label_name(credited_as: Option<&NonEmptyStr>, name: &Name) -> Str
     }
 }
 
+/// Sort key for a creator: the family name a library listing orders by.
+///
+/// `credited_as` keys on its last word ("A. Lovelace" → "lovelace");
+/// otherwise the person's `last` name — mononyms live there — else `first`.
+/// Lowercased, so display case never reorders rows.
+pub fn primary_creator_sort_key(credited_as: Option<&NonEmptyStr>, name: &Name) -> String {
+    match credited_as {
+        Some(credited) => credited
+            .as_str()
+            .split_whitespace()
+            .next_back()
+            .unwrap_or(credited.as_str())
+            .to_lowercase(),
+        None => name
+            .last()
+            .or_else(|| name.first())
+            .expect("a Name carries a first or last name")
+            .to_lowercase(),
+    }
+}
+
 /// Format creator display names for a summary row.
 ///
 /// - `[]` → `""`
@@ -275,7 +452,6 @@ pub fn format_creators_label<S: AsRef<str>>(names: &[S]) -> String {
         _ => format!("{} et al.", names[0].as_ref()),
     }
 }
-
 
 /// Prefer fuzzy [`BibliographicDate::display`]; else UTC calendar year of the instant.
 pub fn format_published_label(published: &BibliographicDate) -> NonEmptyStr {
@@ -378,10 +554,7 @@ pub struct Resource {
     pub series_number: Option<NonEmptyStr>,
 }
 
-fn validate_creators(
-    kind: ResourceKind,
-    creators: &[Creator],
-) -> Result<(), ResourceError> {
+fn validate_creators(kind: ResourceKind, creators: &[Creator]) -> Result<(), ResourceError> {
     if creators.is_empty() && !kind.is_container() {
         return Err(ResourceError::EmptyCreators);
     }
@@ -482,6 +655,27 @@ impl Resource {
 mod tests {
     use super::*;
 
+    #[test]
+    fn jan_1_utc_lands_on_new_year_midnights() {
+        // The seed's former single anchor doubles as the oracle.
+        assert_eq!(
+            UtcMillis::jan_1_utc(2021),
+            Some(UtcMillis::from_unix_ms(1_609_459_200_000))
+        );
+        // One calendar year apart: the 2021 span is common, the 2020 span
+        // leap.
+        assert_eq!(
+            UtcMillis::jan_1_utc(2022).map(|t| t.as_unix_ms() - 1_609_459_200_000),
+            Some(31_536_000_000)
+        );
+        assert_eq!(
+            UtcMillis::jan_1_utc(2020).map(|t| 1_609_459_200_000 - t.as_unix_ms()),
+            Some(31_622_400_000)
+        );
+        // Years outside the calendar reject rather than wrap.
+        assert_eq!(UtcMillis::jan_1_utc(3_000_000_000), None);
+    }
+
     fn title(s: &str) -> NonEmptyStr {
         NonEmptyStr::try_new(s).unwrap()
     }
@@ -575,7 +769,10 @@ mod tests {
         assert_eq!(resource.creators[0].person_id, a);
         assert_eq!(resource.creators[1].order, 1);
         assert_eq!(
-            resource.creators[1].credited_as.as_ref().map(NonEmptyStr::as_str),
+            resource.creators[1]
+                .credited_as
+                .as_ref()
+                .map(NonEmptyStr::as_str),
             Some("ed.")
         );
     }
@@ -614,8 +811,7 @@ mod tests {
                 credited_as: None,
             },
         ];
-        let resource =
-            Resource::try_new(ResourceId::generate(), new_book(creators, None)).unwrap();
+        let resource = Resource::try_new(ResourceId::generate(), new_book(creators, None)).unwrap();
         assert_eq!(resource.creators.len(), 2);
     }
 
@@ -760,9 +956,11 @@ mod tests {
 
     #[test]
     fn accept_parent_checks_expected_kind() {
-        assert!(ResourceKind::PodcastEpisode
-            .accept_parent(ResourceKind::Podcast)
-            .is_ok());
+        assert!(
+            ResourceKind::PodcastEpisode
+                .accept_parent(ResourceKind::Podcast)
+                .is_ok()
+        );
         assert_eq!(
             ResourceKind::PodcastEpisode.accept_parent(ResourceKind::Blog),
             Err(ResourceError::ParentKindMismatch)
@@ -807,14 +1005,8 @@ mod tests {
             format_creators_label(&["Augustine", "Chadwick"]),
             "Augustine; Chadwick"
         );
-        assert_eq!(
-            format_creators_label(&["A", "B", "C"]),
-            "A et al."
-        );
-        assert_eq!(
-            format_creators_label(&["A", "B", "C", "D"]),
-            "A et al."
-        );
+        assert_eq!(format_creators_label(&["A", "B", "C"]), "A et al.");
+        assert_eq!(format_creators_label(&["A", "B", "C", "D"]), "A et al.");
     }
 
     #[test]
@@ -847,6 +1039,35 @@ mod tests {
         assert_eq!(
             creator_label_name(Some(&title("St. Augustine")), &name),
             "St. Augustine"
+        );
+    }
+
+    #[test]
+    fn primary_creator_sort_key_keys_on_family_name() {
+        let lovelace = Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap();
+        assert_eq!(primary_creator_sort_key(None, &lovelace), "lovelace");
+        // Mononyms live in `last`, the primary sort slot.
+        let augustine = Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap();
+        assert_eq!(primary_creator_sort_key(None, &augustine), "augustine");
+        // A first-only name keys on the given name.
+        let first_only = Name::try_new(Some("Cher"), None::<&str>, None::<&str>).unwrap();
+        assert_eq!(primary_creator_sort_key(None, &first_only), "cher");
+        // Display case never reorders rows, and a suffix is not a family name.
+        let suffixed = Name::try_new(Some("GRACE"), Some("HOPPER"), Some("Jr.")).unwrap();
+        assert_eq!(primary_creator_sort_key(None, &suffixed), "hopper");
+    }
+
+    #[test]
+    fn primary_creator_sort_key_credited_string_keys_on_its_last_word() {
+        let lovelace = Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap();
+        assert_eq!(
+            primary_creator_sort_key(Some(&title("A. Lovelace")), &lovelace),
+            "lovelace"
+        );
+        // The credited string wins even when it disagrees with the name.
+        assert_eq!(
+            primary_creator_sort_key(Some(&title("Countess of Lovelace")), &lovelace),
+            "lovelace"
         );
     }
 

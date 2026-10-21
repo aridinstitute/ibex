@@ -2,7 +2,8 @@
 
 use crate::{
     Name, NewResource, NewSeries, Person, PersonError, PersonId, Resource, ResourceError,
-    ResourceId, ResourcePage, ResourceSummary, Series, SeriesId,
+    ResourceId, ResourcePage, ResourceQuery, ResourceSummary, Series, SeriesId,
+    SortedResourcePage,
 };
 
 /// Storage backend. Grows one method per capability a command needs.
@@ -12,11 +13,7 @@ pub trait Store: Send + Sync + 'static {
     async fn ping(&self) -> Result<StoreHealth, StoreError>;
 
     /// Insert a new person. Store allocates [`PersonId`], then [`Person::try_new`].
-    async fn create_person(
-        &self,
-        name: Name,
-        aliases: Vec<Name>,
-    ) -> Result<Person, StoreError>;
+    async fn create_person(&self, name: Name, aliases: Vec<Name>) -> Result<Person, StoreError>;
 
     /// Fetch by id. Missing → [`StoreError::not_found`].
     async fn get_person(&self, id: PersonId) -> Result<Person, StoreError>;
@@ -73,6 +70,41 @@ pub trait Store: Send + Sync + 'static {
         before: Option<ResourceId>,
         limit: u32,
     ) -> Result<ResourcePage, StoreError>;
+
+    /// One page of summary rows for `query`: the database query owns the
+    /// ordering, shells only walk offsets.
+    ///
+    /// Order contract, shared by every adapter:
+    /// - `query.sort: None` orders newest-first by id (descending);
+    /// - title rows order case-insensitively;
+    /// - primary-creator rows order by the first creator's family name;
+    /// - published rows order by the chronological instant;
+    /// - rows without the sort field land at the no-data end (last
+    ///   ascending, first descending);
+    /// - ties keep newest-first (id descending) in both directions.
+    ///
+    /// Filter contract, shared by every adapter:
+    /// - `filter.title` holds when the title contains the needle,
+    ///   comparing case-insensitively;
+    /// - set predicates AND together: a row must satisfy every one.
+    ///
+    /// `offset` is a 0-based window into the ordered list; the page returns
+    /// `limit` rows and [`SortedResourcePage::next_offset`] — the offset of
+    /// the following page — only when more rows may exist. An offset past
+    /// the end yields an empty page.
+    ///
+    /// Backends that cannot order in the query inherit an unsupported error.
+    async fn list_resources_query_page(
+        &self,
+        query: &ResourceQuery,
+        offset: u64,
+        limit: u32,
+    ) -> Result<SortedResourcePage, StoreError> {
+        let _ = (query, offset, limit);
+        Err(StoreError::new(
+            "list_resources_query_page not supported by this store",
+        ))
+    }
 }
 
 /// Result of [`Store::ping`].
@@ -139,4 +171,3 @@ impl From<ResourceError> for StoreError {
         StoreError::invalid(err.to_string())
     }
 }
-

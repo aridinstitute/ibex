@@ -29,7 +29,14 @@ pub(crate) const PERSON_DISPLAY: Key = Key::new("person.display");
 pub(crate) const RESOURCE_ID: Key = Key::new("resource.id");
 pub(crate) const RESOURCE_KIND: Key = Key::new("resource.kind");
 pub(crate) const RESOURCE_TITLE: Key = Key::new("resource.title");
+pub(crate) const RESOURCE_FILTER_CREATOR: Key = Key::new("resource.filter_creator");
+pub(crate) const RESOURCE_FILTER_PUBLISHED_FROM: Key = Key::new("resource.filter_published_from");
+pub(crate) const RESOURCE_FILTER_PUBLISHED_TO: Key = Key::new("resource.filter_published_to");
+pub(crate) const RESOURCE_FILTER_TITLE: Key = Key::new("resource.filter_title");
 pub(crate) const RESOURCE_PAGE_LIMIT: Key = Key::new("resource.page_limit");
+pub(crate) const RESOURCE_PAGE_OFFSET: Key = Key::new("resource.page_offset");
+pub(crate) const RESOURCE_SORT_FIELD: Key = Key::new("resource.sort_field");
+pub(crate) const RESOURCE_SORT_DIRECTION: Key = Key::new("resource.sort_direction");
 pub(crate) const SERIES_ID: Key = Key::new("series.id");
 pub(crate) const SERIES_TITLE: Key = Key::new("series.title");
 
@@ -54,7 +61,14 @@ mod tests {
         RESOURCE_ID,
         RESOURCE_KIND,
         RESOURCE_TITLE,
+        RESOURCE_FILTER_CREATOR,
+        RESOURCE_FILTER_PUBLISHED_FROM,
+        RESOURCE_FILTER_PUBLISHED_TO,
+        RESOURCE_FILTER_TITLE,
         RESOURCE_PAGE_LIMIT,
+        RESOURCE_PAGE_OFFSET,
+        RESOURCE_SORT_FIELD,
+        RESOURCE_SORT_DIRECTION,
         SERIES_ID,
         SERIES_TITLE,
     ];
