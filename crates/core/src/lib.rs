@@ -11,9 +11,9 @@ pub use person::{Name, NameError, NameKey, NonEmptyStr, Person, PersonError, Per
 pub use resource::{
     creator_label_name, detail_creator_groups, format_creators_label, format_published_label,
     primary_creator_sort_key, published_label_from, BibliographicDate, Creator, CreatorRole,
-    CreatorSpec, DetailCreators, NewResource, ParentRule, Resource, ResourceDetail, ResourceError,
-    ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort,
-    ResourceSummary, SortDirection, SortedResourcePage, UtcMillis,
+    CreatorSpec, DetailCreators, NewResource, ParentRule, PublishedRange, Resource, ResourceDetail,
+    ResourceError, ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery,
+    ResourceSort, ResourceSummary, SortDirection, SortedResourcePage, UtcMillis,
 };
 pub use series::{NewSeries, Series, SeriesId};
 pub use store::{Store, StoreError, StoreHealth};

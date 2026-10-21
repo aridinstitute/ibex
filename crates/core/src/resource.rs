@@ -147,6 +147,19 @@ impl UtcMillis {
     pub fn as_unix_ms(self) -> i64 {
         self.0
     }
+
+    /// The year's January 1, midnight UTC — the boundary a year-bracketed
+    /// range keys on. `None` when the year falls outside the calendar.
+    pub fn jan_1_utc(year: i64) -> Option<Self> {
+        let date = time::Date::from_calendar_date(
+            i32::try_from(year).ok()?,
+            time::Month::January,
+            1,
+        )
+        .ok()?;
+        let midnight = time::PrimitiveDateTime::new(date, time::Time::MIDNIGHT);
+        Some(Self::from_unix_ms(midnight.assume_utc().unix_timestamp() * 1_000))
+    }
 }
 
 /// Stored instant plus optional fuzzy display ("2020", "Summer 397").
@@ -285,6 +298,8 @@ pub struct ResourceFilter {
     pub title: Option<NonEmptyStr>,
     /// A person with a creator edge to the resource, sole or shared.
     pub creator: Option<PersonId>,
+    /// Window the published instant must fall in.
+    pub published: Option<PublishedRange>,
 }
 
 impl ResourceFilter {
@@ -293,12 +308,38 @@ impl ResourceFilter {
         Self {
             title: None,
             creator: None,
+            published: None,
         }
     }
 
     /// True when at least one predicate is set, so the listing narrows.
     pub fn is_active(&self) -> bool {
-        self.title.is_some() || self.creator.is_some()
+        self.title.is_some()
+            || self.creator.is_some()
+            || self
+                .published
+                .as_ref()
+                .is_some_and(PublishedRange::is_active)
+    }
+}
+
+/// An instant window over published dates. The `from` bound includes its
+/// instant, the `to` bound excludes it, so whole years bracket as
+/// [January 1, next January 1) and never miss the year's final day.
+/// Either bound may be open; undated resources match only while the
+/// window bounds nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PublishedRange {
+    /// Earliest instant that still matches, if bounded below.
+    pub from: Option<UtcMillis>,
+    /// Instant after the last that matches, if bounded above.
+    pub to: Option<UtcMillis>,
+}
+
+impl PublishedRange {
+    /// True when either bound is set, so the window narrows.
+    pub fn is_active(&self) -> bool {
+        self.from.is_some() || self.to.is_some()
     }
 }
 
@@ -613,6 +654,27 @@ impl Resource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jan_1_utc_lands_on_new_year_midnights() {
+        // The seed's former single anchor doubles as the oracle.
+        assert_eq!(
+            UtcMillis::jan_1_utc(2021),
+            Some(UtcMillis::from_unix_ms(1_609_459_200_000))
+        );
+        // One calendar year apart: the 2021 span is common, the 2020 span
+        // leap.
+        assert_eq!(
+            UtcMillis::jan_1_utc(2022).map(|t| t.as_unix_ms() - 1_609_459_200_000),
+            Some(31_536_000_000)
+        );
+        assert_eq!(
+            UtcMillis::jan_1_utc(2020).map(|t| 1_609_459_200_000 - t.as_unix_ms()),
+            Some(31_622_400_000)
+        );
+        // Years outside the calendar reject rather than wrap.
+        assert_eq!(UtcMillis::jan_1_utc(3_000_000_000), None);
+    }
 
     fn title(s: &str) -> NonEmptyStr {
         NonEmptyStr::try_new(s).unwrap()

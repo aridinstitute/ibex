@@ -337,6 +337,14 @@ impl Handler for ListResourcesQueryPage {
         if let Some(creator) = self.query.filter.creator {
             ev.set(event::RESOURCE_FILTER_CREATOR, creator.to_string());
         }
+        if let Some(range) = self.query.filter.published {
+            if let Some(from) = range.from {
+                ev.set(event::RESOURCE_FILTER_PUBLISHED_FROM, from.as_unix_ms());
+            }
+            if let Some(to) = range.to {
+                ev.set(event::RESOURCE_FILTER_PUBLISHED_TO, to.as_unix_ms());
+            }
+        }
         ev.set(event::RESOURCE_PAGE_OFFSET, self.offset);
         ev.set(event::RESOURCE_PAGE_LIMIT, self.limit);
     }

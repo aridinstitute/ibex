@@ -748,6 +748,14 @@ impl Store for SurrealStore {
         if let Some(creator) = query.filter.creator {
             statement = statement.bind(("creator_id", Thing::from(Self::person_key(creator))));
         }
+        if let Some(range) = query.filter.published {
+            if let Some(from) = range.from {
+                statement = statement.bind(("published_from", from.as_unix_ms()));
+            }
+            if let Some(to) = range.to {
+                statement = statement.bind(("published_to", to.as_unix_ms()));
+            }
+        }
         let mut response = statement.await.map_err(map_err)?;
         let mut rows: Vec<ListResourceRow> = response.take(0).map_err(map_err)?;
         // One extra row decides next_offset exactly, mirroring the cursor
@@ -780,6 +788,21 @@ fn filter_where(filter: &ResourceFilter) -> String {
     // exactly their works, so shared authorship counts.
     if filter.creator.is_some() {
         clauses.push("id IN (SELECT VALUE out FROM created WHERE in = $creator_id)");
+    }
+    // The window bounds the stored instant. Surreal orders NONE before
+    // every value, so a bare `instant < to` would pass undated rows; the
+    // published guard keeps the window about dated rows only, matching
+    // MemoryStore's undated-never-matches contract. Bounds bind only when
+    // their clause is present.
+    if let Some(range) = filter.published {
+        if range.from.is_some() {
+            clauses.push(
+                "(IF published THEN published.instant >= $published_from ELSE false END)",
+            );
+        }
+        if range.to.is_some() {
+            clauses.push("(IF published THEN published.instant < $published_to ELSE false END)");
+        }
     }
     if clauses.is_empty() {
         String::new()
@@ -1324,6 +1347,7 @@ mod tests {
             filter: ResourceFilter {
                 title: Some(NonEmptyStr::try_new(needle).unwrap()),
                 creator: None,
+                published: None,
             },
         }
     }
@@ -1380,6 +1404,7 @@ mod tests {
             filter: ResourceFilter {
                 title: Some(NonEmptyStr::try_new("DE").unwrap()),
                 creator: None,
+                published: None,
             },
         };
         let first = store
@@ -1404,6 +1429,7 @@ mod tests {
             filter: ResourceFilter {
                 title: None,
                 creator: Some(person),
+                published: None,
             },
         }
     }
@@ -1490,6 +1516,7 @@ mod tests {
             filter: ResourceFilter {
                 title: None,
                 creator: Some(ada.id),
+                published: None,
             },
         };
         let first = store
@@ -1504,6 +1531,137 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sorted_titles(&second), ["Gamma Nodes"]);
+        assert_eq!(second.next_offset, None);
+    }
+
+    fn ranged_query(from: Option<i64>, to: Option<i64>) -> ResourceQuery {
+        ResourceQuery {
+            sort: None,
+            filter: ResourceFilter {
+                title: None,
+                creator: None,
+                published: Some(oeuvre_core::PublishedRange {
+                    from: from.map(oeuvre_core::UtcMillis::from_unix_ms),
+                    to: to.map(oeuvre_core::UtcMillis::from_unix_ms),
+                }),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn published_range_filters_by_instant_not_label() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let mut created: Vec<(ResourceId, i64, &str)> = Vec::new();
+        for (title, instant, label) in [
+            ("alpha waves", 1_000i64, "1999"),
+            ("Beta modes", 2_000, "1900"),
+            ("charlie nodes", 3_000, "2000"),
+        ] {
+            let id = sortable_resource(&store, vec![(grace.id, None)], title, Some((instant, label)))
+                .await
+                .id;
+            created.push((id, instant, title));
+        }
+        let delta = sortable_resource(&store, vec![(grace.id, None)], "Delta notes", None)
+            .await
+            .id;
+
+        // Bounded window: only instants between the bounds match, and the
+        // labels they claim never enter the decision; the newest-first
+        // expectation follows the ids.
+        let mut matches: Vec<(ResourceId, i64, &str)> = created
+            .iter()
+            .filter(|(_, instant, _)| (1_500..3_500).contains(instant))
+            .map(|(id, instant, title)| (*id, *instant, *title))
+            .collect();
+        matches.sort_by(|a, b| b.0.as_ulid().cmp(&a.0.as_ulid()));
+
+        let bounded = store
+            .list_resources_query_page(&ranged_query(Some(1_500), Some(3_500)), 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            bounded.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            matches.iter().map(|(id, _, _)| *id).collect::<Vec<_>>()
+        );
+        assert_eq!(bounded.next_offset, None);
+
+        // Open "from": rows before the bound, never the undated one.
+        let open_from = store
+            .list_resources_query_page(&ranged_query(None, Some(2_500)), 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&open_from), ["Beta modes", "alpha waves"]);
+        assert_eq!(open_from.next_offset, None);
+
+        // Open "to": only rows from the bound on.
+        let open_to = store
+            .list_resources_query_page(&ranged_query(Some(2_500), None), 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&open_to), ["charlie nodes"]);
+
+        // Both open: the window narrows nothing, undated included.
+        let unset = store
+            .list_resources_query_page(&ranged_query(None, None), 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(unset.rows.len(), 4);
+        assert!(unset.rows.iter().any(|row| row.id == delta));
+    }
+
+    #[tokio::test]
+    async fn published_range_keeps_sort_order_within_matches() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let grace = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        for (title, instant, label) in [
+            ("GAMMA nodes", 3_000i64, "Spring 2001"),
+            ("Beta modes", 2_000, "1900"),
+            ("alpha waves", 1_000, "1999"),
+            ("Delta notes", 4_000, "2002"),
+        ] {
+            sortable_resource(&store, vec![(grace.id, None)], title, Some((instant, label)))
+                .await;
+        }
+
+        let query = ResourceQuery {
+            sort: Some((ResourceSort::Title, SortDirection::Ascending)),
+            filter: ResourceFilter {
+                title: None,
+                creator: None,
+                published: Some(oeuvre_core::PublishedRange {
+                    from: Some(oeuvre_core::UtcMillis::from_unix_ms(1_500)),
+                    to: Some(oeuvre_core::UtcMillis::from_unix_ms(3_500)),
+                }),
+            },
+        };
+        let first = store
+            .list_resources_query_page(&query, 0, 1)
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&first), ["Beta modes"]);
+        assert_eq!(first.next_offset, Some(1));
+
+        let second = store
+            .list_resources_query_page(&query, 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(sorted_titles(&second), ["GAMMA nodes"]);
         assert_eq!(second.next_offset, None);
     }
 

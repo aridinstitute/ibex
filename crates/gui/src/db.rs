@@ -330,6 +330,7 @@ mod tests {
                     filter: oeuvre_core::ResourceFilter {
                         title: Some(oeuvre_core::NonEmptyStr::try_new("Networks").unwrap()),
                         creator: None,
+                        published: None,
                     },
                 },
                 0,
@@ -366,6 +367,7 @@ mod tests {
                     filter: oeuvre_core::ResourceFilter {
                         title: None,
                         creator: Some(ada.id),
+                        published: None,
                     },
                 },
                 0,
@@ -381,6 +383,44 @@ mod tests {
             .collect();
         got.sort();
         assert_eq!(got, ["Citation Networks 000", "The Reference Companion"]);
+        assert_eq!(page.next_offset, None);
+    }
+
+    #[tokio::test]
+    async fn worker_filters_query_pages_by_published_range() {
+        let store = MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        let state = AppState::builder(store).surface(Surface::Test).build();
+        let worker = DbWorker::spawn(state);
+
+        // The demo cycle stamps years 1962 + n, so a 1962..=1963 window
+        // keeps the first two rows; the 1984 companion book stays out.
+        let page = worker
+            .list_query_page(
+                oeuvre_core::ResourceQuery {
+                    sort: None,
+                    filter: oeuvre_core::ResourceFilter {
+                        title: None,
+                        creator: None,
+                        published: Some(oeuvre_core::PublishedRange {
+                            from: oeuvre_core::UtcMillis::jan_1_utc(1962),
+                            to: oeuvre_core::UtcMillis::jan_1_utc(1964),
+                        }),
+                    },
+                },
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.rows.len(), 2);
+        let mut got: Vec<String> = page
+            .rows
+            .iter()
+            .map(|row| row.title.as_str().to_owned())
+            .collect();
+        got.sort();
+        assert_eq!(got, ["Citation Networks 000", "Provenance Studies 001"]);
         assert_eq!(page.next_offset, None);
     }
 

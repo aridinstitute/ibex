@@ -10,8 +10,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use oeuvre_core::{
-    NonEmptyStr, Person, PersonId, ResourceFilter, ResourceId, ResourcePage, ResourceQuery,
-    ResourceSort, ResourceSummary, SortDirection,
+    NonEmptyStr, Person, PersonId, PublishedRange, ResourceFilter, ResourceId, ResourcePage,
+    ResourceQuery, ResourceSort, ResourceSummary, SortDirection, UtcMillis,
 };
 
 use crate::db::DbWorker;
@@ -125,6 +125,22 @@ impl LibraryDelegate {
             return;
         }
         self.filter.creator = creator;
+        self.reload_from_top(selected_id, window, cx);
+    }
+
+    /// Re-key the listing under a new published window; mirrors the title
+    /// box's never-drop-a-change contract.
+    fn request_published_filter(
+        &mut self,
+        range: Option<PublishedRange>,
+        selected_id: Option<ResourceId>,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        if self.filter.published == range {
+            return;
+        }
+        self.filter.published = range;
         self.reload_from_top(selected_id, window, cx);
     }
 
@@ -480,6 +496,29 @@ fn creator_options(people: &[Person]) -> Vec<(SharedString, PersonId)> {
     options
 }
 
+/// Year text to the January 1 instant that brackets it; empty or
+/// unparseable text leaves the bound unset.
+fn year_instant(text: &str) -> Option<UtcMillis> {
+    let year: i64 = text.trim().parse().ok()?;
+    UtcMillis::jan_1_utc(year)
+}
+
+/// From/to year text to a window over whole years: the "from" year's
+/// January 1 is inclusive, the "to" year's next January 1 exclusive, so
+/// a pair brackets January 1 through December 31 exactly.
+fn year_range(from: &str, to: &str) -> Option<PublishedRange> {
+    let from = year_instant(from);
+    let to = to
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .and_then(|year| UtcMillis::jan_1_utc(year + 1));
+    if from.is_none() && to.is_none() {
+        return None;
+    }
+    Some(PublishedRange { from, to })
+}
+
 /// One dropdown row for the creator filter: the name reads, the id keys.
 #[derive(Clone)]
 struct CreatorItem {
@@ -518,6 +557,10 @@ pub struct LibraryApp {
     title_input: Entity<InputState>,
     /// Creator filter box; picking a person re-keys the listing.
     creator_box: Entity<ComboboxState<SearchableVec<CreatorItem>>>,
+    /// Year boxes bracketing the published window; either side alone
+    /// bounds the listing, so both re-key on every edit.
+    published_from_input: Entity<InputState>,
+    published_to_input: Entity<InputState>,
     detail_open: bool,
     /// Row selection, tracked here so the panel shows one resource exactly
     /// as long as its row stays selected.
@@ -622,10 +665,29 @@ impl LibraryApp {
         })
         .detach();
 
+        // Year boxes bracket whole years: the from year's January 1 is
+        // inclusive, the to year's next January 1 exclusive, so either
+        // side alone still bounds the listing.
+        let published_from_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("From year"));
+        let published_to_input = cx.new(|cx| InputState::new(window, cx).placeholder("To year"));
+        for input in [&published_from_input, &published_to_input] {
+            cx.subscribe_in(input, window, |this, _input, event: &InputEvent, window, cx| {
+                // Only edits re-key the listing; focus and blur leave it be.
+                if !matches!(event, InputEvent::Change) {
+                    return;
+                }
+                this.apply_year_range(window, cx);
+            })
+            .detach();
+        }
+
         Self {
             table,
             title_input,
             creator_box,
+            published_from_input,
+            published_to_input,
             detail_open: false,
             selected: None,
             detail: None,
@@ -667,6 +729,24 @@ impl LibraryApp {
     fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.selected = None;
         cx.notify();
+    }
+
+    /// Recompute the published window from both year boxes and hand it
+    /// to the listing; one change on either side re-keys the whole window.
+    fn apply_year_range(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let from = self.published_from_input.read(cx).value();
+        let to = self.published_to_input.read(cx).value();
+        let range = year_range(&from, &to);
+        let selected_id = self
+            .table
+            .read(cx)
+            .selected_row()
+            .and_then(|ix| self.table.read(cx).delegate().row_id(ix));
+        self.table.update(cx, |table, cx| {
+            table
+                .delegate_mut()
+                .request_published_filter(range, selected_id, window, cx);
+        });
     }
 
     fn toggle_detail_panel(&mut self, cx: &mut Context<Self>) {
@@ -728,6 +808,18 @@ impl Render for LibraryApp {
                             .placeholder("Creator")
                             .search_placeholder("Search creators")
                             .w(px(220.)),
+                    )
+                    .child(
+                        Input::new(&self.published_from_input)
+                            .small()
+                            .cleanable(true)
+                            .w(px(96.)),
+                    )
+                    .child(
+                        Input::new(&self.published_to_input)
+                            .small()
+                            .cleanable(true)
+                            .w(px(96.)),
                     ),
             )
             .child(
@@ -765,10 +857,10 @@ mod sort_cycle_tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
     use super::{
-        creator_options, next_sort, sort_field_for_col, title_predicate, COL_CREATORS, COL_KIND,
-        COL_PUBLISHED, COL_TITLE,
+        creator_options, next_sort, sort_field_for_col, title_predicate, year_instant, year_range,
+        COL_CREATORS, COL_KIND, COL_PUBLISHED, COL_TITLE,
     };
-    use oeuvre_core::{Name, Person, PersonId, ResourceSort, SortDirection};
+    use oeuvre_core::{Name, Person, PersonId, ResourceSort, SortDirection, UtcMillis};
 
     #[test]
     fn one_header_cycles_ascending_descending_then_reverts() {
@@ -814,6 +906,47 @@ mod sort_cycle_tests {
         assert_eq!(title_predicate("   "), None);
         let needle = title_predicate("  MOD ").expect("non-empty needle");
         assert_eq!(needle.as_str(), "MOD");
+    }
+
+    #[test]
+    fn year_instant_parses_and_rejects() {
+        assert_eq!(
+            year_instant("  1962 "),
+            Some(UtcMillis::jan_1_utc(1962).expect("civil year"))
+        );
+        assert_eq!(year_instant(""), None);
+        assert_eq!(year_instant("19x"), None);
+    }
+
+    #[test]
+    fn year_range_brackets_whole_years() {
+        let both = year_range("1962", "1963").expect("both years parse");
+        assert_eq!(
+            both.from,
+            Some(UtcMillis::jan_1_utc(1962).expect("civil year"))
+        );
+        // The to-year's next January 1 is exclusive, so 1963 lands whole.
+        assert_eq!(
+            both.to,
+            Some(UtcMillis::jan_1_utc(1964).expect("civil year"))
+        );
+
+        let from_only = year_range("1984", "").expect("from year parses");
+        assert_eq!(
+            from_only.from,
+            Some(UtcMillis::jan_1_utc(1984).expect("civil year"))
+        );
+        assert_eq!(from_only.to, None);
+
+        let to_only = year_range("", "1984").expect("to year parses");
+        assert_eq!(to_only.from, None);
+        assert_eq!(
+            to_only.to,
+            Some(UtcMillis::jan_1_utc(1985).expect("civil year"))
+        );
+
+        assert_eq!(year_range("", "not a year"), None);
+        assert_eq!(year_range("", ""), None);
     }
 
     #[test]

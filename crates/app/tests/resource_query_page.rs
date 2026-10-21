@@ -8,8 +8,8 @@ use oeuvre_app::testing::{MemorySink, MemoryStore};
 use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
 use oeuvre_core::{
     BibliographicDate, CreatorRole, CreatorSpec, Name, NewResource, NonEmptyStr, PersonId,
-    ResourceFilter, ResourceId, ResourceKind, ResourceQuery, ResourceSort, SortDirection, Store,
-    UtcMillis,
+    PublishedRange, ResourceFilter, ResourceId, ResourceKind, ResourceQuery, ResourceSort,
+    SortDirection, Store, UtcMillis,
 };
 
 fn sorted(field: ResourceSort, direction: SortDirection) -> ResourceQuery {
@@ -27,6 +27,7 @@ fn titled(needle: &str) -> ResourceQuery {
         filter: ResourceFilter {
             title: Some(NonEmptyStr::try_new(needle).expect("needle non-empty")),
             creator: None,
+            published: None,
         },
     }
 }
@@ -39,6 +40,23 @@ fn by_creator(person: PersonId) -> ResourceQuery {
         filter: ResourceFilter {
             title: None,
             creator: Some(person),
+            published: None,
+        },
+    }
+}
+
+/// An unsorted listing narrowed to a published window over raw instants;
+/// `None` bounds stay open, and both-open windows narrow nothing.
+fn ranged(from: Option<i64>, to: Option<i64>) -> ResourceQuery {
+    ResourceQuery {
+        sort: None,
+        filter: ResourceFilter {
+            title: None,
+            creator: None,
+            published: Some(PublishedRange {
+                from: from.map(UtcMillis::from_unix_ms),
+                to: to.map(UtcMillis::from_unix_ms),
+            }),
         },
     }
 }
@@ -440,6 +458,7 @@ async fn title_filter_keeps_the_sort_order_within_matches() {
         filter: ResourceFilter {
             title: Some(NonEmptyStr::try_new("DE").expect("needle non-empty")),
             creator: None,
+            published: None,
         },
     };
     let first = store
@@ -536,6 +555,7 @@ async fn creator_filter_keeps_the_sort_order_within_matches() {
         filter: ResourceFilter {
             title: None,
             creator: Some(ada),
+            published: None,
         },
     };
     let first = store
@@ -550,6 +570,102 @@ async fn creator_filter_keeps_the_sort_order_within_matches() {
         .await
         .expect("second creator-sorted page");
     assert_eq!(titles(&second), ["Gamma Nodes"]);
+    assert_eq!(second.next_offset, None);
+}
+
+#[tokio::test]
+async fn published_range_filters_by_instant_not_label() {
+    let store = MemoryStore::new();
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+
+    // Labels deliberately disagree with instants: only the instant
+    // decides, never the fuzzy display.
+    let mut alpha = book_with(vec![(grace, None)], "alpha waves");
+    alpha.published = published_with(1_000, "1999");
+    store.create_resource(alpha).await.expect("create resource");
+    let mut beta = book_with(vec![(grace, None)], "Beta modes");
+    beta.published = published_with(2_000, "1900");
+    store.create_resource(beta).await.expect("create resource");
+    let mut charlie = book_with(vec![(grace, None)], "charlie nodes");
+    charlie.published = published_with(3_000, "2000");
+    store.create_resource(charlie).await.expect("create resource");
+    // Undated rows only match a window that bounds nothing.
+    store
+        .create_resource(book_with(vec![(grace, None)], "Delta notes"))
+        .await
+        .expect("create resource");
+
+    // Bounded: only the instants between the bounds.
+    let bounded = store
+        .list_resources_query_page(&ranged(Some(1_500), Some(3_500)), 0, 10)
+        .await
+        .expect("bounded page");
+    assert_eq!(titles(&bounded), ["Beta modes", "charlie nodes"]);
+    assert_eq!(bounded.next_offset, None);
+
+    // Open "from": everything before the bound, never the undated row.
+    let open_from = store
+        .list_resources_query_page(&ranged(None, Some(2_500)), 0, 10)
+        .await
+        .expect("open-from page");
+    assert_eq!(titles(&open_from), ["Beta modes", "alpha waves"]);
+
+    // Open "to": everything from the bound on.
+    let open_to = store
+        .list_resources_query_page(&ranged(Some(2_500), None), 0, 10)
+        .await
+        .expect("open-to page");
+    assert_eq!(titles(&open_to), ["charlie nodes"]);
+
+    // Both open: the window narrows nothing, undated included.
+    let unset = store
+        .list_resources_query_page(&ranged(None, None), 0, 10)
+        .await
+        .expect("unset window page");
+    assert_eq!(unset.rows.len(), 4);
+}
+
+#[tokio::test]
+async fn published_range_keeps_sort_order_within_matches() {
+    let store = MemoryStore::new();
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+
+    let mut gamma = book_with(vec![(grace, None)], "GAMMA nodes");
+    gamma.published = published_with(3_000, "Spring 2001");
+    store.create_resource(gamma).await.expect("create resource");
+    let mut beta = book_with(vec![(grace, None)], "Beta modes");
+    beta.published = published_with(2_000, "1900");
+    store.create_resource(beta).await.expect("create resource");
+    let mut alpha = book_with(vec![(grace, None)], "alpha waves");
+    alpha.published = published_with(1_000, "1999");
+    store.create_resource(alpha).await.expect("create resource");
+    let mut delta = book_with(vec![(grace, None)], "Delta notes");
+    delta.published = published_with(4_000, "2002");
+    store.create_resource(delta).await.expect("create resource");
+
+    let query = ResourceQuery {
+        sort: Some((ResourceSort::Title, SortDirection::Ascending)),
+        filter: ResourceFilter {
+            title: None,
+            creator: None,
+            published: Some(PublishedRange {
+                from: Some(UtcMillis::from_unix_ms(1_500)),
+                to: Some(UtcMillis::from_unix_ms(3_500)),
+            }),
+        },
+    };
+    let first = store
+        .list_resources_query_page(&query, 0, 1)
+        .await
+        .expect("first range-sorted page");
+    assert_eq!(titles(&first), ["Beta modes"]);
+    assert_eq!(first.next_offset, Some(1));
+
+    let second = store
+        .list_resources_query_page(&query, 1, 1)
+        .await
+        .expect("second range-sorted page");
+    assert_eq!(titles(&second), ["GAMMA nodes"]);
     assert_eq!(second.next_offset, None);
 }
 
@@ -693,6 +809,31 @@ async fn filtered_query_page_command_emits_filter_event() {
     assert_eq!(
         ev.get("resource.filter_creator"),
         Some(&FieldValue::from(author_id.to_string()))
+    );
+
+    // A published window names the bounds it carries; open bounds stay
+    // out of the event.
+    let Outcome::ListResourcesQueryPage(range_page) = state
+        .execute(query_page_call(ranged(Some(1), Some(2)), 0, 10))
+        .await
+        .unwrap()
+    else {
+        panic!("expected ListResourcesQueryPage");
+    };
+    // The seeded books are undated, so the window matches nothing; the
+    // event still carries both bounds.
+    assert!(range_page.rows.is_empty());
+
+    let events = sink.take();
+    assert_eq!(events.len(), 1);
+    let ev = &events[0];
+    assert_eq!(
+        ev.get("resource.filter_published_from"),
+        Some(&FieldValue::from(1i64))
+    );
+    assert_eq!(
+        ev.get("resource.filter_published_to"),
+        Some(&FieldValue::from(2i64))
     );
 
     // An unfiltered listing carries no filter field.

@@ -284,6 +284,15 @@ impl MemoryStore {
                     .map(|edge| edge.resource_id)
                     .collect()
             });
+        let published = filter
+            .published
+            .filter(|range| range.is_active())
+            .map(|range| {
+                (
+                    range.from.map(|from| from.as_unix_ms()),
+                    range.to.map(|to| to.as_unix_ms()),
+                )
+            });
         let resources = self.resources.lock().expect("MemoryStore lock");
         Ok(ids
             .into_iter()
@@ -293,6 +302,19 @@ impl MemoryStore {
                     .expect("ids come from the resources map keys");
                 if let Some(needle) = needle.as_deref() {
                     if !resource.title.as_str().to_lowercase().contains(needle) {
+                        return false;
+                    }
+                }
+                // Undated rows only match a window that bounds nothing.
+                if let Some((from, to)) = published {
+                    let Some(date) = resource.published.as_ref() else {
+                        return false;
+                    };
+                    let instant = date.instant().as_unix_ms();
+                    if from.is_some_and(|from| instant < from) {
+                        return false;
+                    }
+                    if to.is_some_and(|to| instant >= to) {
                         return false;
                     }
                 }
