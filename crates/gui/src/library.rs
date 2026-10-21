@@ -10,7 +10,7 @@ use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, T
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, Size, ThemeColor, ThemeMode,
-    h_flex, v_flex,
+    TitleBar, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -1036,14 +1036,12 @@ impl Render for LibraryApp {
                 this.toggle_detail_panel(cx);
             }))
             .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .justify_between()
-                    .px_2()
-                    .py_1()
-                    .bg(cx.theme().background)
-                    .border_b_1()
-                    .border_color(cx.theme().border)
+                // The toolbar doubles as the window's title bar: the traffic
+                // lights sit in the bar's built-in 80 px left padding, its
+                // empty stretches drag the window, and it draws its own
+                // bottom hairline.
+                TitleBar::new()
+                    .pr_2()
                     .child(
                         Button::new("toggle-filters")
                             .ghost()

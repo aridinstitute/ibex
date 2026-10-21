@@ -14,6 +14,7 @@ use clap::Parser;
 use oeuvre_adapter_surreal::SurrealStore;
 use oeuvre_app::{AppState, Surface};
 
+use gpui_kit::component::TitleBar;
 use gpui_kit::component::table::TableState;
 use gpui_kit::{AppContext as _, *};
 
@@ -69,6 +70,9 @@ fn run() -> Result<()> {
             Some("LibraryApp"),
         )]);
         if let Err(err) = gpui_kit::open_window(
+            // The window draws its own title bar (the toolbar inside
+            // LibraryApp), so the native one is transparent with only the
+            // traffic lights left in place.
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: Default::default(),
@@ -76,8 +80,12 @@ fn run() -> Result<()> {
                 })),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Oeuvre".into()),
-                    ..Default::default()
+                    ..TitleBar::title_bar_options()
                 }),
+                // Required on macOS: otherwise the system also handles
+                // title bar double clicks and delays title bar clicks to
+                // disambiguate double clicks.
+                app_owns_titlebar_drag: true,
                 ..Default::default()
             },
             cx,
