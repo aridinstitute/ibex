@@ -4,7 +4,7 @@ use std::path::Path;
 use oeuvre_core::{
     creator_label_name, format_creators_label, published_label_from, BibliographicDate, Creator,
     CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceId,
-    ResourceKind, ResourceSummary, Series, SeriesId, Store, StoreError, StoreHealth,
+    ResourceKind, ResourcePage, ResourceSummary, Series, SeriesId, Store, StoreError, StoreHealth,
 };
 use serde::{Deserialize, Serialize};
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -78,6 +78,12 @@ struct ListCreatorEdgeRow {
     order: u32,
     credited_as: Option<String>,
     name: Name,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContainerTitleRow {
+    id: Thing,
+    title: NonEmptyStr,
 }
 
 impl SurrealStore {
@@ -477,27 +483,73 @@ impl Store for SurrealStore {
     }
 
     async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError> {
+        // The full list is the first page with an unbounded cursor, so one
+        // projection path serves both reads.
+        let page = self.list_resources_page(None, u32::MAX).await?;
+        Ok(page.rows)
+    }
+
+    async fn list_resources_page(
+        &self,
+        before: Option<ResourceId>,
+        limit: u32,
+    ) -> Result<ResourcePage, StoreError> {
+        // One extra row decides next_before exactly; Surreal LIMIT tops out
+        // at u32::MAX, so an unbounded page asks for the maximum.
+        let fetch_limit = (u64::from(limit) + 1).min(u64::from(u32::MAX)) as usize;
+        let mut response = match before {
+            Some(before) => self
+                .db
+                .query(
+                    "SELECT id, kind, title, publisher, published, parent FROM resource \
+                     WHERE id < $before ORDER BY id DESC LIMIT $limit",
+                )
+                .bind(("before", Thing::from(Self::resource_key(before))))
+                .bind(("limit", fetch_limit))
+                .await,
+            None => self
+                .db
+                .query(
+                    "SELECT id, kind, title, publisher, published, parent FROM resource \
+                     ORDER BY id DESC LIMIT $limit",
+                )
+                .bind(("limit", fetch_limit))
+                .await,
+        }
+        .map_err(map_err)?;
+
+        let mut rows: Vec<ListResourceRow> = response.take(0).map_err(map_err)?;
+        let has_more = rows.len() > limit as usize;
+        rows.truncate(limit as usize);
+        let next_before = if has_more {
+            rows.last()
+                .map(|row| Self::thing_to_resource_id(&row.id))
+                .transpose()?
+        } else {
+            None
+        };
+
+        let ids: Vec<ResourceId> = rows
+            .iter()
+            .map(|row| Self::thing_to_resource_id(&row.id))
+            .collect::<Result<_, _>>()?;
+
+        // Creator edges for this page's rows only; per-resource order comes
+        // from the `order` field, re-sorted after grouping.
+        let edge_things: Vec<Thing> = ids
+            .iter()
+            .map(|id| Thing::from(Self::resource_key(*id)))
+            .collect();
         let mut response = self
             .db
             .query(
-                "SELECT id, kind, title, publisher, published, parent FROM resource \
-                 ORDER BY id DESC; \
-                 SELECT out, order, credited_as, in.name AS name FROM created \
-                 ORDER BY order;",
+                "SELECT out, order, credited_as, in.name AS name FROM created \
+                 WHERE out IN $ids ORDER BY order",
             )
+            .bind(("ids", edge_things))
             .await
             .map_err(map_err)?;
-
-        let rows: Vec<ListResourceRow> = response.take(0).map_err(map_err)?;
-        let edge_rows: Vec<ListCreatorEdgeRow> = response.take(1).map_err(map_err)?;
-
-        let mut title_by_id = HashMap::with_capacity(rows.len());
-        let mut parsed_rows = Vec::with_capacity(rows.len());
-        for row in rows {
-            let id = Self::thing_to_resource_id(&row.id)?;
-            title_by_id.insert(id, row.title.clone());
-            parsed_rows.push((id, row));
-        }
+        let edge_rows: Vec<ListCreatorEdgeRow> = response.take(0).map_err(map_err)?;
 
         let mut names_by_resource: HashMap<ResourceId, Vec<(u32, String)>> = HashMap::new();
         for edge in edge_rows {
@@ -519,8 +571,45 @@ impl Store for SurrealStore {
             names.sort_by_key(|(order, _)| *order);
         }
 
-        let mut summaries = Vec::with_capacity(parsed_rows.len());
-        for (id, row) in parsed_rows {
+        let mut title_by_id: HashMap<ResourceId, NonEmptyStr> = HashMap::with_capacity(rows.len());
+        for (row, id) in rows.iter().zip(&ids) {
+            title_by_id.insert(*id, row.title.clone());
+        }
+
+        // Parents usually live outside the page (they must exist before their
+        // children), so resolve container titles the page itself missed with
+        // one follow-up query.
+        let mut missing: Vec<ResourceId> = Vec::new();
+        for row in &rows {
+            if let Some(parent) = &row.parent {
+                let parent_id = Self::thing_to_resource_id(parent)?;
+                if !title_by_id.contains_key(&parent_id) && !missing.contains(&parent_id) {
+                    missing.push(parent_id);
+                }
+            }
+        }
+        if !missing.is_empty() {
+            let parent_things: Vec<Thing> = missing
+                .iter()
+                .map(|id| Thing::from(Self::resource_key(*id)))
+                .collect();
+            let mut response = self
+                .db
+                .query("SELECT id, title FROM resource WHERE id IN $ids")
+                .bind(("ids", parent_things))
+                .await
+                .map_err(map_err)?;
+            let title_rows: Vec<ContainerTitleRow> = response.take(0).map_err(map_err)?;
+            for title_row in title_rows {
+                title_by_id.insert(
+                    Self::thing_to_resource_id(&title_row.id)?,
+                    title_row.title,
+                );
+            }
+        }
+
+        let mut summaries = Vec::with_capacity(rows.len());
+        for (row, id) in rows.into_iter().zip(ids) {
             let names: Vec<String> = names_by_resource
                 .remove(&id)
                 .unwrap_or_default()
@@ -544,7 +633,10 @@ impl Store for SurrealStore {
                 container_title,
             });
         }
-        Ok(summaries)
+        Ok(ResourcePage {
+            rows: summaries,
+            next_before,
+        })
     }
 }
 
@@ -557,6 +649,130 @@ mod tests {
     };
 
     const UNIX_MS_2021_01_01_UTC: i64 = 1_609_459_200_000;
+
+    async fn page_article(
+        store: &SurrealStore,
+        author: PersonId,
+        parent: ResourceId,
+        title: &str,
+    ) -> Resource {
+        store
+            .create_resource(NewResource {
+                kind: ResourceKind::JournalArticle,
+                title: NonEmptyStr::try_new(title).unwrap(),
+                creators: vec![CreatorSpec {
+                    person_id: author,
+                    role: CreatorRole::Author,
+                    credited_as: Some(NonEmptyStr::try_new("St. Augustine").unwrap()),
+                }],
+                publisher: None,
+                published: Some(
+                    BibliographicDate::try_new(
+                        UtcMillis::from_unix_ms(UNIX_MS_2021_01_01_UTC),
+                        None,
+                    )
+                    .unwrap(),
+                ),
+                accessed: None,
+                parent_id: Some(parent),
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn list_resources_page_walks_cursor() {
+        let store = SurrealStore::open_memory().await.unwrap();
+
+        let author = store
+            .create_person(
+                Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // The journal is created early enough that every article ULID is
+        // strictly newer, so the first page proves container titles resolve
+        // across page boundaries.
+        let journal = store
+            .create_resource(NewResource {
+                kind: ResourceKind::Journal,
+                title: NonEmptyStr::try_new("Speculum").unwrap(),
+                creators: vec![],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let articles = [
+            page_article(&store, author.id, journal.id, "Study 1").await,
+            page_article(&store, author.id, journal.id, "Study 2").await,
+            page_article(&store, author.id, journal.id, "Study 3").await,
+            page_article(&store, author.id, journal.id, "Study 4").await,
+        ];
+
+        // Creation order can tie within one ULID millisecond; the cursor
+        // contract is id ordering, so derive expectations from the ids.
+        let mut expected: Vec<ResourceId> = std::iter::once(journal.id)
+            .chain(articles.iter().map(|a| a.id))
+            .collect();
+        expected.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+
+        let mut walked: Vec<ResourceId> = Vec::new();
+        let mut before = None;
+        loop {
+            let page = store.list_resources_page(before, 2).await.unwrap();
+            assert!(
+                !page.rows.is_empty() || page.next_before.is_none(),
+                "cursor must never yield an empty page with rows remaining"
+            );
+            assert!(page.rows.len() <= 2);
+            assert!(page
+                .rows
+                .iter()
+                .all(|row| before.is_none_or(|b| row.id.as_ulid() < b.as_ulid())));
+            if let Some(next) = page.next_before {
+                assert_eq!(Some(next), page.rows.last().map(|row| row.id));
+            }
+            walked.extend(page.rows.iter().map(|row| row.id));
+            match page.next_before {
+                Some(next) => before = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(walked, expected);
+
+        // The first page holds the two newest articles; labels and container
+        // titles must resolve even though the journal sits on a later page.
+        let first = store.list_resources_page(None, 2).await.unwrap();
+        assert_eq!(first.rows[0].id, expected[0]);
+        assert_eq!(first.rows[1].id, expected[1]);
+        for row in &first.rows {
+            assert_eq!(row.kind, ResourceKind::JournalArticle);
+            assert_eq!(row.creators_label, "St. Augustine");
+            assert_eq!(
+                row.container_title.as_ref().map(NonEmptyStr::as_str),
+                Some("Speculum")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn list_resources_page_empty_library() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let page = store.list_resources_page(None, 3).await.unwrap();
+        assert!(page.rows.is_empty());
+        assert!(page.next_before.is_none());
+    }
 
     #[tokio::test]
     async fn person_crud_round_trip_memory() {

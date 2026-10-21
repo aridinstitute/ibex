@@ -12,4 +12,12 @@ CLI and MCP for automation.
 | `oeuvre-app`             | `crates/app`             | AppState, commands, and wide-event logging   |
 | `oeuvre-adapter-surreal` | `crates/adapter-surreal` | SurrealDB storage adapter                    |
 | `oeuvre-cli`             | `crates/cli`             | `ovr` command-line interface                 |
+| `oeuvre-gui`             | `crates/gui`             | `ovr-gui` desktop library (GPUI + gpui-kit)  |
+
+Try either shell against a seeded in-memory library with `--memory`:
+
+```sh
+cargo run -p oeuvre-cli -- --memory resource list
+cargo run -p oeuvre-gui -- --memory
+```
 

@@ -187,6 +187,72 @@ pub struct ResourceSummary {
     pub container_title: Option<NonEmptyStr>,
 }
 
+/// One newest-first page of summary rows from `Store::list_resources_page`.
+///
+/// `next_before` is the cursor for the following page: the id of this page's
+/// last row when more rows may exist, `None` at the end of the library.
+/// Feed it back verbatim as the next call's `before`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ResourcePage {
+    pub rows: Vec<ResourceSummary>,
+    pub next_before: Option<ResourceId>,
+}
+
+/// Creators of one role for a [`ResourceDetail`]: every credited name,
+/// bibliography order. Names stay a list; a shell stacks or joins them at
+/// display time (summaries truncate with `"et al."`; details show them all).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DetailCreators {
+    pub role: CreatorRole,
+    pub names: Vec<String>,
+}
+
+/// Fully-resolved resource for detail views.
+///
+/// Like [`ResourceSummary`] this is a read-time projection, but complete:
+/// creator `person_id`s are replaced with credited names grouped by role, and
+/// the parent / series ids with their titles. Dates stay raw — shells label
+/// them with [`format_published_label`]. The command layer composes it from
+/// [`Resource`] plus lookups; the store does not build it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ResourceDetail {
+    pub id: ResourceId,
+    pub kind: ResourceKind,
+    pub title: NonEmptyStr,
+    /// One [`DetailCreators`] per role, in first-appearance order.
+    pub creators: Vec<DetailCreators>,
+    pub publisher: Option<String>,
+    pub published: Option<BibliographicDate>,
+    pub accessed: Option<BibliographicDate>,
+    /// Parent resource's title when a parent link is set.
+    pub container_title: Option<NonEmptyStr>,
+    pub series_title: Option<NonEmptyStr>,
+    pub series_number: Option<NonEmptyStr>,
+}
+
+/// Group creators into one [`DetailCreators`] per role.
+///
+/// `label` resolves one creator to its credited display name (see
+/// [`creator_label_name`]). Roles appear in first-appearance order; names
+/// inside a role keep bibliography order.
+pub fn detail_creator_groups<F>(creators: &[Creator], label: F) -> Vec<DetailCreators>
+where
+    F: Fn(&Creator) -> String,
+{
+    // Accumulate names per role first so the join happens once per group.
+    let mut groups: Vec<(CreatorRole, Vec<String>)> = Vec::new();
+    for creator in creators {
+        match groups.iter_mut().find(|(role, _)| *role == creator.role) {
+            Some((_, names)) => names.push(label(creator)),
+            None => groups.push((creator.role, vec![label(creator)])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(role, names)| DetailCreators { role, names })
+        .collect()
+}
+
 /// Creator slot label: `credited_as` when set, else [`Name::display`].
 pub fn creator_label_name(credited_as: Option<&NonEmptyStr>, name: &Name) -> String {
     match credited_as {
@@ -209,6 +275,7 @@ pub fn format_creators_label<S: AsRef<str>>(names: &[S]) -> String {
         _ => format!("{} et al.", names[0].as_ref()),
     }
 }
+
 
 /// Prefer fuzzy [`BibliographicDate::display`]; else UTC calendar year of the instant.
 pub fn format_published_label(published: &BibliographicDate) -> NonEmptyStr {
@@ -748,6 +815,29 @@ mod tests {
             format_creators_label(&["A", "B", "C", "D"]),
             "A et al."
         );
+    }
+
+    #[test]
+    fn detail_creator_groups_one_group_per_role_in_appearance_order() {
+        let creator = |order: u32, role: CreatorRole| Creator {
+            person_id: PersonId::generate(),
+            role,
+            order,
+            credited_as: None,
+        };
+        let creators = vec![
+            creator(0, CreatorRole::Author),
+            creator(1, CreatorRole::Editor),
+            creator(2, CreatorRole::Author),
+            creator(3, CreatorRole::Editor),
+        ];
+        let groups = detail_creator_groups(&creators, |c| format!("name-{}", c.order));
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].role, CreatorRole::Author);
+        assert_eq!(groups[0].names, vec!["name-0", "name-2"]);
+        assert_eq!(groups[1].role, CreatorRole::Editor);
+        assert_eq!(groups[1].names, vec!["name-1", "name-3"]);
+        assert!(detail_creator_groups(&[], |_: &Creator| String::new()).is_empty());
     }
 
     #[test]

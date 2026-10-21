@@ -1,0 +1,26 @@
+[package]
+name = "oeuvre-gui"
+description = "Oeuvre library GUI (ovr-gui, GPUI)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ovr-gui"
+path = "src/main.rs"
+
+[dependencies]
+oeuvre-app = { workspace = true }
+oeuvre-adapter-surreal = { workspace = true }
+oeuvre-core = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+dirs = { workspace = true }
+tokio = { workspace = true }
+gpui-kit = { workspace = true }
+
+[dev-dependencies]
+oeuvre-app = { workspace = true, features = ["testing"] }
+tokio = { workspace = true }

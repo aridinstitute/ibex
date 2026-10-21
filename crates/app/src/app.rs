@@ -14,6 +14,7 @@ use crate::event::{
 #[serde(rename_all = "snake_case")]
 pub enum Surface {
     Cli,
+    Gui,
     Mcp,
     Test,
 }
@@ -22,6 +23,7 @@ impl Surface {
     pub fn as_str(self) -> &'static str {
         match self {
             Surface::Cli => "cli",
+            Surface::Gui => "gui",
             Surface::Mcp => "mcp",
             Surface::Test => "test",
         }
