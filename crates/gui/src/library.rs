@@ -625,7 +625,7 @@ impl TableDelegate for LibraryDelegate {
                                     .items_center()
                                     .justify_center()
                                     .text_color(icon_color)
-                                    .child(kind_symbol(kind).with_size(px(18.)))
+                                    .child(kind_symbol(kind).with_size(px(16.)))
                                     .tooltip(move |window, cx| {
                                         Tooltip::new(label.clone()).build(window, cx)
                                     }),
@@ -727,7 +727,7 @@ impl TableDelegate for LibraryDelegate {
                     div()
                         .id(("kind", row_ix))
                         .text_color(icon_color)
-                        .child(kind_symbol(row.kind).with_size(px(18.)))
+                        .child(kind_symbol(row.kind).with_size(px(16.)))
                         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx)),
                 )
             }

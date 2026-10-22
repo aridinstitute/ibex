@@ -161,15 +161,22 @@ pub fn render_panel(view: DetailView<'_>, actions: Option<AnyElement>, cx: &App)
                 )
                 .child(
                     v_flex()
-                        .gap_1()
+                        .mt(px(3.))
+                        .gap(px(1.))
                         .child(
                             div()
-                                .text_size(px(19.))
+                                .text_size(px(18.))
+                                .line_height(relative(1.15))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(detail.title.as_str().to_owned()),
                         )
                         .when_some(byline(detail), |identity, names| {
-                            identity.child(div().text_color(muted).child(names))
+                            identity.child(
+                                div()
+                                    .line_height(relative(1.25))
+                                    .text_color(muted)
+                                    .child(names),
+                            )
                         }),
                 )
                 .when_some(actions, |header, actions| {
