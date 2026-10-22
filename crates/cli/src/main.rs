@@ -120,4 +120,25 @@ mod tests {
             .expect("valid args");
         assert!(cli.memory);
     }
+
+    #[test]
+    fn parses_resource_update() {
+        let cli = Cli::try_parse_from([
+            "ovr",
+            "resource",
+            "update",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--title",
+            "Retitled",
+        ])
+        .expect("valid args");
+        let Commands::Resource(ResourceCmd {
+            action: ResourceAction::Update(args),
+        }) = cli.command
+        else {
+            panic!("expected update action");
+        };
+        assert_eq!(args.id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(args.title.as_deref(), Some("Retitled"));
+    }
 }

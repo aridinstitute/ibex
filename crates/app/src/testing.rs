@@ -7,7 +7,7 @@ use oeuvre_core::{
     BibliographicDate, Creator, CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr,
     Person, PersonId, Resource, ResourceFilter, ResourceId, ResourceKind, ResourcePage,
     ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage,
-    Store, StoreError, StoreHealth,
+    Store, StoreError, StoreHealth, UtcMillis,
 };
 
 use crate::event::{EventSink, FinishedEvent};
@@ -82,6 +82,8 @@ struct ResourceRow {
     parent_id: Option<ResourceId>,
     series_id: Option<SeriesId>,
     series_number: Option<NonEmptyStr>,
+    date_added: UtcMillis,
+    date_edited: UtcMillis,
 }
 
 struct CreatedEdge {
@@ -184,6 +186,8 @@ impl MemoryStore {
                 published_label: published_label_from(row.published.as_ref()),
                 publisher: row.publisher.clone(),
                 container_title,
+                date_added: row.date_added,
+                date_edited: row.date_edited,
             });
         }
         Ok(summaries)
@@ -247,6 +251,33 @@ impl MemoryStore {
                     ));
                 }
             }
+            // Publisher names order case-insensitively like titles; a row
+            // without one lands at the direction's no-data end.
+            ResourceSort::Publisher => {
+                for (id, row) in resources.iter() {
+                    keyed.push((
+                        *id,
+                        SortKey::Text(
+                            row.publisher
+                                .as_ref()
+                                .map(|p| p.as_str().to_lowercase()),
+                        ),
+                    ));
+                }
+            }
+            // Record-keeping stamps are always present on a stored record —
+            // create stamps both, edit restamps date_edited — so both date
+            // sorts are plain instant orders.
+            ResourceSort::DateAdded => {
+                for (id, row) in resources.iter() {
+                    keyed.push((*id, SortKey::Instant(Some(row.date_added.as_unix_ms()))));
+                }
+            }
+            ResourceSort::DateEdited => {
+                for (id, row) in resources.iter() {
+                    keyed.push((*id, SortKey::Instant(Some(row.date_edited.as_unix_ms()))));
+                }
+            }
         }
         keyed.sort_by(|(a_id, a_key), (b_id, b_key)| {
             a_key
@@ -300,6 +331,11 @@ impl MemoryStore {
                 let resource = resources
                     .get(id)
                     .expect("ids come from the resources map keys");
+                if let Some(kind) = filter.kind {
+                    if resource.kind != kind {
+                        return false;
+                    }
+                }
                 if let Some(needle) = needle.as_deref() {
                     if !resource.title.as_str().to_lowercase().contains(needle) {
                         return false;
@@ -434,6 +470,8 @@ impl Store for MemoryStore {
             parent_id: resource.parent_id,
             series_id: resource.series_id,
             series_number: resource.series_number.clone(),
+            date_added: resource.date_added,
+            date_edited: resource.date_edited,
         };
         self.resources
             .lock()
@@ -445,6 +483,52 @@ impl Store for MemoryStore {
             edges.push(CreatedEdge {
                 person_id: creator.person_id,
                 resource_id: resource.id,
+                role: creator.role,
+                order: creator.order,
+                credited_as: creator.credited_as.clone(),
+            });
+        }
+        Ok(resource)
+    }
+
+    async fn update_resource(
+        &self,
+        id: ResourceId,
+        new: NewResource,
+    ) -> Result<Resource, StoreError> {
+        let mut resources = self.resources.lock().expect("MemoryStore lock");
+        // Existence first, matching the surreal adapter; the row's stamp is
+        // the date_added an edit must carry forward.
+        let date_added = match resources.get(&id) {
+            Some(row) => row.date_added,
+            None => return Err(StoreError::not_found(format!("resource {id}"))),
+        };
+        let resource = Resource::try_new_updated(id, date_added, new)?;
+        resources.insert(
+            id,
+            ResourceRow {
+                kind: resource.kind,
+                title: resource.title.clone(),
+                publisher: resource.publisher.clone(),
+                published: resource.published.clone(),
+                accessed: resource.accessed.clone(),
+                parent_id: resource.parent_id,
+                series_id: resource.series_id,
+                series_number: resource.series_number.clone(),
+                date_added: resource.date_added,
+                date_edited: resource.date_edited,
+            },
+        );
+        drop(resources);
+
+        // Creators are replaced wholesale: stale edges go first, then the
+        // new list lands with exactly the orders try_new assigned.
+        let mut edges = self.created.lock().expect("MemoryStore lock");
+        edges.retain(|e| e.resource_id != id);
+        for creator in &resource.creators {
+            edges.push(CreatedEdge {
+                person_id: creator.person_id,
+                resource_id: id,
                 role: creator.role,
                 order: creator.order,
                 credited_as: creator.credited_as.clone(),
@@ -468,6 +552,8 @@ impl Store for MemoryStore {
                 parent_id: r.parent_id,
                 series_id: r.series_id,
                 series_number: r.series_number.clone(),
+                date_added: r.date_added,
+                date_edited: r.date_edited,
             })
             .ok_or_else(|| StoreError::not_found(format!("resource {id}")))?;
 
@@ -497,6 +583,8 @@ impl Store for MemoryStore {
             row.parent_id,
             row.series_id,
             row.series_number,
+            row.date_added,
+            row.date_edited,
         )
         .map_err(StoreError::from)
     }
@@ -640,6 +728,14 @@ impl Store for StubStore {
 
     async fn create_resource(&self, _new: NewResource) -> Result<Resource, StoreError> {
         Err(unsupported("create_resource"))
+    }
+
+    async fn update_resource(
+        &self,
+        _id: ResourceId,
+        _new: NewResource,
+    ) -> Result<Resource, StoreError> {
+        Err(unsupported("update_resource"))
     }
 
     async fn get_resource(&self, _id: ResourceId) -> Result<Resource, StoreError> {

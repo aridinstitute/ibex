@@ -49,6 +49,21 @@ pub trait Store: Send + Sync + 'static {
     /// (`CreateResource`) does that before invoke.
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError>;
 
+    /// Replace every stored field of `id` with `new`: the row's content plus
+    /// its whole creator list. Missing → [`StoreError::not_found`].
+    ///
+    /// Rebuilds via [`Resource::try_new`] so the replacement passes the same
+    /// shape validation as create; creators are replaced wholesale, with
+    /// `order` re-assigned 0..n from `new.creators` position (stale edges are
+    /// gone afterwards). Like [`Store::create_resource`], does **not** check
+    /// parent kind or series existence — the caller (`UpdateResource`) does
+    /// that before invoke.
+    async fn update_resource(
+        &self,
+        id: ResourceId,
+        new: NewResource,
+    ) -> Result<Resource, StoreError>;
+
     /// Load resource row + reconstruct `creators` from edges ordered by `order`.
     /// Missing resource → [`StoreError::not_found`].
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError>;
@@ -79,6 +94,9 @@ pub trait Store: Send + Sync + 'static {
     /// - title rows order case-insensitively;
     /// - primary-creator rows order by the first creator's family name;
     /// - published rows order by the chronological instant;
+    /// - publisher rows order case-insensitively over the name;
+    /// - dateAdded / dateEdited rows order by their chronological
+    ///   instants, which every stored record carries;
     /// - rows without the sort field land at the no-data end (last
     ///   ascending, first descending);
     /// - ties keep newest-first (id descending) in both directions.
@@ -86,6 +104,7 @@ pub trait Store: Send + Sync + 'static {
     /// Filter contract, shared by every adapter:
     /// - `filter.title` holds when the title contains the needle,
     ///   comparing case-insensitively;
+    /// - `filter.kind` holds when the row's kind equals it;
     /// - set predicates AND together: a row must satisfy every one.
     ///
     /// `offset` is a 0-based window into the ordered list; the page returns

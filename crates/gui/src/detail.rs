@@ -2,20 +2,20 @@
 //! the way Zotero's item pane aligns them.
 
 use gpui_kit::component::description_list::{DescriptionItem, DescriptionList};
-use gpui_kit::component::{ActiveTheme as _, v_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use oeuvre_core::{format_published_label, CreatorRole, ResourceDetail};
+use oeuvre_core::{format_published_label, format_recorded_date, CreatorRole, ResourceDetail};
 
 use crate::kind::{kind_color, kind_label};
 
 /// Panel width on the right side of the library grid.
 pub const PANEL_WIDTH: Pixels = px(320.);
 /// Label column width inside the panel; values take the remaining width.
-const FIELD_LABEL_WIDTH: Pixels = px(88.);
+pub const FIELD_LABEL_WIDTH: Pixels = px(88.);
 /// Matches the grid's cell text so the two panes read as one view.
-const FIELD_TEXT_SIZE: Pixels = px(13.);
+pub const FIELD_TEXT_SIZE: Pixels = px(13.);
 /// Opacity of the kind tint at the panel's top edge. A hint of the kind's
 /// color rather than a wash: the field labels stay above 13:1 contrast on
 /// it in both palettes.
@@ -104,6 +104,16 @@ pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
             vec![number.as_str().to_owned()],
         ));
     }
+    // Record-keeping stamps close the panel: they describe the library
+    // record, not the work, and are always present on a stored record.
+    rows.push((
+        "Added".to_string(),
+        vec![format_recorded_date(detail.date_added)],
+    ));
+    rows.push((
+        "Edited".to_string(),
+        vec![format_recorded_date(detail.date_edited)],
+    ));
     rows
 }
 
@@ -157,11 +167,14 @@ fn kind_tint(color: Hsla) -> Div {
         .bg(linear_gradient(180., from, to))
 }
 
-/// The right-side panel for the current [`DetailView`]. It overlaps the grid
-/// rather than sharing a row with it: anchored to the window's right edge,
-/// opaque so the covered columns do not show through, and scrollable when
-/// the field list outgrows the window.
-pub fn render_panel(view: DetailView<'_>, cx: &App) -> Div {
+/// The right-side sidebar for the current [`DetailView`]: a column beside
+/// the grid, sharing the row with it rather than overlapping it, so the
+/// grid's rows are never behind the sidebar's empty stretches. Opaque,
+/// fixed-width — the grid gives way when the window is too narrow to hold
+/// both — and scrollable when the field list outgrows the window.
+/// `actions`, when present, rides the sidebar's top-right corner over the
+/// kind tint.
+pub fn render_panel(view: DetailView<'_>, actions: Option<AnyElement>, cx: &App) -> Div {
     let muted = cx.theme().muted_foreground;
     let danger = cx.theme().danger;
     let border = cx.theme().border;
@@ -190,23 +203,36 @@ pub fn render_panel(view: DetailView<'_>, cx: &App) -> Div {
             .into_any_element(),
     };
 
-    div()
-        .absolute()
-        .top_0()
-        .right_0()
-        .bottom_0()
+    v_flex()
+        // The tint is absolutely positioned, so the sidebar must be its
+        // containing block: without `relative` the wash would escape into
+        // the nearest positioned ancestor and spill over the grid.
+        .relative()
+        .h_full()
+        .flex_shrink_0()
         .w(PANEL_WIDTH)
         .bg(cx.theme().background)
         .border_l_1()
         .border_color(border)
         .text_size(FIELD_TEXT_SIZE)
         // The tint is a sibling of the scroller, not a child, so it stays
-        // pinned to the panel's top edge as the fields scroll under it.
+        // pinned to the sidebar's top edge as the fields scroll under it.
         .when_some(tint, |el, tint| el.child(kind_tint(tint)))
+        .when_some(actions, |el, actions| {
+            el.child(
+                h_flex()
+                    .justify_end()
+                    .px_2()
+                    .pt_1()
+                    .flex_shrink_0()
+                    .child(actions),
+            )
+        })
         .child(
             div()
                 .id("detail-panel")
-                .size_full()
+                .flex_1()
+                .min_h_0()
                 .p_3()
                 .overflow_y_scroll()
                 .child(content),
@@ -248,6 +274,8 @@ mod tests {
             container_title: Some(NonEmptyStr::try_new("Journal of Citation Studies").unwrap()),
             series_title: None,
             series_number: None,
+            date_added: UtcMillis::from_unix_ms(1_609_459_200_000),
+            date_edited: UtcMillis::from_unix_ms(1_609_459_200_000),
         }
     }
 
@@ -257,13 +285,19 @@ mod tests {
 
         let rows = field_rows(&detail);
         let labels: Vec<&str> = rows.iter().map(|(label, _)| label.as_str()).collect();
-        assert_eq!(labels, ["Title", "Kind", "Author", "Published", "In"]);
+        assert_eq!(
+            labels,
+            ["Title", "Kind", "Author", "Published", "In", "Added", "Edited"]
+        );
         assert_eq!(rows[0].1, vec!["Quantum bibliometrics"]);
         assert_eq!(rows[1].1, vec!["Journal article"]);
         // Creator groups carry one line per name; the panel stacks them.
         assert_eq!(rows[2].1, vec!["Ada Lovelace", "G. Hopper"]);
         assert_eq!(rows[3].1, vec!["Summer 2021"]);
         assert_eq!(rows[4].1, vec!["Journal of Citation Studies"]);
+        // The record-keeping stamps read as day labels.
+        assert_eq!(rows[5].1, vec!["Jan 1, 2021"]);
+        assert_eq!(rows[6].1, vec!["Jan 1, 2021"]);
     }
 
     #[test]

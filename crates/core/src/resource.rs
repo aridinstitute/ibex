@@ -17,6 +17,14 @@ impl ResourceId {
     pub fn as_ulid(self) -> ulid::Ulid {
         self.0
     }
+
+    /// Creation-time millis the ULID itself encodes: the fallback
+    /// `date_added` for rows persisted before record-keeping dates existed,
+    /// so no backfill migration is needed. The 48-bit ULID timestamp always
+    /// fits an i64.
+    pub fn timestamp_ms(self) -> i64 {
+        self.0.timestamp_ms() as i64
+    }
 }
 
 impl fmt::Display for ResourceId {
@@ -59,6 +67,31 @@ pub enum ParentRule {
 }
 
 impl ResourceKind {
+    /// Every kind, for shells that enumerate the whole set (dropdowns,
+    /// round-trip tests).
+    pub const ALL: [Self; 20] = [
+        Self::Book,
+        Self::JournalArticle,
+        Self::BookSection,
+        Self::ConferencePaper,
+        Self::Preprint,
+        Self::Thesis,
+        Self::Report,
+        Self::Webpage,
+        Self::Dataset,
+        Self::Manuscript,
+        Self::MagazineArticle,
+        Self::NewspaperArticle,
+        Self::ComputerProgram,
+        Self::DictionaryEntry,
+        Self::EncyclopediaArticle,
+        Self::BlogPost,
+        Self::PodcastEpisode,
+        Self::Journal,
+        Self::Podcast,
+        Self::Blog,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Book => "book",
@@ -82,6 +115,34 @@ impl ResourceKind {
             Self::Podcast => "podcast",
             Self::Blog => "blog",
         }
+    }
+
+    /// Parse the slug [`ResourceKind::as_str`] emits. `None` on any other
+    /// input, so callers own their error message.
+    pub fn from_slug(s: &str) -> Option<Self> {
+        Some(match s {
+            "book" => Self::Book,
+            "journalArticle" => Self::JournalArticle,
+            "bookSection" => Self::BookSection,
+            "conferencePaper" => Self::ConferencePaper,
+            "preprint" => Self::Preprint,
+            "thesis" => Self::Thesis,
+            "report" => Self::Report,
+            "webpage" => Self::Webpage,
+            "dataset" => Self::Dataset,
+            "manuscript" => Self::Manuscript,
+            "magazineArticle" => Self::MagazineArticle,
+            "newspaperArticle" => Self::NewspaperArticle,
+            "computerProgram" => Self::ComputerProgram,
+            "dictionaryEntry" => Self::DictionaryEntry,
+            "encyclopediaArticle" => Self::EncyclopediaArticle,
+            "blogPost" => Self::BlogPost,
+            "podcastEpisode" => Self::PodcastEpisode,
+            "journal" => Self::Journal,
+            "podcast" => Self::Podcast,
+            "blog" => Self::Blog,
+            _ => return None,
+        })
     }
 
     pub fn is_container(self) -> bool {
@@ -148,6 +209,19 @@ impl UtcMillis {
         self.0
     }
 
+    /// The current instant, for record-keeping stamps (`date_added`,
+    /// `date_edited`): the same UTC-millisecond resolution the type stores.
+    pub fn now() -> Self {
+        let now = time::OffsetDateTime::now_utc();
+        // The millisecond half rounds down, so a stamp never lands in
+        // the future.
+        Self(
+            now.unix_timestamp()
+                .saturating_mul(1_000)
+                .saturating_add(i64::from(now.millisecond())),
+        )
+    }
+
     /// The year's January 1, midnight UTC — the boundary a year-bracketed
     /// range keys on. `None` when the year falls outside the calendar.
     pub fn jan_1_utc(year: i64) -> Option<Self> {
@@ -198,6 +272,10 @@ pub struct ResourceSummary {
     pub publisher: Option<String>,
     /// Parent resource title when a parent link is set.
     pub container_title: Option<NonEmptyStr>,
+    /// Record-keeping stamps, always present on a stored record; shells
+    /// label them with [`format_recorded_date`].
+    pub date_added: UtcMillis,
+    pub date_edited: UtcMillis,
 }
 
 /// One newest-first page of summary rows from `Store::list_resources_page`.
@@ -219,11 +297,20 @@ pub struct ResourcePage {
 ///   order keys on its family name ([`primary_creator_sort_key`]).
 /// - [`ResourceSort::Published`] — the chronological instant, never the
 ///   display label ("Summer 397" has no order).
+/// - [`ResourceSort::Publisher`] — case-insensitive text order over the
+///   publisher name.
+/// - [`ResourceSort::DateAdded`] — the instant the record joined the
+///   library, a record-keeping stamp present on every stored record.
+/// - [`ResourceSort::DateEdited`] — the instant of the record's last
+///   change, likewise always present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ResourceSort {
     Title,
     PrimaryCreator,
     Published,
+    Publisher,
+    DateAdded,
+    DateEdited,
 }
 
 /// Direction of a [`ResourceSort`]. Descending is the exact key-reversal of
@@ -241,6 +328,9 @@ impl ResourceSort {
             Self::Title => "title",
             Self::PrimaryCreator => "primaryCreator",
             Self::Published => "published",
+            Self::Publisher => "publisher",
+            Self::DateAdded => "dateAdded",
+            Self::DateEdited => "dateEdited",
         }
     }
 }
@@ -300,6 +390,10 @@ pub struct ResourceFilter {
     pub creator: Option<PersonId>,
     /// Window the published instant must fall in.
     pub published: Option<PublishedRange>,
+    /// The exact kind a row must carry, so kind-scoped listings (a parent
+    /// picker's candidates, for instance) narrow at the store instead of
+    /// paging the whole library.
+    pub kind: Option<ResourceKind>,
 }
 
 impl ResourceFilter {
@@ -309,6 +403,15 @@ impl ResourceFilter {
             title: None,
             creator: None,
             published: None,
+            kind: None,
+        }
+    }
+
+    /// The filter matching every resource of one kind.
+    pub fn by_kind(kind: ResourceKind) -> Self {
+        Self {
+            kind: Some(kind),
+            ..Self::none()
         }
     }
 
@@ -316,6 +419,7 @@ impl ResourceFilter {
     pub fn is_active(&self) -> bool {
         self.title.is_some()
             || self.creator.is_some()
+            || self.kind.is_some()
             || self
                 .published
                 .as_ref()
@@ -368,8 +472,9 @@ pub struct DetailCreators {
 /// Like [`ResourceSummary`] this is a read-time projection, but complete:
 /// creator `person_id`s are replaced with credited names grouped by role, and
 /// the parent / series ids with their titles. Dates stay raw — shells label
-/// them with [`format_published_label`]. The command layer composes it from
-/// [`Resource`] plus lookups; the store does not build it.
+/// the bibliographic pair with [`format_published_label`] and the
+/// record-keeping pair with [`format_recorded_date`]. The command layer
+/// composes it from [`Resource`] plus lookups; the store does not build it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ResourceDetail {
     pub id: ResourceId,
@@ -384,6 +489,9 @@ pub struct ResourceDetail {
     pub container_title: Option<NonEmptyStr>,
     pub series_title: Option<NonEmptyStr>,
     pub series_number: Option<NonEmptyStr>,
+    /// Record-keeping stamps, always present on a stored record.
+    pub date_added: UtcMillis,
+    pub date_edited: UtcMillis,
 }
 
 /// Group creators into one [`DetailCreators`] per role.
@@ -466,7 +574,29 @@ pub fn published_label_from(published: Option<&BibliographicDate>) -> Option<Non
     published.map(format_published_label)
 }
 
-fn utc_year_from_millis(ms: i64) -> i32 {
+/// English month abbreviations in calendar order, the word each
+/// [`format_recorded_date`] label leads with.
+const RECORDED_MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// Record-keeping stamp as `Mon D, YYYY`, the label shells show for a
+/// resource's `date_added` / `date_edited`. UTC deliberately: a library
+/// table reads the same day whatever timezone it opens in, and tests stay
+/// deterministic.
+pub fn format_recorded_date(instant: UtcMillis) -> String {
+    let stamp =
+        time::OffsetDateTime::from_unix_timestamp(instant.as_unix_ms().div_euclid(1_000))
+            .expect("recorded stamp within OffsetDateTime range");
+    format!(
+        "{} {}, {}",
+        RECORDED_MONTHS[(stamp.month() as usize) - 1],
+        stamp.day(),
+        stamp.year()
+    )
+}
+
+pub fn utc_year_from_millis(ms: i64) -> i32 {
     time::OffsetDateTime::from_unix_timestamp(ms.div_euclid(1_000))
         .expect("bibliographic instant within OffsetDateTime range")
         .year()
@@ -481,6 +611,22 @@ pub enum CreatorRole {
     Contributor,
     Host,
     Director,
+}
+
+impl CreatorRole {
+    /// Parse the slug the CLI's `--creator` flag takes. `None` on any other
+    /// input, so callers own their error message.
+    pub fn from_slug(s: &str) -> Option<Self> {
+        Some(match s {
+            "author" => Self::Author,
+            "editor" => Self::Editor,
+            "translator" => Self::Translator,
+            "contributor" => Self::Contributor,
+            "host" => Self::Host,
+            "director" => Self::Director,
+            _ => return None,
+        })
+    }
 }
 
 /// Write-side creator link for [`NewResource`].
@@ -507,6 +653,16 @@ impl Creator {
             role: spec.role,
             order,
             credited_as: spec.credited_as,
+        }
+    }
+
+    /// Write-side twin of this slot. Drops `order`: the update re-derives it
+    /// from list position, the same rule create applies.
+    pub fn to_spec(&self) -> CreatorSpec {
+        CreatorSpec {
+            person_id: self.person_id,
+            role: self.role,
+            credited_as: self.credited_as.clone(),
         }
     }
 }
@@ -552,6 +708,11 @@ pub struct Resource {
     pub parent_id: Option<ResourceId>,
     pub series_id: Option<SeriesId>,
     pub series_number: Option<NonEmptyStr>,
+    /// When the record joined the library: a record-keeping stamp, never
+    /// the bibliographic `published`.
+    pub date_added: UtcMillis,
+    /// When the record last changed; every create and update restamps it.
+    pub date_edited: UtcMillis,
 }
 
 fn validate_creators(kind: ResourceKind, creators: &[Creator]) -> Result<(), ResourceError> {
@@ -605,6 +766,9 @@ impl Resource {
         validate_creators(new.kind, &creators)?;
         validate_parent_presence(new.kind, new.parent_id)?;
         validate_series(new.series_id, new.series_number.as_ref())?;
+        // One instant stamps both record-keeping dates: the record joined
+        // the library now and has not changed since.
+        let now = UtcMillis::now();
         Ok(Self {
             id,
             kind: new.kind,
@@ -616,7 +780,23 @@ impl Resource {
             parent_id: new.parent_id,
             series_id: new.series_id,
             series_number: new.series_number,
+            date_added: now,
+            date_edited: now,
         })
+    }
+
+    /// Rebuild for [`Store::update_resource`](crate::store::Store::update_resource):
+    /// the same shape validation as [`Resource::try_new`], carrying the
+    /// record's original `date_added` — an edit moves `date_edited` to now
+    /// but never the day the record joined the library.
+    pub fn try_new_updated(
+        id: ResourceId,
+        date_added: UtcMillis,
+        new: NewResource,
+    ) -> Result<Self, ResourceError> {
+        let mut resource = Self::try_new(id, new)?;
+        resource.date_added = date_added;
+        Ok(resource)
     }
 
     /// Reassemble after loading a row + ordered edge projection.
@@ -632,6 +812,8 @@ impl Resource {
         parent_id: Option<ResourceId>,
         series_id: Option<SeriesId>,
         series_number: Option<NonEmptyStr>,
+        date_added: UtcMillis,
+        date_edited: UtcMillis,
     ) -> Result<Self, ResourceError> {
         validate_creators(kind, &creators)?;
         validate_parent_presence(kind, parent_id)?;
@@ -647,7 +829,28 @@ impl Resource {
             parent_id,
             series_id,
             series_number,
+            date_added,
+            date_edited,
         })
+    }
+
+    /// Write-side twin of the stored record for
+    /// [`Store::update_resource`](crate::store::Store::update_resource):
+    /// shells merge field edits into it and send it back as the full
+    /// replacement. Creator order drops out; position is the order, the
+    /// same rule create applies.
+    pub fn to_new(&self) -> NewResource {
+        NewResource {
+            kind: self.kind,
+            title: self.title.clone(),
+            creators: self.creators.iter().map(Creator::to_spec).collect(),
+            publisher: self.publisher.clone(),
+            published: self.published.clone(),
+            accessed: self.accessed.clone(),
+            parent_id: self.parent_id,
+            series_id: self.series_id,
+            series_number: self.series_number.clone(),
+        }
     }
 }
 
@@ -708,6 +911,78 @@ mod tests {
         let parsed = ResourceId::parse(&id.to_string()).unwrap();
         assert_eq!(parsed, id);
         assert_eq!(parsed.as_ulid(), id.as_ulid());
+    }
+
+    #[test]
+    fn resource_id_timestamp_ms_matches_the_ulid() {
+        // The ULID's encoded millis are the oracle; the accessor reads
+        // them for the legacy-row date_added backfill.
+        let id = ResourceId(ulid::Ulid::from_parts(1_609_459_200_000, 0));
+        assert_eq!(id.timestamp_ms(), 1_609_459_200_000);
+    }
+
+    #[test]
+    fn try_new_stamps_both_record_dates_with_one_instant() {
+        let before = UtcMillis::now().as_unix_ms();
+        let resource = Resource::try_new(ResourceId::generate(), new_book(one_creator(), None))
+            .expect("book shape valid");
+        let after = UtcMillis::now().as_unix_ms();
+        // Create stamps both record-keeping dates with the same instant:
+        // the record joined the library now and has not changed since.
+        assert_eq!(resource.date_added, resource.date_edited);
+        assert!(resource.date_added.as_unix_ms() >= before);
+        assert!(resource.date_added.as_unix_ms() <= after);
+    }
+
+    #[test]
+    fn try_new_updated_keeps_date_added_and_restamps_date_edited() {
+        let added = UtcMillis::from_unix_ms(1_500_000_000_000);
+        let resource =
+            Resource::try_new_updated(ResourceId::generate(), added, new_book(one_creator(), None))
+                .expect("book shape valid");
+        // An edit moves the edited stamp on from the added stamp, which is
+        // the record's history, never the edit's clock.
+        assert_eq!(resource.date_added, added);
+        assert!(resource.date_edited.as_unix_ms() >= added.as_unix_ms());
+    }
+
+    #[test]
+    fn from_stored_keeps_the_stored_record_dates() {
+        let added = UtcMillis::from_unix_ms(1_500_000_000_000);
+        let edited = UtcMillis::from_unix_ms(1_600_000_000_000);
+        let resource = Resource::from_stored(
+            ResourceId::generate(),
+            ResourceKind::Journal,
+            title("Oeuvre Journal"),
+            vec![],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            added,
+            edited,
+        )
+        .expect("containers carry no creators");
+        assert_eq!((resource.date_added, resource.date_edited), (added, edited));
+    }
+
+    #[test]
+    fn format_recorded_date_renders_month_day_year() {
+        // UTC midnight into January 1 lands on that day, and the epoch's
+        // single-digit day prints unpadded.
+        assert_eq!(
+            format_recorded_date(UtcMillis::from_unix_ms(1_609_459_200_000)),
+            "Jan 1, 2021"
+        );
+        assert_eq!(format_recorded_date(UtcMillis::from_unix_ms(0)), "Jan 1, 1970");
+        // The millisecond half floors, so the label never rolls to the
+        // next day on sub-second remainders.
+        assert_eq!(
+            format_recorded_date(UtcMillis::from_unix_ms(1_609_459_199_999)),
+            "Dec 31, 2020"
+        );
     }
 
     #[test]
@@ -992,9 +1267,95 @@ mod tests {
             None,
             None,
             None,
+            UtcMillis::from_unix_ms(0),
+            UtcMillis::from_unix_ms(0),
         )
         .unwrap_err();
         assert_eq!(err, ResourceError::EmptyCreators);
+    }
+
+    #[test]
+    fn to_new_round_trips_every_field() {
+        let author = PersonId::generate();
+        let editor = PersonId::generate();
+        let new = NewResource {
+            kind: ResourceKind::BookSection,
+            title: title("Nested editing"),
+            creators: vec![
+                CreatorSpec {
+                    person_id: author,
+                    role: CreatorRole::Author,
+                    credited_as: Some(title("A. Author")),
+                },
+                CreatorSpec {
+                    person_id: editor,
+                    role: CreatorRole::Editor,
+                    credited_as: None,
+                },
+            ],
+            publisher: Some("MIT".into()),
+            published: Some(
+                BibliographicDate::try_new(
+                    UtcMillis::jan_1_utc(2021).expect("2021 in calendar"),
+                    Some(title("Spring 2021")),
+                )
+                .expect("valid date"),
+            ),
+            accessed: None,
+            parent_id: Some(ResourceId::generate()),
+            series_id: Some(SeriesId::generate()),
+            series_number: Some(title("3")),
+        };
+        let stored = Resource::try_new(ResourceId::generate(), new.clone()).unwrap();
+        assert_eq!(stored.to_new(), new);
+    }
+
+    #[test]
+    fn from_slug_round_trips_every_kind() {
+        let kinds = [
+            ResourceKind::Book,
+            ResourceKind::JournalArticle,
+            ResourceKind::BookSection,
+            ResourceKind::ConferencePaper,
+            ResourceKind::Preprint,
+            ResourceKind::Thesis,
+            ResourceKind::Report,
+            ResourceKind::Webpage,
+            ResourceKind::Dataset,
+            ResourceKind::Manuscript,
+            ResourceKind::MagazineArticle,
+            ResourceKind::NewspaperArticle,
+            ResourceKind::ComputerProgram,
+            ResourceKind::DictionaryEntry,
+            ResourceKind::EncyclopediaArticle,
+            ResourceKind::BlogPost,
+            ResourceKind::PodcastEpisode,
+            ResourceKind::Journal,
+            ResourceKind::Podcast,
+            ResourceKind::Blog,
+        ];
+        for kind in kinds {
+            assert_eq!(ResourceKind::from_slug(kind.as_str()), Some(kind));
+        }
+        assert_eq!(ResourceKind::from_slug("novel"), None);
+        // Slugs are exact: display case never parses.
+        assert_eq!(ResourceKind::from_slug("Book"), None);
+    }
+
+    #[test]
+    fn creator_role_from_slug_parses_every_role() {
+        let pairs = [
+            ("author", CreatorRole::Author),
+            ("editor", CreatorRole::Editor),
+            ("translator", CreatorRole::Translator),
+            ("contributor", CreatorRole::Contributor),
+            ("host", CreatorRole::Host),
+            ("director", CreatorRole::Director),
+        ];
+        for (slug, role) in pairs {
+            assert_eq!(CreatorRole::from_slug(slug), Some(role));
+        }
+        assert_eq!(CreatorRole::from_slug("publisher"), None);
     }
 
     #[test]
@@ -1097,5 +1458,16 @@ mod tests {
 
         assert_eq!(utc_year_from_millis(0), 1970);
         assert_eq!(utc_year_from_millis(-1), 1969);
+    }
+
+    #[test]
+    fn by_kind_sets_only_kind_and_narrows_the_listing() {
+        let filter = ResourceFilter::by_kind(ResourceKind::Journal);
+        assert_eq!(filter.title, None);
+        assert_eq!(filter.creator, None);
+        assert_eq!(filter.published, None);
+        assert_eq!(filter.kind, Some(ResourceKind::Journal));
+        assert!(filter.is_active());
+        assert!(!ResourceFilter::none().is_active());
     }
 }

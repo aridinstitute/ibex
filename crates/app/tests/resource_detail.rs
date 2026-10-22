@@ -158,6 +158,10 @@ async fn detail_resolves_names_roles_and_linked_titles() {
         detail.series_number.as_ref().map(NonEmptyStr::as_str),
         Some("42")
     );
+    // The detail carries the record-keeping stamps the Added and Edited
+    // rows read; nothing edited the record, so both hold the create stamp.
+    assert_eq!(detail.date_added, article.date_added);
+    assert_eq!(detail.date_edited, article.date_edited);
 }
 
 #[tokio::test]

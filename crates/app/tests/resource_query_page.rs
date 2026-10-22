@@ -28,6 +28,7 @@ fn titled(needle: &str) -> ResourceQuery {
             title: Some(NonEmptyStr::try_new(needle).expect("needle non-empty")),
             creator: None,
             published: None,
+            kind: None,
         },
     }
 }
@@ -41,6 +42,7 @@ fn by_creator(person: PersonId) -> ResourceQuery {
             title: None,
             creator: Some(person),
             published: None,
+            kind: None,
         },
     }
 }
@@ -57,7 +59,16 @@ fn ranged(from: Option<i64>, to: Option<i64>) -> ResourceQuery {
                 from: from.map(UtcMillis::from_unix_ms),
                 to: to.map(UtcMillis::from_unix_ms),
             }),
+            kind: None,
         },
+    }
+}
+
+/// An unsorted listing narrowed to one kind of resource.
+fn of_kind(kind: ResourceKind) -> ResourceQuery {
+    ResourceQuery {
+        sort: None,
+        filter: ResourceFilter::by_kind(kind),
     }
 }
 
@@ -354,6 +365,94 @@ async fn published_ascending_orders_by_instant_not_label() {
 }
 
 #[tokio::test]
+async fn publisher_ascending_orders_names_with_publisherless_last() {
+    let store = MemoryStore::new();
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+
+    // Mixed case pins case-insensitive order, and the row without a
+    // publisher lands at the direction's end.
+    for (title, publisher) in [
+        ("Zed book", Some("Zed Books")),
+        ("MIT book", Some("MIT Press")),
+        ("Self book", None),
+    ] {
+        let mut new = book(Some(grace), title);
+        new.publisher = publisher.map(str::to_owned);
+        store.create_resource(new).await.expect("create resource");
+    }
+
+    let ascending = store
+        .list_resources_query_page(
+            &sorted(ResourceSort::Publisher, SortDirection::Ascending),
+            0,
+            10,
+        )
+        .await
+        .expect("publisher page");
+    assert_eq!(titles(&ascending), ["MIT book", "Zed book", "Self book"]);
+
+    // Descending is the exact reversal: the no-data row moves first.
+    let descending = store
+        .list_resources_query_page(
+            &sorted(ResourceSort::Publisher, SortDirection::Descending),
+            0,
+            10,
+        )
+        .await
+        .expect("publisher page");
+    assert_eq!(titles(&descending), ["Self book", "Zed book", "MIT book"]);
+}
+
+#[tokio::test]
+async fn date_sorts_order_by_the_record_keeping_stamps() {
+    let store = MemoryStore::new();
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+
+    // The stamps come from the create clock, so a 3 ms gap keeps them
+    // distinct.
+    let first = store
+        .create_resource(book(Some(grace), "First"))
+        .await
+        .expect("create first");
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let second = store
+        .create_resource(book(Some(grace), "Second"))
+        .await
+        .expect("create second");
+
+    // date_added never moves: ascending added order stays creation order.
+    let added = store
+        .list_resources_query_page(
+            &sorted(ResourceSort::DateAdded, SortDirection::Ascending),
+            0,
+            10,
+        )
+        .await
+        .expect("dateAdded page");
+    assert_eq!(titles(&added), ["First", "Second"]);
+
+    // An edit restamps date_edited, so the older record becomes the most
+    // recently changed one and moves to the end of the ascending order.
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let mut edit = first.to_new();
+    edit.title = NonEmptyStr::try_new("First, retitled").expect("title non-empty");
+    store
+        .update_resource(first.id, edit)
+        .await
+        .expect("edit first");
+
+    let edited = store
+        .list_resources_query_page(
+            &sorted(ResourceSort::DateEdited, SortDirection::Ascending),
+            0,
+            10,
+        )
+        .await
+        .expect("dateEdited page");
+    assert_eq!(titles(&edited), ["Second", "First, retitled"]);
+}
+
+#[tokio::test]
 async fn descending_reverses_keys_and_moves_no_data_rows_to_the_front() {
     let store = MemoryStore::new();
     let hopper = person(&store, Some("Grace"), Some("Hopper")).await;
@@ -459,6 +558,7 @@ async fn title_filter_keeps_the_sort_order_within_matches() {
             title: Some(NonEmptyStr::try_new("DE").expect("needle non-empty")),
             creator: None,
             published: None,
+            kind: None,
         },
     };
     let first = store
@@ -556,6 +656,7 @@ async fn creator_filter_keeps_the_sort_order_within_matches() {
             title: None,
             creator: Some(ada),
             published: None,
+            kind: None,
         },
     };
     let first = store
@@ -675,6 +776,7 @@ async fn published_range_keeps_sort_order_within_matches() {
                 from: Some(UtcMillis::from_unix_ms(1_500)),
                 to: Some(UtcMillis::from_unix_ms(3_500)),
             }),
+            kind: None,
         },
     };
     let first = store
@@ -722,6 +824,7 @@ async fn filters_and_together() {
                 from: Some(UtcMillis::from_unix_ms(1_500)),
                 to: Some(UtcMillis::from_unix_ms(3_500)),
             }),
+            kind: None,
         },
     };
     let page = store
@@ -730,6 +833,41 @@ async fn filters_and_together() {
         .expect("anded page");
     assert_eq!(titles(&page), ["alpha nodes"]);
     assert_eq!(page.next_offset, None);
+}
+
+#[tokio::test]
+async fn kind_filter_yields_only_that_kind() {
+    let store = MemoryStore::new();
+    let grace = person(&store, Some("Grace"), Some("Hopper")).await;
+    // One container among books: the kind predicate narrows to exactly the
+    // journal, whatever else the library holds.
+    store
+        .create_resource(container("Journal of Nothing"))
+        .await
+        .expect("create container");
+    for title in ["alpha waves", "Beta modes"] {
+        store
+            .create_resource(book(Some(grace), title))
+            .await
+            .expect("create resource");
+    }
+
+    let page = store
+        .list_resources_query_page(&of_kind(ResourceKind::Journal), 0, 10)
+        .await
+        .expect("query page");
+    assert_eq!(titles(&page), ["Journal of Nothing"]);
+
+    // The kind predicate ANDs with the others like any set field. Books
+    // created back to back can interleave under newest-first ids, so the
+    // assertion reads as a set.
+    let page = store
+        .list_resources_query_page(&of_kind(ResourceKind::Book), 0, 10)
+        .await
+        .expect("query page");
+    let mut got = titles(&page);
+    got.sort();
+    assert_eq!(got, ["Beta modes", "alpha waves"]);
 }
 
 fn state_with_sink(sink: &MemorySink) -> AppState {
@@ -914,6 +1052,7 @@ async fn filtered_query_page_command_emits_filter_event() {
                         from: Some(UtcMillis::from_unix_ms(1)),
                         to: None,
                     }),
+                    kind: Some(ResourceKind::Book),
                 },
             },
             0,
@@ -940,6 +1079,11 @@ async fn filtered_query_page_command_emits_filter_event() {
     );
     // An open to-bound never appears.
     assert_eq!(ev.get("resource.filter_published_to"), None);
+    // The kind predicate lands as its slug, alongside the others.
+    assert_eq!(
+        ev.get("resource.filter_kind"),
+        Some(&FieldValue::from("book"))
+    );
 
     // An unfiltered listing carries no filter field.
     let Outcome::ListResourcesQueryPage(_) = state
@@ -952,6 +1096,7 @@ async fn filtered_query_page_command_emits_filter_event() {
     let events = sink.take();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].get("resource.filter_title"), None);
+    assert_eq!(events[0].get("resource.filter_kind"), None);
 }
 
 #[tokio::test]

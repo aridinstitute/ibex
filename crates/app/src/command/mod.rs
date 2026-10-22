@@ -10,7 +10,7 @@ pub use person::{
 };
 pub use resource::{
     CreateResource, GetResource, GetResourceDetail, ListResources, ListResourcesPage,
-    ListResourcesQueryPage,
+    ListResourcesQueryPage, UpdateResource,
 };
 pub use series::CreateSeries;
 
@@ -35,6 +35,7 @@ pub enum Command {
     ListPersons(ListPersons),
     CreateSeries(CreateSeries),
     CreateResource(CreateResource),
+    UpdateResource(UpdateResource),
     GetResource(GetResource),
     GetResourceDetail(GetResourceDetail),
     ListResources(ListResources),
@@ -55,6 +56,7 @@ pub enum Outcome {
     ListPersons(Vec<Person>),
     CreateSeries(Series),
     CreateResource(Resource),
+    UpdateResource(Resource),
     GetResource(Resource),
     GetResourceDetail(ResourceDetail),
     ListResources(Vec<ResourceSummary>),
@@ -102,6 +104,7 @@ impl Command {
             Command::ListPersons(_) => ListPersons::NAME,
             Command::CreateSeries(_) => CreateSeries::NAME,
             Command::CreateResource(_) => CreateResource::NAME,
+            Command::UpdateResource(_) => UpdateResource::NAME,
             Command::GetResource(_) => GetResource::NAME,
             Command::GetResourceDetail(_) => GetResourceDetail::NAME,
             Command::ListResources(_) => ListResources::NAME,
@@ -143,6 +146,7 @@ pub(crate) async fn dispatch(
         Command::ListPersons(c) => drive(c, state, ev).await,
         Command::CreateSeries(c) => drive(c, state, ev).await,
         Command::CreateResource(c) => drive(c, state, ev).await,
+        Command::UpdateResource(c) => drive(c, state, ev).await,
         Command::GetResource(c) => drive(c, state, ev).await,
         Command::GetResourceDetail(c) => drive(c, state, ev).await,
         Command::ListResources(c) => drive(c, state, ev).await,

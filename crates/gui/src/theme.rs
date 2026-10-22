@@ -23,8 +23,9 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     let pick = |light: u32, dark_value: u32| if dark { dark_value } else { light };
     let blue = rgb(pick(0x0064ff, 0x0a84ff)).into();
     // Text selections and dropdown highlights tint the surface, because
-    // their text keeps the theme foreground. Table rows fill solid, and
-    // the grid switches their cells to `primary_foreground`.
+    // their text keeps the theme foreground. Table selection fills solid,
+    // and the grid switches the highlighted row or column cells to
+    // `primary_foreground`.
     let tint = rgba(pick(0x0064ff47, 0x0a84ff4d)).into();
 
     colors.primary = blue;
