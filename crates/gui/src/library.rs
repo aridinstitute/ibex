@@ -80,15 +80,15 @@ const COLUMN_KEYS: [&str; COLUMNS] = [
 /// grid opens readable on narrower windows.
 const DEFAULT_TITLE_WIDTH: f32 = 310.;
 
-const CELL_TEXT_SIZE: Pixels = px(13.);
+const CELL_TEXT_SIZE: Pixels = px(12.);
 /// Inline editors read slightly larger than static cells so the caret and
 /// typed text stay obvious on the accent row.
-const INLINE_CELL_TEXT_SIZE: Pixels = px(14.);
+const INLINE_CELL_TEXT_SIZE: Pixels = px(13.);
 /// Kind dropdown is wider than the 28px icon column so labels aren't clipped.
 const INLINE_KIND_MENU_WIDTH: Pixels = px(220.);
-/// Header labels are one step below the cell text: the table default is 9px
-/// (`text_xs` at the 12px rem), which reads as an afterthought.
-const HEADER_TEXT_SIZE: Pixels = px(11.);
+/// Header labels are one step below the cell text; the kit's default
+/// `text_xs` reads too small at this base font size.
+const HEADER_TEXT_SIZE: Pixels = px(10.);
 
 /// Continuation for the next scroll page, keyed to the listing mode: the
 /// plain newest-first listing walks id cursors, a queried listing walks
@@ -2650,8 +2650,7 @@ impl LibraryApp {
 
     /// The right-side sidebar: the edit form while one is open, the detail
     /// fields otherwise. The form keeps the sidebar's anchor, width, and
-    /// surface but drops the kind tint, so its inputs sit on a plain
-    /// background. The detail shows the edit pencil below the byline; no
+    /// surface. The detail shows the edit pencil below the byline; no
     /// row selected means nothing to edit, and an open form means the
     /// sidebar already is the editor.
     fn render_side_panel(&self, cx: &mut Context<Self>) -> Div {

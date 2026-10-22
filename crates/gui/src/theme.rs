@@ -10,7 +10,7 @@ pub fn apply(mode: ThemeMode, cx: &mut App) {
         theme.colors = palette(mode, theme.colors);
         // Root sets the window rem size from this, so every rem-based size
         // in the kit shrinks with it.
-        theme.font_size = px(12.);
+        theme.font_size = px(11.);
     });
 }
 
