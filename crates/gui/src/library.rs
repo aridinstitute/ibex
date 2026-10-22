@@ -589,7 +589,13 @@ impl TableDelegate for LibraryDelegate {
         if let Some(form) = self.inline_editing_row(row_ix) {
             let on_accent = cell_on_accent(self.selected_row, self.selected_col, row_ix, col_ix);
             let (text, muted) = cell_text_colors(on_accent, cx.theme());
-            let cell = cell.text_color(text).text_size(INLINE_CELL_TEXT_SIZE);
+            let active = InlineField::from_col(col_ix) == Some(form.active_field);
+            let cell = inline_active_cell(
+                cell.text_color(text).text_size(INLINE_CELL_TEXT_SIZE),
+                active,
+                on_accent,
+                cx.theme(),
+            );
             return match col_ix {
                 COL_KIND => {
                     // Icon is painted by us (Combobox triggers stay invisible on
@@ -1145,6 +1151,25 @@ fn cell_on_accent(
     selected_row == Some(row_ix) || selected_col == Some(col_ix)
 }
 
+/// Hairline around the field Tab currently owns, so the edit row's accent
+/// fill alone isn't the only cue for which cell is active.
+fn inline_active_cell(
+    cell: Div,
+    active: bool,
+    on_accent: bool,
+    colors: &ThemeColor,
+) -> Div {
+    if !active {
+        return cell;
+    }
+    let border = if on_accent {
+        colors.primary_foreground
+    } else {
+        colors.ring
+    };
+    cell.border_1().border_color(border).rounded(px(2.))
+}
+
 /// (primary, secondary) cell text. Accent-filled cells use the accent's
 /// foreground; secondary columns stay slightly dimmed for hierarchy.
 fn cell_text_colors(on_accent: bool, colors: &ThemeColor) -> (Hsla, Hsla) {
@@ -1680,7 +1705,9 @@ impl LibraryApp {
 
         // After-dispatch observer: Input/DataTable may consume a single Esc,
         // but a second within the window still clears filters from anywhere.
-        // While inline edit is open, the first Esc cancels that session.
+        // While inline edit is open, the first Esc cancels that session —
+        // unless a Combobox menu was open (List in the stack): that Esc only
+        // dismisses the menu.
         cx.observe_keystrokes(|this, event, window, cx| {
             if event.keystroke.key != "escape"
                 || event.keystroke.modifiers.modified()
@@ -1689,6 +1716,14 @@ impl LibraryApp {
                 return;
             }
             if this.has_inline(cx) {
+                let combobox_menu_open = event
+                    .context_stack
+                    .iter()
+                    .any(|ctx| ctx.contains("List"));
+                if combobox_menu_open {
+                    this.last_escape_at = None;
+                    return;
+                }
                 this.last_escape_at = None;
                 this.cancel_inline(cx);
                 this.focus_table(window, cx);
@@ -2010,6 +2045,59 @@ impl LibraryApp {
         cx.notify();
     }
 
+    /// Mark which inline cell owns the caret / menu; drives the active border.
+    fn set_inline_active_field(&mut self, field: InlineField, cx: &mut Context<Self>) {
+        let changed = self.table.update(cx, |table, cx| {
+            let Some(form) = table
+                .delegate_mut()
+                .inline
+                .as_mut()
+                .and_then(|s| s.ready_form_mut())
+            else {
+                return false;
+            };
+            if form.active_field == field {
+                return false;
+            }
+            form.active_field = field;
+            cx.notify();
+            true
+        });
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Keep `active_field` in sync when the user clicks into a cell (Tab
+    /// already updates it via [`Self::focus_inline_delta`]).
+    fn wire_inline_active_tracking(
+        form: &InlineRowEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (field, input) in [
+            (InlineField::Title, &form.title),
+            (InlineField::Published, &form.published_year),
+            (InlineField::Publisher, &form.publisher),
+        ] {
+            cx.subscribe_in(input, window, move |this, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Focus) {
+                    this.set_inline_active_field(field, cx);
+                }
+            })
+            .detach();
+        }
+        for (field, combo) in [
+            (InlineField::Kind, form.kind.focus_handle(cx)),
+            (InlineField::Creators, form.creators.focus_handle(cx)),
+        ] {
+            cx.on_focus(&combo, window, move |this, _window, cx| {
+                this.set_inline_active_field(field, cx);
+            })
+            .detach();
+        }
+    }
+
     /// Focus the inline editor for `col_ix`, keeping the edit row selected.
     fn focus_inline_col(&mut self, col_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let field = InlineField::from_col(col_ix);
@@ -2118,6 +2206,7 @@ impl LibraryApp {
                         // Land the form in the delegate before focusing so
                         // the next paint owns the focused Input entity.
                         let title = form.title.clone();
+                        Self::wire_inline_active_tracking(&form, window, cx);
                         app.table.update(cx, |table, _| {
                             table.delegate_mut().inline =
                                 Some(InlineSession::Ready(Box::new(form)));
@@ -2160,6 +2249,7 @@ impl LibraryApp {
             _ = app.update_in(window, |app, window, cx| {
                 let form = InlineRowEdit::for_create(&people, window, cx);
                 let title = form.title.clone();
+                Self::wire_inline_active_tracking(&form, window, cx);
                 app.table.update(cx, |table, cx| {
                     table.col_selectable = false;
                     table.delegate_mut().inline = Some(InlineSession::Create(Box::new(form)));
