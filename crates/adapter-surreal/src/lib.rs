@@ -235,6 +235,12 @@ impl SurrealStore {
             .await;
 
         let _ = self.backfill_record_dates().await;
+        self.db
+            .query(include_str!("primary_creator_sort.surql"))
+            .await
+            .map_err(map_err)?
+            .check()
+            .map_err(map_err)?;
 
         Ok(())
     }
@@ -801,11 +807,14 @@ impl Store for SurrealStore {
     }
 
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError> {
-        let doc: Option<ResourceDoc> = self
+        // Storage-only sort keys never enter the detail projection.
+        let mut response = self
             .db
-            .select(Self::resource_key(id))
+            .query("SELECT * OMIT primary_creator_last_name FROM ONLY $resource")
+            .bind(("resource", Self::resource_key(id)))
             .await
             .map_err(map_err)?;
+        let doc: Option<ResourceDoc> = response.take(0).map_err(map_err)?;
         let doc = doc.ok_or_else(|| StoreError::not_found(format!("resource {id}")))?;
         let creators = self.load_creators_from_edges(id).await?;
 
@@ -979,30 +988,15 @@ impl Store for SurrealStore {
                      LIMIT $limit START $offset"
                 )
             }
-            // The primary-creator key needs the first created edge per row:
-            // a correlated subquery aliases it, the middle level computes
-            // the family-name key over that alias, and the outer level adds
-            // the no-data marker — one level per reference so the edge query
-            // runs once per row.
+            // The key is maintained on writes, avoiding per-row creator lookups.
             Some((ResourceSort::PrimaryCreator, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, sort_key, \
-                            (IF sort_key THEN false ELSE true END) AS sort_missing \
-                     FROM ( \
-                         SELECT *, \
-                             (IF first[0].credited_as THEN \
-                                  array::last(string::split(first[0].credited_as, ' ')) \
-                              ELSE IF first[0].name.last THEN first[0].name.last \
-                              ELSE IF first[0].name.first THEN first[0].name.first \
-                              ELSE NONE END) AS sort_key \
-                         FROM ( \
-                             SELECT *, (SELECT order, credited_as, in.name AS name FROM created \
-                                  WHERE out = $parent.id ORDER BY order LIMIT 1) AS first \
-                             FROM {from_sql}{where_sql} \
-                         ) \
-                     ) \
-                     ORDER BY sort_missing {dir}, sort_key COLLATE {dir}, id DESC \
+                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                            primary_creator_last_name, \
+                            (IF primary_creator_last_name THEN false ELSE true END) AS sort_missing \
+                     FROM {from_sql}{where_sql} \
+                     ORDER BY sort_missing {dir}, primary_creator_last_name COLLATE {dir}, id DESC \
                      LIMIT $limit START $offset"
                 )
             }
@@ -1460,7 +1454,100 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "surrealdb 3.3.4's Mem engine drops ORDER BY when the row source is not a plain table scan and orders nondeterministically on the record id alone; known upstream regression, passes on the file engine the GUI runs on"]
+    async fn primary_creator_last_name_is_stored_and_tracks_related_writes() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let person = store
+            .create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let resource = sortable_resource(&store, vec![(person.id, None)], "Algorithms", None).await;
+        let read_key = || async {
+            let mut response = store
+                .db
+                .query("SELECT VALUE primary_creator_last_name FROM ONLY $resource")
+                .bind(("resource", SurrealStore::resource_key(resource.id)))
+                .await
+                .unwrap();
+            response.take::<Option<String>>(0).unwrap()
+        };
+        assert_eq!(read_key().await.as_deref(), Some("Lovelace"));
+        store
+            .update_person(
+                person.id,
+                Name::try_new(Some("Ada"), Some("Byron"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(read_key().await.as_deref(), Some("Byron"));
+        store
+            .db
+            .query("UPDATE created SET credited_as = 'A. King' WHERE out = $resource")
+            .bind(("resource", SurrealStore::resource_key(resource.id)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(read_key().await.as_deref(), Some("King"));
+        // Reordering an existing edge changes which creator supplies the key.
+        let other = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        store
+            .db
+            .query("RELATE $person->created->$resource SET order = 1, role = 'author'")
+            .bind(("person", SurrealStore::person_key(other.id)))
+            .bind(("resource", SurrealStore::resource_key(resource.id)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(read_key().await.as_deref(), Some("King"));
+        store
+            .db
+            .query("UPDATE created SET order = 2 WHERE out = $resource AND credited_as = 'A. King'")
+            .bind(("resource", SurrealStore::resource_key(resource.id)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(read_key().await.as_deref(), Some("Hopper"));
+        // Simulate an older database with neither the field nor migration marker.
+        store.db.query("REMOVE FIELD primary_creator_last_name ON resource; UPDATE resource UNSET primary_creator_last_name; DELETE oeuvre_migration:primary_creator_last_name;")
+            .await.unwrap().check().unwrap();
+        store.ensure_schema().await.unwrap();
+        assert_eq!(read_key().await.as_deref(), Some("Hopper"));
+        // Refreshing sort metadata must not mark the resource as edited.
+        let detail = store.get_resource(resource.id).await.unwrap();
+        assert_eq!(detail.date_edited, resource.date_edited);
+        store
+            .db
+            .query("DELETE created WHERE out = $resource")
+            .bind(("resource", SurrealStore::resource_key(resource.id)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(read_key().await, None);
+        assert_eq!(
+            store
+                .get_resource(resource.id)
+                .await
+                .unwrap()
+                .title
+                .as_str(),
+            "Algorithms"
+        );
+    }
+
+    #[tokio::test]
     async fn sorted_primary_creator_keys_on_family_name_from_the_edges() {
         let store = SurrealStore::open_memory().await.unwrap();
         let hopper = store
