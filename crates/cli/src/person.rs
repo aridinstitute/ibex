@@ -1,8 +1,6 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
-use oeuvre_app::command::{
-    CreatePerson, DeletePerson, GetPerson, ListPersons, UpdatePerson,
-};
+use oeuvre_app::command::{CreatePerson, DeletePerson, GetPerson, ListPersons, UpdatePerson};
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{Person, PersonId};
 
@@ -59,9 +57,7 @@ async fn add(state: &AppState, name: NameFlags) -> Result<()> {
 
 async fn get(state: &AppState, id: &str) -> Result<()> {
     let id = parse_id(id)?;
-    let Outcome::GetPerson(person) = state
-        .execute(Command::GetPerson(GetPerson { id }))
-        .await?
+    let Outcome::GetPerson(person) = state.execute(Command::GetPerson(GetPerson { id })).await?
     else {
         bail!("unexpected outcome from get_person");
     };
@@ -71,9 +67,7 @@ async fn get(state: &AppState, id: &str) -> Result<()> {
 
 async fn list(state: &AppState, flags: NameFlags) -> Result<()> {
     let filter = flags.into_filter();
-    let Outcome::ListPersons(people) = state
-        .execute(Command::ListPersons(ListPersons))
-        .await?
+    let Outcome::ListPersons(people) = state.execute(Command::ListPersons(ListPersons)).await?
     else {
         bail!("unexpected outcome from list_persons");
     };
@@ -101,9 +95,7 @@ async fn update(state: &AppState, id: &str, name: NameFlags) -> Result<()> {
     let id = parse_id(id)?;
     let name = name.resolve_for_write()?;
 
-    let Outcome::GetPerson(existing) = state
-        .execute(Command::GetPerson(GetPerson { id }))
-        .await?
+    let Outcome::GetPerson(existing) = state.execute(Command::GetPerson(GetPerson { id })).await?
     else {
         bail!("unexpected outcome from get_person");
     };

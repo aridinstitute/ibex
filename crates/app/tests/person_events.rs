@@ -38,8 +38,7 @@ async fn person_crud_round_trip() {
     assert_eq!(got.id, created.id);
     assert_eq!(got.name.display(), "Augustine");
 
-    let updated_name =
-        Name::try_new(Some("Aurelius"), Some("Augustine"), None::<&str>).unwrap();
+    let updated_name = Name::try_new(Some("Aurelius"), Some("Augustine"), None::<&str>).unwrap();
     let Outcome::UpdatePerson(updated) = state
         .execute(Command::UpdatePerson(UpdatePerson {
             id: created.id,
@@ -291,14 +290,8 @@ async fn list_persons_returns_all() {
 async fn find_returns_multiple_people_sharing_a_name() {
     let store = MemoryStore::new();
     let shared = Name::try_new(Some("John"), Some("Smith"), None::<&str>).unwrap();
-    let a = store
-        .create_person(shared.clone(), vec![])
-        .await
-        .unwrap();
-    let b = store
-        .create_person(shared.clone(), vec![])
-        .await
-        .unwrap();
+    let a = store.create_person(shared.clone(), vec![]).await.unwrap();
+    let b = store.create_person(shared.clone(), vec![]).await.unwrap();
 
     let hits = store.find_persons_by_name(&shared).await.unwrap();
     assert_eq!(hits.len(), 2);

@@ -72,19 +72,19 @@ impl DbWorker {
                                 limit,
                                 reply,
                             } => {
-                                let result = state
-                                    .execute(Command::ListResourcesPage(ListResourcesPage {
-                                        before,
-                                        limit,
-                                    }))
-                                    .await
-                                    .map_err(|e| e.to_string())
-                                    .and_then(|outcome| match outcome {
-                                        Outcome::ListResourcesPage(page) => Ok(page),
-                                        _ => Err(
-                                            "unexpected outcome from list_resources_page".into(),
-                                        ),
-                                    });
+                                let result =
+                                    state
+                                        .execute(Command::ListResourcesPage(ListResourcesPage {
+                                            before,
+                                            limit,
+                                        }))
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                        .and_then(|outcome| match outcome {
+                                            Outcome::ListResourcesPage(page) => Ok(page),
+                                            _ => Err("unexpected outcome from list_resources_page"
+                                                .into()),
+                                        });
                                 let _ = reply.send(result);
                             }
                             DbRequest::ListQueryPage {
@@ -105,25 +105,24 @@ impl DbWorker {
                                     .map_err(|e| e.to_string())
                                     .and_then(|outcome| match outcome {
                                         Outcome::ListResourcesQueryPage(page) => Ok(page),
-                                        _ => Err(
-                                            "unexpected outcome from list_resources_query_page"
-                                                .into(),
-                                        ),
+                                        _ => {
+                                            Err("unexpected outcome from list_resources_query_page"
+                                                .into())
+                                        }
                                     });
                                 let _ = reply.send(result);
                             }
                             DbRequest::GetDetail { id, reply } => {
                                 let result = state
-                                    .execute(Command::GetResourceDetail(GetResourceDetail {
-                                        id,
-                                    }))
+                                    .execute(Command::GetResourceDetail(GetResourceDetail { id }))
                                     .await
                                     .map_err(|e| e.to_string())
                                     .and_then(|outcome| match outcome {
                                         Outcome::GetResourceDetail(detail) => Ok(detail),
-                                        _ => Err(
-                                            "unexpected outcome from get_resource_detail".into(),
-                                        ),
+                                        _ => {
+                                            Err("unexpected outcome from get_resource_detail"
+                                                .into())
+                                        }
                                     });
                                 let _ = reply.send(result);
                             }
@@ -140,10 +139,7 @@ impl DbWorker {
                             }
                             DbRequest::UpdateResource { id, new, reply } => {
                                 let result = state
-                                    .execute(Command::UpdateResource(UpdateResource {
-                                        id,
-                                        new,
-                                    }))
+                                    .execute(Command::UpdateResource(UpdateResource { id, new }))
                                     .await
                                     .map_err(|e| e.to_string())
                                     .and_then(|outcome| match outcome {
@@ -308,7 +304,9 @@ mod tests {
     #[tokio::test]
     async fn worker_walks_pages() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        oeuvre_app::seed::seed_demo_library(&store, 5)
+            .await
+            .unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -334,7 +332,9 @@ mod tests {
     #[tokio::test]
     async fn worker_fetches_resource_detail() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        oeuvre_app::seed::seed_demo_library(&store, 5)
+            .await
+            .unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -361,7 +361,9 @@ mod tests {
     #[tokio::test]
     async fn worker_walks_query_pages() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        oeuvre_app::seed::seed_demo_library(&store, 5)
+            .await
+            .unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -406,17 +408,20 @@ mod tests {
     #[tokio::test]
     async fn worker_filters_query_pages_by_title() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        oeuvre_app::seed::seed_demo_library(&store, 5)
+            .await
+            .unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
-        // Exactly one seeded row carries "Networks" in its title.
+        // A mixed-case substring must match inside the title, not just its prefix.
         let page = worker
             .list_query_page(
                 oeuvre_core::ResourceQuery {
                     sort: None,
                     filter: oeuvre_core::ResourceFilter {
-                        title: Some(oeuvre_core::NonEmptyStr::try_new("Networks").unwrap()),
+                        search: None,
+                        title: Some(oeuvre_core::NonEmptyStr::try_new("nEtWoR").unwrap()),
                         creator: None,
                         published: None,
                         kind: None,
@@ -435,7 +440,9 @@ mod tests {
     #[tokio::test]
     async fn worker_filters_query_pages_by_kind() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        oeuvre_app::seed::seed_demo_library(&store, 5)
+            .await
+            .unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -464,7 +471,9 @@ mod tests {
     #[tokio::test]
     async fn worker_filters_query_pages_by_creator() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        oeuvre_app::seed::seed_demo_library(&store, 5)
+            .await
+            .unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -483,6 +492,7 @@ mod tests {
                 oeuvre_core::ResourceQuery {
                     sort: None,
                     filter: oeuvre_core::ResourceFilter {
+                        search: None,
                         title: None,
                         creator: Some(ada.id),
                         published: None,
@@ -508,7 +518,9 @@ mod tests {
     #[tokio::test]
     async fn worker_filters_query_pages_by_published_range() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        oeuvre_app::seed::seed_demo_library(&store, 5)
+            .await
+            .unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -519,6 +531,7 @@ mod tests {
                 oeuvre_core::ResourceQuery {
                     sort: None,
                     filter: oeuvre_core::ResourceFilter {
+                        search: None,
                         title: None,
                         creator: None,
                         published: Some(oeuvre_core::PublishedRange {
@@ -547,7 +560,9 @@ mod tests {
     #[tokio::test]
     async fn worker_ands_all_three_filters() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        oeuvre_app::seed::seed_demo_library(&store, 5)
+            .await
+            .unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -565,6 +580,7 @@ mod tests {
                 oeuvre_core::ResourceQuery {
                     sort: None,
                     filter: oeuvre_core::ResourceFilter {
+                        search: None,
                         title: Some(oeuvre_core::NonEmptyStr::try_new("0").unwrap()),
                         creator: Some(ada.id),
                         published: Some(oeuvre_core::PublishedRange {
@@ -587,7 +603,9 @@ mod tests {
     #[tokio::test]
     async fn worker_updates_resource_through_command() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5).await.unwrap();
+        oeuvre_app::seed::seed_demo_library(&store, 5)
+            .await
+            .unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -608,7 +626,11 @@ mod tests {
 
         // The listing row the grid shows carries the new title too.
         let fresh = worker.list_page(None, 3).await.unwrap();
-        let row = fresh.rows.iter().find(|row| row.id == id).expect("row kept");
+        let row = fresh
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .expect("row kept");
         assert_eq!(row.title.as_str(), "Retitled by worker");
 
         let err = worker
@@ -621,7 +643,9 @@ mod tests {
     #[tokio::test]
     async fn worker_creates_resource_through_command() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 2).await.unwrap();
+        oeuvre_app::seed::seed_demo_library(&store, 2)
+            .await
+            .unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -646,5 +670,4 @@ mod tests {
         let again = worker.resource(created.id).await.unwrap();
         assert_eq!(again.title.as_str(), "Inline draft book");
     }
-
 }

@@ -43,7 +43,10 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
     // Containers and the parent book must exist before the items that
     // reference them.
     let journal = store
-        .create_resource(container(ResourceKind::Journal, "Journal of Citation Studies"))
+        .create_resource(container(
+            ResourceKind::Journal,
+            "Journal of Citation Studies",
+        ))
         .await?
         .id;
     let podcast = store
@@ -202,14 +205,16 @@ fn authors_for(n: usize, people: &[PersonId]) -> Vec<CreatorSpec> {
 }
 
 fn published(year: u16) -> Option<BibliographicDate> {
-    Some(BibliographicDate::try_new(
-        // Real year instants, not one shared anchor: published-range
-        // filters bracket whole years, so the seed must actually spread
-        // across the years its labels claim.
-        UtcMillis::jan_1_utc(i64::from(year)).expect("seed years are civil"),
-        Some(non_empty(&year.to_string())),
+    Some(
+        BibliographicDate::try_new(
+            // Real year instants, not one shared anchor: published-range
+            // filters bracket whole years, so the seed must actually spread
+            // across the years its labels claim.
+            UtcMillis::jan_1_utc(i64::from(year)).expect("seed years are civil"),
+            Some(non_empty(&year.to_string())),
+        )
+        .expect("year instants are valid"),
     )
-    .expect("year instants are valid"))
 }
 
 fn non_empty(s: &str) -> NonEmptyStr {
@@ -249,8 +254,7 @@ mod tests {
             .collect();
         assert_eq!(episodes.len(), 1);
         assert!(episodes.iter().all(|row| {
-            row.container_title.as_ref().map(NonEmptyStr::as_str)
-                == Some("The Bibliographic Hour")
+            row.container_title.as_ref().map(NonEmptyStr::as_str) == Some("The Bibliographic Hour")
         }));
 
         let first = rows
@@ -265,9 +269,10 @@ mod tests {
 
         // Years are fuzzy display labels, so they stay exact without
         // calendar math.
-        assert!(rows
-            .iter()
-            .filter_map(|row| row.published_label.as_ref())
-            .all(|label| label.as_str().parse::<u16>().is_ok()));
+        assert!(
+            rows.iter()
+                .filter_map(|row| row.published_label.as_ref())
+                .all(|label| label.as_str().parse::<u16>().is_ok())
+        );
     }
 }

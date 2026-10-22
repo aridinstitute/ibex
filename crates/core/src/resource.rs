@@ -225,14 +225,13 @@ impl UtcMillis {
     /// The year's January 1, midnight UTC — the boundary a year-bracketed
     /// range keys on. `None` when the year falls outside the calendar.
     pub fn jan_1_utc(year: i64) -> Option<Self> {
-        let date = time::Date::from_calendar_date(
-            i32::try_from(year).ok()?,
-            time::Month::January,
-            1,
-        )
-        .ok()?;
+        let date =
+            time::Date::from_calendar_date(i32::try_from(year).ok()?, time::Month::January, 1)
+                .ok()?;
         let midnight = time::PrimitiveDateTime::new(date, time::Time::MIDNIGHT);
-        Some(Self::from_unix_ms(midnight.assume_utc().unix_timestamp() * 1_000))
+        Some(Self::from_unix_ms(
+            midnight.assume_utc().unix_timestamp() * 1_000,
+        ))
     }
 }
 
@@ -384,6 +383,8 @@ impl ResourceQuery {
 /// matches every resource.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResourceFilter {
+    /// Case-insensitive substring matching the title OR publisher.
+    pub search: Option<NonEmptyStr>,
     /// Case-insensitive substring the title must contain.
     pub title: Option<NonEmptyStr>,
     /// A person with a creator edge to the resource, sole or shared.
@@ -400,6 +401,7 @@ impl ResourceFilter {
     /// The filter that matches every resource.
     pub fn none() -> Self {
         Self {
+            search: None,
             title: None,
             creator: None,
             published: None,
@@ -418,6 +420,7 @@ impl ResourceFilter {
     /// True when at least one predicate is set, so the listing narrows.
     pub fn is_active(&self) -> bool {
         self.title.is_some()
+            || self.search.is_some()
             || self.creator.is_some()
             || self.kind.is_some()
             || self
@@ -585,9 +588,8 @@ const RECORDED_MONTHS: [&str; 12] = [
 /// table reads the same day whatever timezone it opens in, and tests stay
 /// deterministic.
 pub fn format_recorded_date(instant: UtcMillis) -> String {
-    let stamp =
-        time::OffsetDateTime::from_unix_timestamp(instant.as_unix_ms().div_euclid(1_000))
-            .expect("recorded stamp within OffsetDateTime range");
+    let stamp = time::OffsetDateTime::from_unix_timestamp(instant.as_unix_ms().div_euclid(1_000))
+        .expect("recorded stamp within OffsetDateTime range");
     format!(
         "{} {}, {}",
         RECORDED_MONTHS[(stamp.month() as usize) - 1],
@@ -971,7 +973,10 @@ mod tests {
             format_recorded_date(UtcMillis::from_unix_ms(1_609_459_200_000)),
             "Jan 1, 2021"
         );
-        assert_eq!(format_recorded_date(UtcMillis::from_unix_ms(0)), "Jan 1, 1970");
+        assert_eq!(
+            format_recorded_date(UtcMillis::from_unix_ms(0)),
+            "Jan 1, 1970"
+        );
         // The millisecond half floors, so the label never rolls to the
         // next day on sub-second remainders.
         assert_eq!(

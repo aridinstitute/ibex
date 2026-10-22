@@ -19,8 +19,8 @@ use oeuvre_core::{
     StoreError,
 };
 
-use crate::event::Event;
 use crate::AppState;
+use crate::event::Event;
 
 /// Every operation Oeuvre supports. Closed set; shells enumerate this.
 /// Variants carry already-validated domain inputs — parsing happens in the shell.
@@ -123,11 +123,7 @@ pub(crate) trait Handler: Sized + Send {
     /// Record input dimensions before `run`, so they land even if `run` fails early.
     fn annotate(&self, _ev: &mut Event) {}
 
-    async fn run(
-        self,
-        state: &AppState,
-        ev: &mut Event,
-    ) -> Result<Self::Output, CommandError>;
+    async fn run(self, state: &AppState, ev: &mut Event) -> Result<Self::Output, CommandError>;
 }
 
 /// Exhaustive: a new `Command` variant without an arm fails to compile.

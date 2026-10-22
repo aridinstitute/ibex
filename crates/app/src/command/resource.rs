@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use oeuvre_core::{
-    creator_label_name, detail_creator_groups, Creator, NewResource, PersonId, Resource,
-    ResourceDetail, ResourceError, ResourceId, ResourcePage, ResourceQuery, ResourceSummary,
-    SeriesId, SortedResourcePage, StoreError,
+    Creator, NewResource, PersonId, Resource, ResourceDetail, ResourceError, ResourceId,
+    ResourcePage, ResourceQuery, ResourceSummary, SeriesId, SortedResourcePage, StoreError,
+    creator_label_name, detail_creator_groups,
 };
 
 use crate::event::{self, Event};
@@ -392,7 +392,9 @@ impl Handler for GetResourceDetail {
             creators: detail_creator_groups(&resource.creators, |creator| {
                 creator_label_name(
                     creator.credited_as.as_ref(),
-                    people.get(&creator.person_id).expect("person fetched above"),
+                    people
+                        .get(&creator.person_id)
+                        .expect("person fetched above"),
                 )
             }),
             publisher: resource.publisher,
@@ -433,7 +435,9 @@ impl Handler for ListResourcesPage {
         // A zero limit has no meaning at the store layer, so reject it at the
         // command boundary where invalid input maps to an exit code.
         if self.limit == 0 {
-            return Err(CommandError::Invalid("page limit must be at least 1".into()));
+            return Err(CommandError::Invalid(
+                "page limit must be at least 1".into(),
+            ));
         }
         let page = state
             .store()
@@ -456,6 +460,9 @@ impl Handler for ListResourcesQueryPage {
         if let Some(title) = self.query.filter.title.as_ref() {
             ev.set(event::RESOURCE_FILTER_TITLE, title.as_str().to_owned());
         }
+        if let Some(search) = self.query.filter.search.as_ref() {
+            ev.set(event::RESOURCE_FILTER_SEARCH, search.as_str().to_owned());
+        }
         if let Some(creator) = self.query.filter.creator {
             ev.set(event::RESOURCE_FILTER_CREATOR, creator.to_string());
         }
@@ -474,15 +481,13 @@ impl Handler for ListResourcesQueryPage {
         ev.set(event::RESOURCE_PAGE_LIMIT, self.limit);
     }
 
-    async fn run(
-        self,
-        state: &AppState,
-        _ev: &mut Event,
-    ) -> Result<ListedQueryPage, CommandError> {
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<ListedQueryPage, CommandError> {
         // A zero limit has no meaning at the store layer, so reject it at
         // the command boundary where invalid input maps to an exit code.
         if self.limit == 0 {
-            return Err(CommandError::Invalid("page limit must be at least 1".into()));
+            return Err(CommandError::Invalid(
+                "page limit must be at least 1".into(),
+            ));
         }
         let page = state
             .store()

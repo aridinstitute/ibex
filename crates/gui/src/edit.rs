@@ -4,12 +4,12 @@
 //! rules run under plain unit tests; `LibraryApp` owns the input entities
 //! and wires them to the worker.
 
-use gpui_kit::component::searchable_list::SearchableListItem;
 use gpui_kit::SharedString;
+use gpui_kit::component::searchable_list::SearchableListItem;
 
 use oeuvre_core::{
-    utc_year_from_millis, BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr,
-    PersonId, Resource, ResourceId, ResourceKind, SeriesId, UtcMillis,
+    BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId, Resource,
+    ResourceId, ResourceKind, SeriesId, UtcMillis, utc_year_from_millis,
 };
 
 use crate::kind::kind_label;
@@ -43,7 +43,10 @@ pub fn prefill_draft(record: &Resource) -> EditDraft {
         publisher: record.publisher.clone().unwrap_or_default(),
         published_year: date_year(record.published.as_ref()),
         accessed_year: date_year(record.accessed.as_ref()),
-        series: record.series_id.map(|id| id.to_string()).unwrap_or_default(),
+        series: record
+            .series_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
         series_number: record
             .series_number
             .as_ref()
@@ -102,8 +105,7 @@ pub fn build_create(draft: &EditDraft) -> Result<NewResource, String> {
 /// Shared field merge for update and create payloads.
 fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), String> {
     let title = draft.title.trim();
-    edit.title =
-        NonEmptyStr::try_new(title).map_err(|_| "Title must not be empty".to_owned())?;
+    edit.title = NonEmptyStr::try_new(title).map_err(|_| "Title must not be empty".to_owned())?;
 
     edit.kind = draft.kind;
     edit.parent_id = draft.parent;
@@ -123,8 +125,7 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), S
     let number = draft.series_number.trim();
     edit.series_number = (!number.is_empty())
         .then(|| {
-            NonEmptyStr::try_new(number)
-                .map_err(|_| "Series number must not be empty".to_owned())
+            NonEmptyStr::try_new(number).map_err(|_| "Series number must not be empty".to_owned())
         })
         .transpose()?;
 
@@ -203,8 +204,8 @@ fn year_field(label: &str, text: &str) -> Result<Option<BibliographicDate>, Stri
     let year: i64 = text
         .parse()
         .map_err(|_| format!("{label} must be a whole year, got '{text}'"))?;
-    let instant = UtcMillis::jan_1_utc(year)
-        .ok_or_else(|| format!("{label} is outside the calendar"))?;
+    let instant =
+        UtcMillis::jan_1_utc(year).ok_or_else(|| format!("{label} is outside the calendar"))?;
     BibliographicDate::try_new(instant, None)
         .map(Some)
         .map_err(|_| format!("{label} is outside the calendar"))
@@ -213,8 +214,8 @@ fn year_field(label: &str, text: &str) -> Result<Option<BibliographicDate>, Stri
 #[cfg(test)]
 mod tests {
     use super::{
-        EditDraft, KindItem, SearchableListItem, build_create, build_update, creators_from_person_ids,
-        empty_create_draft, kind_items, prefill_draft,
+        EditDraft, KindItem, SearchableListItem, build_create, build_update,
+        creators_from_person_ids, empty_create_draft, kind_items, prefill_draft,
     };
     use oeuvre_core::{
         BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId, Resource,
@@ -283,7 +284,10 @@ mod tests {
         assert_eq!(draft.publisher, "MIT Press");
         assert_eq!(draft.published_year, "1991");
         assert_eq!(draft.accessed_year, "2020");
-        assert_eq!(draft.series, record.series_id.expect("series set").to_string());
+        assert_eq!(
+            draft.series,
+            record.series_id.expect("series set").to_string()
+        );
         assert_eq!(draft.series_number, "LCL 26");
         assert_eq!(draft.creators.len(), 1);
         assert_eq!(draft.creators[0].person_id, record.creators[0].person_id);
@@ -338,7 +342,9 @@ mod tests {
                 .expect("published set")
                 .instant()
                 .as_unix_ms(),
-            UtcMillis::jan_1_utc(2024).expect("year in calendar").as_unix_ms(),
+            UtcMillis::jan_1_utc(2024)
+                .expect("year in calendar")
+                .as_unix_ms(),
         );
         assert_eq!(new.accessed, None);
         assert_eq!(new.series_id, record.series_id);
@@ -417,6 +423,25 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_selection_adds_and_removes_authors_without_losing_existing_credit() {
+        let record = loaded_record();
+        let previous = record.to_new().creators;
+        let existing = previous[0].person_id;
+        let added = PersonId::generate();
+        let mut draft = prefill_draft(&record);
+        draft.creators = creators_from_person_ids(&[existing, added], &previous);
+        let updated = build_update(&record, &draft).unwrap();
+        assert_eq!(updated.creators[0], previous[0]);
+        assert_eq!(updated.creators[1].person_id, added);
+        assert_eq!(updated.creators[1].role, CreatorRole::Author);
+
+        draft.creators = creators_from_person_ids(&[added], &previous);
+        let updated = build_update(&record, &draft).unwrap();
+        assert_eq!(updated.creators.len(), 1);
+        assert_eq!(updated.creators[0].person_id, added);
+    }
+
+    #[test]
     fn build_update_rejects_bad_values() {
         let record = loaded_record();
         let creators = record.to_new().creators;
@@ -428,7 +453,10 @@ mod tests {
         let mut draft = draft_with("Retitled", creators.clone());
         draft.published_year = "soon".into();
         let err = build_update(&record, &draft).expect_err("bad year rejects");
-        assert!(err.contains("Published year"), "message names the field: {err}");
+        assert!(
+            err.contains("Published year"),
+            "message names the field: {err}"
+        );
 
         let mut draft = draft_with("Retitled", creators);
         draft.series = "not-an-id".into();
@@ -440,7 +468,11 @@ mod tests {
     fn kind_items_cover_every_kind_alphabetized() {
         let items = kind_items();
         assert_eq!(items.len(), ResourceKind::ALL.len());
-        let labels: Vec<String> = items.iter().map(KindItem::title).map(String::from).collect();
+        let labels: Vec<String> = items
+            .iter()
+            .map(KindItem::title)
+            .map(String::from)
+            .collect();
         let mut sorted = labels.clone();
         sorted.sort_by_key(|label| label.to_lowercase());
         assert_eq!(labels, sorted);

@@ -111,11 +111,7 @@ fn normalize_flag(part: Option<String>) -> Option<String> {
 
 fn empty_to_none(s: &str) -> Option<&str> {
     let t = s.trim();
-    if t.is_empty() {
-        None
-    } else {
-        Some(t)
-    }
+    if t.is_empty() { None } else { Some(t) }
 }
 
 fn part_eq(want: Option<&str>, got: Option<&str>) -> bool {

@@ -7,15 +7,13 @@ use gpui_kit::component::combobox::ComboboxState;
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{h_flex, ActiveTheme as _, IndexPath, Sizable as _};
+use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _, h_flex};
 use gpui_kit::*;
 
-use oeuvre_core::{
-    CreatorSpec, Person, PersonId, Resource, ResourceId, ResourceKind,
-};
+use oeuvre_core::{CreatorSpec, Person, PersonId, Resource, ResourceId, ResourceKind};
 
 use crate::edit::{
-    creators_from_person_ids, empty_create_draft, kind_items, prefill_draft, EditDraft, KindItem,
+    EditDraft, KindItem, creators_from_person_ids, empty_create_draft, kind_items, prefill_draft,
 };
 use crate::library::LibraryApp;
 
@@ -53,10 +51,7 @@ impl InlineField {
 /// Inline edit/create session mirrored onto the table delegate for `render_td`.
 pub enum InlineSession {
     /// Fetching the raw record before editors appear.
-    Loading {
-        id: ResourceId,
-        row_ix: usize,
-    },
+    Loading { id: ResourceId, row_ix: usize },
     /// Editing an existing row at `form.row_ix`.
     Ready(Box<InlineRowEdit>),
     /// Creating a new resource; occupies table row 0 until saved or cancelled.
@@ -264,10 +259,9 @@ impl InlineRowEdit {
             creators,
         }
     }
-
 }
 
-fn person_items(people: &[Person]) -> Vec<PersonItem> {
+pub(crate) fn person_items(people: &[Person]) -> Vec<PersonItem> {
     let mut items: Vec<PersonItem> = people
         .iter()
         .map(|person| PersonItem {

@@ -1,8 +1,6 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{
-    CreatePerson, CreateResource, GetResource, UpdateResource,
-};
+use oeuvre_app::command::{CreatePerson, CreateResource, GetResource, UpdateResource};
 use oeuvre_app::testing::{MemorySink, MemoryStore};
 use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
 use oeuvre_core::{
@@ -97,7 +95,10 @@ async fn update_title_round_trip() {
     assert_eq!(got.title.as_str(), "Retitled");
     assert_eq!(got.creators.len(), 1);
     assert_eq!(got.creators[0].person_id, author_id);
-    assert_eq!((got.date_added, got.date_edited), (updated.date_added, updated.date_edited));
+    assert_eq!(
+        (got.date_added, got.date_edited),
+        (updated.date_added, updated.date_edited)
+    );
 }
 
 #[tokio::test]
@@ -225,7 +226,10 @@ async fn update_emits_exactly_one_ok_event_with_changed_fields() {
         Some(&FieldValue::from(created.id.to_string()))
     );
     assert_eq!(ev.get("resource.kind"), Some(&FieldValue::from("book")));
-    assert_eq!(ev.get("resource.title"), Some(&FieldValue::from("Retitled")));
+    assert_eq!(
+        ev.get("resource.title"),
+        Some(&FieldValue::from("Retitled"))
+    );
     assert_eq!(
         ev.get("resource.changed_fields"),
         Some(&FieldValue::from("title"))

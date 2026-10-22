@@ -1,8 +1,6 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{
-    CreatePerson, CreateResource, CreateSeries, GetResource, ListResources,
-};
+use oeuvre_app::command::{CreatePerson, CreateResource, CreateSeries, GetResource, ListResources};
 use oeuvre_app::testing::{MemorySink, MemoryStore};
 use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
 use oeuvre_core::{
@@ -650,9 +648,11 @@ async fn list_resources_returns_summaries_ordered_newest_first() {
     };
 
     assert_eq!(listed.len(), 3);
-    assert!(listed
-        .windows(2)
-        .all(|w| w[0].id.as_ulid() > w[1].id.as_ulid()));
+    assert!(
+        listed
+            .windows(2)
+            .all(|w| w[0].id.as_ulid() > w[1].id.as_ulid())
+    );
 
     let by_id = |id: ResourceId| {
         listed

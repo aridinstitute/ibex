@@ -8,7 +8,7 @@ use std::{
 };
 
 use gpui_kit::assets::IconName as AssetIconName;
-use gpui_kit::base::{transition, Transition as MotionTransition};
+use gpui_kit::base::{Transition as MotionTransition, transition};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{Enter, Input, InputEvent, InputState};
@@ -23,19 +23,22 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Focusable as _, *};
 
 use oeuvre_core::{
-    format_recorded_date, NonEmptyStr, ParentRule, Person, PersonId, PublishedRange, Resource,
-    ResourceDetail, ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery,
-    ResourceSort, ResourceSummary, SortDirection, UtcMillis,
+    NonEmptyStr, ParentRule, Person, PersonId, PublishedRange, Resource, ResourceDetail,
+    ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort,
+    ResourceSummary, SortDirection, UtcMillis, format_recorded_date,
 };
 
 use crate::db::DbWorker;
 use crate::detail::{
-    render_panel, DetailFetch, DetailView, FIELD_LABEL_WIDTH, FIELD_TEXT_SIZE, PANEL_WIDTH,
+    DetailFetch, DetailView, FIELD_LABEL_WIDTH, FIELD_TEXT_SIZE, PANEL_WIDTH, render_panel,
 };
-use crate::edit::{EditDraft, KindItem, build_create, build_update, kind_items, prefill_draft};
+use crate::edit::{
+    EditDraft, KindItem, build_create, build_update, creators_from_person_ids, kind_items,
+    prefill_draft,
+};
 use crate::icons::symbol;
 use crate::inline_edit::{
-    creators_badge_trigger, InlineField, InlineRowEdit, InlineSession, PersonItem,
+    InlineField, InlineRowEdit, InlineSession, PersonItem, creators_badge_trigger, person_items,
 };
 use crate::kind::{kind_color, kind_label, kind_symbol};
 use crate::settings::Settings;
@@ -176,21 +179,21 @@ impl LibraryDelegate {
         self.reload_from_top(selected_id, restore_col, window, cx);
     }
 
-    /// Re-key the listing under a new title predicate. A keystroke must
+    /// Re-key the listing under a new search predicate. A keystroke must
     /// never be dropped, so unlike a sort click this reloads even while a
     /// fetch is in flight; the listing generation discards whichever reply
     /// the change made stale.
-    fn request_title_filter(
+    fn request_search(
         &mut self,
         needle: Option<NonEmptyStr>,
         selected_id: Option<ResourceId>,
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        if self.filter.title == needle {
+        if self.filter.search == needle {
             return;
         }
-        self.filter.title = needle;
+        self.filter.search = needle;
         self.reload_from_top(selected_id, None, window, cx);
     }
 
@@ -329,11 +332,7 @@ impl LibraryDelegate {
     /// create-draft overlay row (not in `rows`).
     fn data_row_ix(&self, row_ix: usize) -> Option<usize> {
         if self.inline.as_ref().is_some_and(|s| s.is_create()) {
-            if row_ix == 0 {
-                None
-            } else {
-                Some(row_ix - 1)
-            }
+            if row_ix == 0 { None } else { Some(row_ix - 1) }
         } else {
             Some(row_ix)
         }
@@ -367,7 +366,8 @@ impl LibraryDelegate {
             .bg(cx.theme().background)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(|_, _, cx| cx.stop_propagation());
-        let (Some(inputs), Some(field)) = (self.filter_inputs.as_ref(), filter_field_for_col(col_ix))
+        let (Some(inputs), Some(field)) =
+            (self.filter_inputs.as_ref(), filter_field_for_col(col_ix))
         else {
             return cell.into_any_element();
         };
@@ -392,12 +392,8 @@ impl LibraryDelegate {
                             let active = !trigger.selection().is_empty();
                             symbol("line.3.horizontal.decrease", IconName::Settings2)
                                 .xsmall()
-                                .when(active, |icon| {
-                                    icon.text_color(cx.theme().primary)
-                                })
-                                .when(!active, |icon| {
-                                    icon.text_color(cx.theme().muted_foreground)
-                                })
+                                .when(active, |icon| icon.text_color(cx.theme().primary))
+                                .when(!active, |icon| icon.text_color(cx.theme().muted_foreground))
                         })
                         // The popup reads kinds, not the funnel it hangs
                         // off: a fixed width keeps it from collapsing to
@@ -406,15 +402,8 @@ impl LibraryDelegate {
                         .w_full(),
                 )
                 .into_any_element(),
-            FilterField::Title => cell
-                .child(
-                    Input::new(&inputs.title)
-                        .xsmall()
-                        .appearance(false)
-                        .cleanable(true)
-                        .w_full(),
-                )
-                .into_any_element(),
+            // The title predicate lives in the always-visible toolbar search.
+            FilterField::Title => cell.into_any_element(),
             FilterField::Creators => cell
                 .child(
                     Combobox::new(&inputs.creator)
@@ -435,8 +424,19 @@ impl LibraryDelegate {
                         .appearance(false)
                         .w_full(),
                 )
-                .child(div().w(px(1.)).h_full().flex_shrink_0().bg(cx.theme().border))
-                .child(Input::new(&inputs.published_to).xsmall().appearance(false).w_full())
+                .child(
+                    div()
+                        .w(px(1.))
+                        .h_full()
+                        .flex_shrink_0()
+                        .bg(cx.theme().border),
+                )
+                .child(
+                    Input::new(&inputs.published_to)
+                        .xsmall()
+                        .appearance(false)
+                        .w_full(),
+                )
                 .into_any_element(),
         }
     }
@@ -489,7 +489,11 @@ impl TableDelegate for LibraryDelegate {
                 .width(stored_width(&self.settings.column_widths, COL_EDITED, 110.))
                 .min_width(px(50.)),
             COL_PUBLISHER => Column::new(COLUMN_KEYS[COL_PUBLISHER], "Publisher")
-                .width(stored_width(&self.settings.column_widths, COL_PUBLISHER, 160.))
+                .width(stored_width(
+                    &self.settings.column_widths,
+                    COL_PUBLISHER,
+                    160.,
+                ))
                 .min_width(px(60.)),
             _ => unreachable!("columns_count is {COLUMNS}"),
         }
@@ -537,8 +541,9 @@ impl TableDelegate for LibraryDelegate {
                         }
                         // The second click drives the sort, not another selection.
                         cx.stop_propagation();
-                        let selected_id =
-                            table.selected_row().and_then(|ix| table.delegate().row_id(ix));
+                        let selected_id = table
+                            .selected_row()
+                            .and_then(|ix| table.delegate().row_id(ix));
                         table
                             .delegate_mut()
                             .request_sort(field, selected_id, None, window, cx);
@@ -632,9 +637,7 @@ impl TableDelegate for LibraryDelegate {
                                     .search_placeholder("Search kinds")
                                     .menu_width(INLINE_KIND_MENU_WIDTH)
                                     .menu_max_h(px(320.))
-                                    .render_trigger(|_, _, _| {
-                                        div().size_full().into_any_element()
-                                    })
+                                    .render_trigger(|_, _, _| div().size_full().into_any_element())
                                     .w_full()
                                     .h_full(),
                             ),
@@ -734,12 +737,9 @@ impl TableDelegate for LibraryDelegate {
                     .truncate()
                     .child(row.title.as_str().to_owned()),
             ),
-            COL_CREATORS => cell.text_color(muted).child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .child(row.creators_label.clone()),
-            ),
+            COL_CREATORS => cell
+                .text_color(muted)
+                .child(div().min_w_0().truncate().child(row.creators_label.clone())),
             COL_PUBLISHED => cell
                 .text_color(muted)
                 .children(row.published_label.as_ref().map(|p| p.as_str().to_owned())),
@@ -1120,7 +1120,12 @@ fn step_inline_field(
     let len = InlineField::ALL.len() as isize;
     let next = InlineField::ALL[((ix as isize) + delta).rem_euclid(len) as usize];
     table.update(cx, |table, cx| {
-        if let Some(form) = table.delegate_mut().inline.as_mut().and_then(|s| s.ready_form_mut()) {
+        if let Some(form) = table
+            .delegate_mut()
+            .inline
+            .as_mut()
+            .and_then(|s| s.ready_form_mut())
+        {
             form.active_field = next;
         }
         table.delegate_mut().selected_row = Some(row_ix);
@@ -1129,14 +1134,7 @@ fn step_inline_field(
     });
     let (kind, title, creators, published, publisher) = entities;
     focus_inline_entities(
-        next,
-        &kind,
-        &title,
-        &creators,
-        &published,
-        &publisher,
-        window,
-        cx,
+        next, &kind, &title, &creators, &published, &publisher, window, cx,
     );
 }
 
@@ -1153,12 +1151,7 @@ fn cell_on_accent(
 
 /// Hairline around the field Tab currently owns, so the edit row's accent
 /// fill alone isn't the only cue for which cell is active.
-fn inline_active_cell(
-    cell: Div,
-    active: bool,
-    on_accent: bool,
-    colors: &ThemeColor,
-) -> Div {
+fn inline_active_cell(cell: Div, active: bool, on_accent: bool, colors: &ThemeColor) -> Div {
     if !active {
         return cell;
     }
@@ -1199,6 +1192,7 @@ gpui_kit::actions!([
     BeginInlineEdit,
     BeginNewRow,
     FocusColumnFilter,
+    FocusSearch,
     InlineNextField,
     InlinePrevField,
 ]);
@@ -1328,6 +1322,7 @@ struct EditForm {
     title: Entity<InputState>,
     kind: Entity<ComboboxState<SearchableVec<KindItem>>>,
     parent: Entity<ComboboxState<SearchableVec<ParentItem>>>,
+    creators: Entity<ComboboxState<SearchableVec<PersonItem>>>,
     publisher: Entity<InputState>,
     published_year: Entity<InputState>,
     accessed_year: Entity<InputState>,
@@ -1354,6 +1349,7 @@ impl EditForm {
     fn new(
         record: Resource,
         worker: &DbWorker,
+        people: &[Person],
         window: &mut Window,
         cx: &mut Context<LibraryApp>,
     ) -> Self {
@@ -1377,6 +1373,22 @@ impl EditForm {
         });
         let parent = cx.new(|cx| {
             ComboboxState::new(SearchableVec::new(Vec::new()), Vec::new(), window, cx)
+                .searchable(true)
+        });
+        let items = person_items(people);
+        let selected: Vec<IndexPath> = draft
+            .creators
+            .iter()
+            .filter_map(|spec| {
+                items
+                    .iter()
+                    .position(|item| item.value() == &spec.person_id)
+                    .map(IndexPath::new)
+            })
+            .collect();
+        let creators = cx.new(|cx| {
+            ComboboxState::new(SearchableVec::new(items), selected, window, cx)
+                .multiple(true)
                 .searchable(true)
         });
         // A parent valid for the old kind is off-kind for the new one, and
@@ -1419,15 +1431,14 @@ impl EditForm {
         })
         .detach();
         let parent_options_kind = match draft.kind.parent_rule() {
-            ParentRule::Optional { expected } | ParentRule::Required { expected } => {
-                Some(expected)
-            }
+            ParentRule::Optional { expected } | ParentRule::Required { expected } => Some(expected),
             ParentRule::Forbidden => None,
         };
         Self {
             title: prefill_input(draft.title, "Title", window, cx),
             kind,
             parent,
+            creators,
             publisher: prefill_input(draft.publisher, "Publisher", window, cx),
             published_year: prefill_input(draft.published_year, "Year", window, cx),
             accessed_year: prefill_input(draft.accessed_year, "Year", window, cx),
@@ -1446,8 +1457,7 @@ impl EditForm {
     /// form never clears it. A cleared parent box is exactly that: no
     /// parent.
     fn draft(&self, cx: &App) -> EditDraft {
-        let value =
-            |input: &Entity<InputState>| input.read(cx).value().to_string();
+        let value = |input: &Entity<InputState>| input.read(cx).value().to_string();
         EditDraft {
             title: value(&self.title),
             kind: self
@@ -1463,8 +1473,10 @@ impl EditForm {
             accessed_year: value(&self.accessed_year),
             series: value(&self.series),
             series_number: value(&self.series_number),
-            // Sidebar does not edit creators yet; ride the stored list through.
-            creators: self.record.to_new().creators,
+            creators: creators_from_person_ids(
+                &self.creators.read(cx).selected_values(),
+                &self.record.to_new().creators,
+            ),
         }
     }
 }
@@ -1504,50 +1516,54 @@ impl LibraryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.subscribe_in(&table, window, |this, _table, event: &TableEvent, window, cx| {
-            match event {
-                TableEvent::ColumnWidthsChanged(widths) => {
-                    this.save_column_widths(widths, cx);
-                }
-                TableEvent::SelectRow(row_ix) => {
-                    this.table.update(cx, |table, cx| {
-                        let delegate = table.delegate_mut();
-                        delegate.selected_row = Some(*row_ix);
-                        delegate.selected_col = None;
-                        cx.notify();
-                    });
-                    this.select_row(*row_ix, window, cx);
-                }
-                TableEvent::SelectColumn(col_ix) => {
-                    // While inline editing, Tab/arrows mean field focus — not
-                    // column selection. Restore the row highlight and move
-                    // the caret into the matching editor.
-                    if this.has_inline(cx) {
-                        this.focus_inline_col(*col_ix, window, cx);
-                        return;
+        cx.subscribe_in(
+            &table,
+            window,
+            |this, _table, event: &TableEvent, window, cx| {
+                match event {
+                    TableEvent::ColumnWidthsChanged(widths) => {
+                        this.save_column_widths(widths, cx);
                     }
-                    // Column highlight is visual only: keep the detail for
-                    // the last selected resource so Space can sort without
-                    // wiping the sidebar.
-                    this.table.update(cx, |table, cx| {
-                        let delegate = table.delegate_mut();
-                        delegate.selected_row = None;
-                        delegate.selected_col = Some(*col_ix);
-                        cx.notify();
-                    });
+                    TableEvent::SelectRow(row_ix) => {
+                        this.table.update(cx, |table, cx| {
+                            let delegate = table.delegate_mut();
+                            delegate.selected_row = Some(*row_ix);
+                            delegate.selected_col = None;
+                            cx.notify();
+                        });
+                        this.select_row(*row_ix, window, cx);
+                    }
+                    TableEvent::SelectColumn(col_ix) => {
+                        // While inline editing, Tab/arrows mean field focus — not
+                        // column selection. Restore the row highlight and move
+                        // the caret into the matching editor.
+                        if this.has_inline(cx) {
+                            this.focus_inline_col(*col_ix, window, cx);
+                            return;
+                        }
+                        // Column highlight is visual only: keep the detail for
+                        // the last selected resource so Space can sort without
+                        // wiping the sidebar.
+                        this.table.update(cx, |table, cx| {
+                            let delegate = table.delegate_mut();
+                            delegate.selected_row = None;
+                            delegate.selected_col = Some(*col_ix);
+                            cx.notify();
+                        });
+                    }
+                    TableEvent::ClearSelection => {
+                        this.table.update(cx, |table, cx| {
+                            let delegate = table.delegate_mut();
+                            delegate.selected_row = None;
+                            delegate.selected_col = None;
+                            cx.notify();
+                        });
+                        this.clear_selection(cx);
+                    }
+                    _ => {}
                 }
-                TableEvent::ClearSelection => {
-                    this.table.update(cx, |table, cx| {
-                        let delegate = table.delegate_mut();
-                        delegate.selected_row = None;
-                        delegate.selected_col = None;
-                        cx.notify();
-                    });
-                    this.clear_selection(cx);
-                }
-                _ => {}
-            }
-        })
+            },
+        )
         .detach();
 
         // The kind box is the header's one static dropdown: every kind is
@@ -1585,7 +1601,8 @@ impl LibraryApp {
         // The box re-keys the listing on every change, clear button
         // included; the listing generation keeps a late reply from
         // clobbering the rows a newer keystroke asked for.
-        let title_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter by title"));
+        let title_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search title or publisher… (/)"));
         cx.subscribe_in(
             &title_input,
             window,
@@ -1602,7 +1619,7 @@ impl LibraryApp {
                         this.table.update(cx, |table, cx| {
                             table
                                 .delegate_mut()
-                                .request_title_filter(needle, selected_id, window, cx);
+                                .request_search(needle, selected_id, window, cx);
                         });
                         cx.notify();
                     }
@@ -1674,19 +1691,20 @@ impl LibraryApp {
         // Year boxes bracket whole years: the from year's January 1 is
         // inclusive, the to year's next January 1 exclusive, so either
         // side alone still bounds the listing.
-        let published_from_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("From"));
+        let published_from_input = cx.new(|cx| InputState::new(window, cx).placeholder("From"));
         let published_to_input = cx.new(|cx| InputState::new(window, cx).placeholder("To"));
         for input in [&published_from_input, &published_to_input] {
-            cx.subscribe_in(input, window, |this, _input, event: &InputEvent, window, cx| {
-                match event {
+            cx.subscribe_in(
+                input,
+                window,
+                |this, _input, event: &InputEvent, window, cx| match event {
                     InputEvent::Change => this.apply_year_range(window, cx),
                     InputEvent::PressEnter {
                         secondary: false, ..
                     } => this.focus_table(window, cx),
                     _ => {}
-                }
-            })
+                },
+            )
             .detach();
         }
 
@@ -1709,17 +1727,12 @@ impl LibraryApp {
         // unless a Combobox menu was open (List in the stack): that Esc only
         // dismisses the menu.
         cx.observe_keystrokes(|this, event, window, cx| {
-            if event.keystroke.key != "escape"
-                || event.keystroke.modifiers.modified()
-            {
+            if event.keystroke.key != "escape" || event.keystroke.modifiers.modified() {
                 this.last_escape_at = None;
                 return;
             }
             if this.has_inline(cx) {
-                let combobox_menu_open = event
-                    .context_stack
-                    .iter()
-                    .any(|ctx| ctx.contains("List"));
+                let combobox_menu_open = event.context_stack.iter().any(|ctx| ctx.contains("List"));
                 if combobox_menu_open {
                     this.last_escape_at = None;
                     return;
@@ -1807,7 +1820,11 @@ impl LibraryApp {
             self.detail = Some((id, DetailFetch::Loaded(Box::new(detail.clone()))));
             return;
         }
-        if self.detail.as_ref().is_some_and(|(loaded, _)| *loaded == id) {
+        if self
+            .detail
+            .as_ref()
+            .is_some_and(|(loaded, _)| *loaded == id)
+        {
             return;
         }
         self.detail = Some((id, DetailFetch::Loading));
@@ -1960,6 +1977,10 @@ impl LibraryApp {
         let Some(field) = filter_field_for_col(col_ix) else {
             return;
         };
+        if field == FilterField::Title {
+            self.focus_search(window, cx);
+            return;
+        }
         let inputs = self.table.read(cx).delegate().filter_inputs.clone();
         let Some(inputs) = inputs else {
             return;
@@ -1988,6 +2009,23 @@ impl LibraryApp {
             }),
         }
         cx.notify();
+    }
+
+    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Keep the inline editor's focus trap intact while a draft is open.
+        if self.has_inline(cx) {
+            return;
+        }
+        let input = self
+            .table
+            .read(cx)
+            .delegate()
+            .filter_inputs
+            .as_ref()
+            .map(|inputs| inputs.title.clone());
+        if let Some(input) = input {
+            input.update(cx, |state, cx| state.focus(window, cx));
+        }
     }
 
     /// Space on a highlighted sortable column steps that column's sort
@@ -2116,10 +2154,9 @@ impl LibraryApp {
                 )
             });
             let (entities, active) = match form {
-                Some((kind, title, creators, published, publisher, active)) => (
-                    Some((kind, title, creators, published, publisher)),
-                    active,
-                ),
+                Some((kind, title, creators, published, publisher, active)) => {
+                    (Some((kind, title, creators, published, publisher)), active)
+                }
                 None => (None, InlineField::Title),
             };
             (row_ix, entities, active)
@@ -2133,21 +2170,18 @@ impl LibraryApp {
                 table.delegate_mut().selected_col = None;
                 table.set_selected_row(row_ix, cx);
             }
-            if let Some(form) = table.delegate_mut().inline.as_mut().and_then(|s| s.ready_form_mut())
+            if let Some(form) = table
+                .delegate_mut()
+                .inline
+                .as_mut()
+                .and_then(|s| s.ready_form_mut())
             {
                 form.active_field = field;
             }
         });
         if let Some((kind, title, creators, published, publisher)) = entities {
             focus_inline_entities(
-                field,
-                &kind,
-                &title,
-                &creators,
-                &published,
-                &publisher,
-                window,
-                cx,
+                field, &kind, &title, &creators, &published, &publisher, window, cx,
             );
         }
         cx.notify();
@@ -2293,7 +2327,11 @@ impl LibraryApp {
             Ok(new) => new,
             Err(message) => {
                 self.table.update(cx, |table, _| {
-                    if let Some(form) = table.delegate_mut().inline.as_mut().and_then(|s| s.ready_form_mut())
+                    if let Some(form) = table
+                        .delegate_mut()
+                        .inline
+                        .as_mut()
+                        .and_then(|s| s.ready_form_mut())
                     {
                         form.error = Some(message);
                     }
@@ -2303,7 +2341,11 @@ impl LibraryApp {
             }
         };
         self.table.update(cx, |table, _| {
-            if let Some(form) = table.delegate_mut().inline.as_mut().and_then(|s| s.ready_form_mut())
+            if let Some(form) = table
+                .delegate_mut()
+                .inline
+                .as_mut()
+                .and_then(|s| s.ready_form_mut())
             {
                 form.saving = true;
                 form.error = None;
@@ -2339,8 +2381,11 @@ impl LibraryApp {
                     }
                     Err(err) => {
                         app.table.update(cx, |table, _| {
-                            if let Some(form) =
-                                table.delegate_mut().inline.as_mut().and_then(|s| s.ready_form_mut())
+                            if let Some(form) = table
+                                .delegate_mut()
+                                .inline
+                                .as_mut()
+                                .and_then(|s| s.ready_form_mut())
                             {
                                 form.error = Some(err);
                                 form.saving = false;
@@ -2371,10 +2416,13 @@ impl LibraryApp {
         self.detail_open = true;
         let worker = self.table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
-            let reply = worker.resource(id).await;
+            let reply = match worker.resource(id).await {
+                Ok(record) => worker.list_persons().await.map(|people| (record, people)),
+                Err(err) => Err(err),
+            };
             _ = app.update_in(window, |app, window, cx| {
                 match reply {
-                    Ok(record) => {
+                    Ok((record, people)) => {
                         // The selection moved or re-clicked Edit since the
                         // request: the reply belongs to a form nobody is
                         // waiting for, so it is dropped.
@@ -2383,7 +2431,7 @@ impl LibraryApp {
                         {
                             let parent_id = record.parent_id;
                             let rule = record.kind.parent_rule();
-                            let form = EditForm::new(record, &worker, window, cx);
+                            let form = EditForm::new(record, &worker, &people, window, cx);
                             let title = form.title.clone();
                             app.edit = Some(EditFetch::Ready(Box::new(form)));
                             // Land the caret in the title so `e` opens ready
@@ -2438,9 +2486,7 @@ impl LibraryApp {
             return;
         }
         let expected = match rule {
-            ParentRule::Optional { expected } | ParentRule::Required { expected } => {
-                Some(expected)
-            }
+            ParentRule::Optional { expected } | ParentRule::Required { expected } => Some(expected),
             ParentRule::Forbidden => None,
         };
         form.parent_options_kind = expected;
@@ -2466,8 +2512,8 @@ impl LibraryApp {
             let mut missing_parent = stored_parent;
             if let Ok(page) = worker.list_query_page(query, 0, PARENT_OPTIONS_LIMIT).await {
                 items = parent_options(&page.rows, id, rule);
-                missing_parent = stored_parent
-                    .filter(|parent| !items.iter().any(|item| item.id == *parent));
+                missing_parent =
+                    stored_parent.filter(|parent| !items.iter().any(|item| item.id == *parent));
             }
             if let Some(parent) = missing_parent {
                 // The stored parent did not make the page. Its own record
@@ -2611,9 +2657,7 @@ impl LibraryApp {
     fn render_side_panel(&self, cx: &mut Context<Self>) -> Div {
         match &self.edit {
             Some(EditFetch::Ready(form)) => self.render_edit_panel(form, cx),
-            Some(EditFetch::Loading(_)) => {
-                render_panel(DetailView::Loading, None, cx)
-            }
+            Some(EditFetch::Loading(_)) => render_panel(DetailView::Loading, None, cx),
             None => {
                 let edit_button = self.selected.is_some().then(|| {
                     Button::new("edit-resource")
@@ -2621,9 +2665,7 @@ impl LibraryApp {
                         .small()
                         .icon(symbol("pencil", AssetIconName::PenLine))
                         .tooltip("Edit resource")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.request_edit(window, cx)
-                        }))
+                        .on_click(cx.listener(|this, _, window, cx| this.request_edit(window, cx)))
                         .into_any_element()
                 });
                 render_panel(self.detail_view(), edit_button, cx)
@@ -2644,7 +2686,7 @@ impl LibraryApp {
         v_flex()
             .h_full()
             .flex_shrink_0()
-            .w(PANEL_WIDTH)
+            .w_full()
             .bg(cx.theme().background)
             .border_l_1()
             .border_color(cx.theme().border)
@@ -2665,9 +2707,9 @@ impl LibraryApp {
                                     .ghost()
                                     .small()
                                     .label("Cancel")
-                                    .on_click(cx.listener(|this, _, _window, cx| {
-                                        this.cancel_edit(cx)
-                                    })),
+                                    .on_click(
+                                        cx.listener(|this, _, _window, cx| this.cancel_edit(cx)),
+                                    ),
                             )
                             .child(
                                 Button::new("save-edit")
@@ -2683,7 +2725,10 @@ impl LibraryApp {
                     .when_some(error, |el, error| {
                         el.child(div().text_xs().text_color(danger).child(error))
                     })
-                    .child(edit_field("Title", Input::new(&form.title).small().w_full()))
+                    .child(edit_field(
+                        "Title",
+                        Input::new(&form.title).small().w_full(),
+                    ))
                     .child(edit_field(
                         "Kind",
                         Combobox::new(&form.kind)
@@ -2702,6 +2747,15 @@ impl LibraryApp {
                             .w_full(),
                     ))
                     .child(edit_field(
+                        "Authors",
+                        Combobox::new(&form.creators)
+                            .small()
+                            .placeholder("Add authors")
+                            .search_placeholder("Search people")
+                            .cleanable(true)
+                            .w_full(),
+                    ))
+                    .child(edit_field(
                         "Publisher",
                         Input::new(&form.publisher).small().w_full(),
                     ))
@@ -2713,7 +2767,10 @@ impl LibraryApp {
                         "Accessed",
                         Input::new(&form.accessed_year).small().w_full(),
                     ))
-                    .child(edit_field("Series", Input::new(&form.series).small().w_full()))
+                    .child(edit_field(
+                        "Series",
+                        Input::new(&form.series).small().w_full(),
+                    ))
                     .child(edit_field(
                         "Series no.",
                         Input::new(&form.series_number).small().w_full(),
@@ -2729,21 +2786,30 @@ fn edit_field(label: &'static str, control: impl IntoElement) -> Div {
         .items_center()
         .gap_2()
         .child(div().w(FIELD_LABEL_WIDTH).flex_shrink_0().child(label))
-        .child(control)
+        .child(div().flex_1().min_w_0().child(control))
 }
 
+/// The inspector can occupy the whole viewport on a narrow window; its
+/// controls must remain inside the window rather than forcing a fixed 320px pane.
+fn sidebar_target_width(viewport: Pixels) -> Pixels {
+    PANEL_WIDTH.min(viewport.max(px(0.)))
+}
 impl Render for LibraryApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let delegate = self.table.read(cx).delegate();
         let error = delegate.error().map(str::to_owned);
         let filters_visible = delegate.filters_visible;
         let filter_active = delegate.filter.is_active();
+        let search_input = delegate
+            .filter_inputs
+            .as_ref()
+            .map(|inputs| inputs.title.clone());
         let danger = cx.theme().danger;
         // Always sample the width so the first closed frame anchors at 0
         // and later toggles animate from the live value.
         let motion = cx.theme().motion_tokens();
         let sidebar_target = if self.detail_open {
-            PANEL_WIDTH
+            sidebar_target_width(window.viewport_size().width)
         } else {
             px(0.)
         };
@@ -2797,6 +2863,9 @@ impl Render for LibraryApp {
             .on_action(cx.listener(|this, _: &FocusColumnFilter, window, cx| {
                 this.focus_selected_column_filter(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                this.focus_search(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &InlineNextField, window, cx| {
                 if this.has_inline(cx) {
                     this.focus_inline_delta(1, window, cx);
@@ -2827,42 +2896,87 @@ impl Render for LibraryApp {
                 // lights sit in the bar's built-in 80 px left padding, its
                 // empty stretches drag the window, and it draws its own
                 // bottom hairline.
-                TitleBar::new()
-                    .pr_2()
-                    .child(
-                        Button::new("toggle-filters")
-                            .ghost()
-                            .small()
-                            .icon(symbol("line.3.horizontal.decrease", IconName::Settings2))
-                            .label("Filters")
-                            .selected(filters_visible)
-                            .when(filter_active, |button| button.text_color(cx.theme().primary))
-                            .on_click(cx.listener(|this, _, _window, cx| this.toggle_filters(cx))),
-                    )
-                    .child(
-                        Button::new("toggle-theme")
-                            .ghost()
-                            .small()
-                            .icon(if cx.theme().is_dark() {
-                                symbol("sun.max", IconName::Sun)
-                            } else {
-                                symbol("moon", IconName::Moon)
-                            })
-                            .label(if cx.theme().is_dark() { "Light" } else { "Dark" })
-                            .tooltip(if cx.theme().is_dark() {
-                                "Switch to light theme"
-                            } else {
-                                "Switch to dark theme"
-                            })
-                            .on_click(cx.listener(|_, _, _window, cx| {
-                                let mode = if cx.theme().is_dark() {
-                                    ThemeMode::Light
+                TitleBar::new().pl_0().child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .flex_1()
+                                .min_w_0()
+                                // Reserve the native traffic lights without shifting search off center.
+                                .pl(if cfg!(target_os = "macos") {
+                                    px(80.)
                                 } else {
-                                    ThemeMode::Dark
-                                };
-                                crate::theme::apply(mode, cx);
-                            })),
-                    ),
+                                    px(12.)
+                                })
+                                .child(
+                                    Button::new("toggle-filters")
+                                        .ghost()
+                                        .small()
+                                        .icon(symbol(
+                                            "line.3.horizontal.decrease",
+                                            IconName::Settings2,
+                                        ))
+                                        .tooltip("Toggle filters")
+                                        .selected(filters_visible)
+                                        .when(filter_active, |button| {
+                                            button.text_color(cx.theme().primary)
+                                        })
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.toggle_filters(cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("toggle-theme")
+                                        .ghost()
+                                        .small()
+                                        .icon(if cx.theme().is_dark() {
+                                            symbol("sun.max", IconName::Sun)
+                                        } else {
+                                            symbol("moon", IconName::Moon)
+                                        })
+                                        .tooltip(if cx.theme().is_dark() {
+                                            "Switch to light theme"
+                                        } else {
+                                            "Switch to dark theme"
+                                        })
+                                        .on_click(cx.listener(|_, _, _window, cx| {
+                                            let mode = if cx.theme().is_dark() {
+                                                ThemeMode::Light
+                                            } else {
+                                                ThemeMode::Dark
+                                            };
+                                            crate::theme::apply(mode, cx);
+                                        })),
+                                ),
+                        )
+                        .when_some(search_input.as_ref(), |bar, input| {
+                            bar.child(
+                                div()
+                                    .id("toolbar-search")
+                                    .w(px(360.))
+                                    .max_w(relative(0.5))
+                                    // Selecting text must not start dragging the window.
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(|_, _, cx| cx.stop_propagation())
+                                    .child(
+                                        Input::new(input)
+                                            .small()
+                                            .prefix(Icon::new(IconName::Search).small())
+                                            .cleanable(true)
+                                            .w_full(),
+                                    ),
+                            )
+                        })
+                        .child(div().flex_1().min_w_0().pr(if cfg!(target_os = "macos") {
+                            px(80.)
+                        } else {
+                            px(12.)
+                        })),
+                ),
             )
             .child(
                 // The grid and the sidebar share one row: the grid gives
@@ -2910,9 +3024,9 @@ impl Render for LibraryApp {
                             } else {
                                 wrap.child(table).into_any_element()
                             }
-                        }
+                        },
                     )
-                    // Clip the fixed-width panel while the outer width
+                    // Clip the panel during the width animation; keep it mounted
                     // animates; keep it mounted until the close finishes.
                     .when(sidebar_width > px(0.5), |el| {
                         el.child(
@@ -2940,6 +3054,18 @@ impl Render for LibraryApp {
     }
 }
 
+#[cfg(test)]
+mod panel_width_tests {
+    use super::sidebar_target_width;
+    use gpui_kit::px;
+
+    #[test]
+    fn edit_sidebar_fits_narrow_windows() {
+        assert_eq!(sidebar_target_width(px(240.)), px(240.));
+        assert_eq!(sidebar_target_width(px(320.)), px(320.));
+        assert_eq!(sidebar_target_width(px(900.)), px(320.));
+    }
+}
 #[cfg(test)]
 mod column_width_tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
@@ -2987,10 +3113,9 @@ mod sort_cycle_tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
     use super::{
-        cell_on_accent, cell_text_colors, creator_options, filter_field_for_col, header_row_height,
-        next_sort, sort_field_for_col, title_predicate, year_instant, year_range, FilterField,
-        COL_CREATORS, COL_KIND,
-        COL_PUBLISHED, COL_TITLE,
+        COL_CREATORS, COL_KIND, COL_PUBLISHED, COL_TITLE, FilterField, cell_on_accent,
+        cell_text_colors, creator_options, filter_field_for_col, header_row_height, next_sort,
+        sort_field_for_col, title_predicate, year_instant, year_range,
     };
     use gpui_kit::component::ThemeColor;
     use gpui_kit::{px, rgb, white};
@@ -3101,16 +3226,17 @@ mod sort_cycle_tests {
         let options = creator_options(&[hopper, lovelace]);
         let labels: Vec<&str> = options.iter().map(|(label, _)| label.as_ref()).collect();
         assert_eq!(labels, ["Ada Lovelace", "Grace Hopper"]);
-        assert!(options.iter().all(|(_, id)| id.as_ulid().timestamp_ms() > 0));
+        assert!(
+            options
+                .iter()
+                .all(|(_, id)| id.as_ulid().timestamp_ms() > 0)
+        );
     }
 
     #[test]
     fn header_columns_map_to_filter_fields() {
         assert_eq!(filter_field_for_col(COL_KIND), Some(FilterField::Kind));
-        assert_eq!(
-            filter_field_for_col(COL_TITLE),
-            Some(FilterField::Title)
-        );
+        assert_eq!(filter_field_for_col(COL_TITLE), Some(FilterField::Title));
         assert_eq!(
             filter_field_for_col(COL_CREATORS),
             Some(FilterField::Creators)
@@ -3197,8 +3323,14 @@ mod detail_prefetch_tests {
         let mut cache = DetailCache::new();
         cache.insert(a, detail(a, "Citation Networks 000"));
         cache.insert(b, detail(b, "Provenance Studies 001"));
-        assert_eq!(cache.get(&a).unwrap().title.as_str(), "Citation Networks 000");
-        assert_eq!(cache.get(&b).unwrap().title.as_str(), "Provenance Studies 001");
+        assert_eq!(
+            cache.get(&a).unwrap().title.as_str(),
+            "Citation Networks 000"
+        );
+        assert_eq!(
+            cache.get(&b).unwrap().title.as_str(),
+            "Provenance Studies 001"
+        );
         assert!(cache.get(&ResourceId::generate()).is_none());
     }
 
@@ -3300,7 +3432,11 @@ mod parent_options_tests {
             edited_id,
             ResourceKind::BookSection.parent_rule(),
         );
-        let labels: Vec<String> = options.iter().map(ParentItem::title).map(String::from).collect();
+        let labels: Vec<String> = options
+            .iter()
+            .map(ParentItem::title)
+            .map(String::from)
+            .collect();
         // Alphabetical whatever order the store lists in, and a resource
         // cannot become its own parent, so the edited record never
         // appears among its own options.
@@ -3324,7 +3460,11 @@ mod parent_options_tests {
             edited_id,
             ResourceKind::JournalArticle.parent_rule(),
         );
-        let labels: Vec<String> = options.iter().map(ParentItem::title).map(String::from).collect();
+        let labels: Vec<String> = options
+            .iter()
+            .map(ParentItem::title)
+            .map(String::from)
+            .collect();
         assert_eq!(labels, ["Zzz Journal"]);
     }
 }

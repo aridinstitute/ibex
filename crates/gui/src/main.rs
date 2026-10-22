@@ -23,8 +23,8 @@ use gpui_kit::{AppContext as _, *};
 use crate::db::DbWorker;
 use crate::kind::AppAssets;
 use crate::library::{
-    BeginInlineEdit, BeginNewRow, CycleColumnSort, FocusColumnFilter, InlineNextField,
-    InlinePrevField, LibraryApp, LibraryDelegate, ToggleDetailPanel, ToggleEditMode, PAGE_SIZE,
+    BeginInlineEdit, BeginNewRow, CycleColumnSort, FocusColumnFilter, FocusSearch, InlineNextField,
+    InlinePrevField, LibraryApp, LibraryDelegate, PAGE_SIZE, ToggleDetailPanel, ToggleEditMode,
 };
 use crate::settings::Settings;
 
@@ -66,75 +66,82 @@ fn run() -> Result<()> {
         .list_page_blocking(None, PAGE_SIZE)
         .map_err(|e| anyhow::anyhow!("load first page: {e}"))?;
 
-    gpui_kit::application().with_assets(AppAssets).run(move |cx| {
-        gpui_kit::init(cx);
-        crate::theme::apply(cx.window_appearance().into(), cx);
-        // `LibraryApp` is an ancestor of every control in the window, so these
-        // fire whether the table, toolbar, or sidebar holds focus. Letter keys
-        // skip `Input` so typing is undisturbed. Double-Esc to clear filters
-        // is a keystroke observer (works while Input owns single Esc).
-        // ⌘↩ save is handled on LibraryApp via the Input `Enter` action that
-        // single-line fields propagate after their own binding.
-        // E = inline row edit; Enter = sidebar form; N = new draft row.
-        // Letter keys skip Input so typing in cells/filters is undisturbed.
-        cx.bind_keys([
-            KeyBinding::new("]", ToggleDetailPanel, Some("LibraryApp && !Input")),
-            KeyBinding::new("space", CycleColumnSort, Some("LibraryApp && !Input")),
-            KeyBinding::new("e", BeginInlineEdit, Some("LibraryApp && !Input")),
-            KeyBinding::new("enter", ToggleEditMode, Some("LibraryApp && !Input")),
-            KeyBinding::new("n", BeginNewRow, Some("LibraryApp && !Input")),
-            KeyBinding::new("f", FocusColumnFilter, Some("LibraryApp && !Input")),
-            // Tab must beat Input's IndentInline/OutdentInline (same depth as
-            // `Input`, later registration wins) and DataTable's column select
-            // (`InlineEdit > Combobox` is deeper than `DataTable`). Without
-            // these, Tab no-ops on single-line fields and Shift+Tab loops the
-            // table onto Added/Edited — leaving the edit row.
-            KeyBinding::new("tab", InlineNextField, Some("InlineEdit > Input")),
-            KeyBinding::new("shift-tab", InlinePrevField, Some("InlineEdit > Input")),
-            KeyBinding::new("tab", InlineNextField, Some("InlineEdit > Combobox")),
-            KeyBinding::new("shift-tab", InlinePrevField, Some("InlineEdit > Combobox")),
-            KeyBinding::new("tab", InlineNextField, Some("InlineEdit > DataTable")),
-            KeyBinding::new("shift-tab", InlinePrevField, Some("InlineEdit > DataTable")),
-        ]);
-        if let Err(err) = gpui_kit::open_window(
-            // The window draws its own title bar (the toolbar inside
-            // LibraryApp), so the native one is transparent with only the
-            // traffic lights left in place.
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds {
-                    origin: Default::default(),
-                    size: size(px(1100.), px(700.)),
-                })),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Oeuvre".into()),
-                    ..TitleBar::title_bar_options()
-                }),
-                // Required on macOS: otherwise the system also handles
-                // title bar double clicks and delays title bar clicks to
-                // disambiguate double clicks.
-                app_owns_titlebar_drag: true,
-                ..Default::default()
-            },
-            cx,
-            |window, cx| {
-                let delegate = LibraryDelegate::new(worker, first, settings);
-                let table = cx.new(|cx| {
-                    TableState::new(delegate, window, cx)
-                        .col_movable(false)
-                        .sortable(false)
-                });
-                // Key bindings dispatch along the focus path, so the table
-                // must hold focus from the first frame for `]` to work
-                // before any click.
-                let focus_handle = table.focus_handle(cx);
-                window.focus(&focus_handle, cx);
-                cx.new(|cx| LibraryApp::new(table, settings_dir, window, cx))
-            },
-        ) {
-            eprintln!("error: failed to open window: {err}");
-            std::process::exit(1);
-        }
-    });
+    gpui_kit::application()
+        .with_assets(AppAssets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            crate::theme::apply(cx.window_appearance().into(), cx);
+            // `LibraryApp` is an ancestor of every control in the window, so these
+            // fire whether the table, toolbar, or sidebar holds focus. Letter keys
+            // skip `Input` so typing is undisturbed. Double-Esc to clear filters
+            // is a keystroke observer (works while Input owns single Esc).
+            // ⌘↩ save is handled on LibraryApp via the Input `Enter` action that
+            // single-line fields propagate after their own binding.
+            // E = inline row edit; Enter = sidebar form; N = new draft row.
+            // Letter keys skip Input so typing in cells/filters is undisturbed.
+            cx.bind_keys([
+                KeyBinding::new("]", ToggleDetailPanel, Some("LibraryApp && !Input")),
+                KeyBinding::new("space", CycleColumnSort, Some("LibraryApp && !Input")),
+                KeyBinding::new("e", BeginInlineEdit, Some("LibraryApp && !Input")),
+                KeyBinding::new("enter", ToggleEditMode, Some("LibraryApp && !Input")),
+                KeyBinding::new("n", BeginNewRow, Some("LibraryApp && !Input")),
+                KeyBinding::new("f", FocusColumnFilter, Some("LibraryApp && !Input")),
+                KeyBinding::new(
+                    "/",
+                    FocusSearch,
+                    Some("LibraryApp && !Input && !InlineEdit"),
+                ),
+                // Tab must beat Input's IndentInline/OutdentInline (same depth as
+                // `Input`, later registration wins) and DataTable's column select
+                // (`InlineEdit > Combobox` is deeper than `DataTable`). Without
+                // these, Tab no-ops on single-line fields and Shift+Tab loops the
+                // table onto Added/Edited — leaving the edit row.
+                KeyBinding::new("tab", InlineNextField, Some("InlineEdit > Input")),
+                KeyBinding::new("shift-tab", InlinePrevField, Some("InlineEdit > Input")),
+                KeyBinding::new("tab", InlineNextField, Some("InlineEdit > Combobox")),
+                KeyBinding::new("shift-tab", InlinePrevField, Some("InlineEdit > Combobox")),
+                KeyBinding::new("tab", InlineNextField, Some("InlineEdit > DataTable")),
+                KeyBinding::new("shift-tab", InlinePrevField, Some("InlineEdit > DataTable")),
+            ]);
+            if let Err(err) = gpui_kit::open_window(
+                // The window draws its own title bar (the toolbar inside
+                // LibraryApp), so the native one is transparent with only the
+                // traffic lights left in place.
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Default::default(),
+                        size: size(px(1100.), px(700.)),
+                    })),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Oeuvre".into()),
+                        ..TitleBar::title_bar_options()
+                    }),
+                    // Required on macOS: otherwise the system also handles
+                    // title bar double clicks and delays title bar clicks to
+                    // disambiguate double clicks.
+                    app_owns_titlebar_drag: true,
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    let delegate = LibraryDelegate::new(worker, first, settings);
+                    let table = cx.new(|cx| {
+                        TableState::new(delegate, window, cx)
+                            .col_movable(false)
+                            .sortable(false)
+                    });
+                    // Key bindings dispatch along the focus path, so the table
+                    // must hold focus from the first frame for `]` to work
+                    // before any click.
+                    let focus_handle = table.focus_handle(cx);
+                    window.focus(&focus_handle, cx);
+                    cx.new(|cx| LibraryApp::new(table, settings_dir, window, cx))
+                },
+            ) {
+                eprintln!("error: failed to open window: {err}");
+                std::process::exit(1);
+            }
+        });
     Ok(())
 }
 
@@ -151,9 +158,12 @@ fn setup_state(args: &Args) -> Result<AppState> {
             let store = SurrealStore::open_memory()
                 .await
                 .context("open in-memory library")?;
-            oeuvre_app::seed::seed_demo_library(&store, oeuvre_app::seed::DEFAULT_DEMO_LIBRARY_SIZE)
-                .await
-                .context("seed demo library")?;
+            oeuvre_app::seed::seed_demo_library(
+                &store,
+                oeuvre_app::seed::DEFAULT_DEMO_LIBRARY_SIZE,
+            )
+            .await
+            .context("seed demo library")?;
             return Ok::<AppState, anyhow::Error>(
                 AppState::builder(store).surface(Surface::Gui).build(),
             );

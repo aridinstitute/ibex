@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use oeuvre_adapter_surreal::SurrealStore;
 use oeuvre_app::testing::MemoryStore;
 use oeuvre_core::{Name, PersonId, Store};
