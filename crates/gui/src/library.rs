@@ -2688,8 +2688,6 @@ impl LibraryApp {
             .flex_shrink_0()
             .w_full()
             .bg(cx.theme().background)
-            .border_l_1()
-            .border_color(cx.theme().border)
             .text_size(FIELD_TEXT_SIZE)
             .child(
                 v_flex()
@@ -2794,6 +2792,58 @@ fn edit_field(label: &'static str, control: impl IntoElement) -> Div {
 fn sidebar_target_width(viewport: Pixels) -> Pixels {
     PANEL_WIDTH.min(viewport.max(px(0.)))
 }
+
+const LIGHT_GRADIENT: (u32, u32) = (0xeae8e2, 0xd9dde5);
+const DARK_GRADIENT: (u32, u32) = (0x292722, 0x262c35);
+const ISLAND_RADIUS: Pixels = px(16.);
+
+/// GPUI's overflow clip is rectangular. Paint just the four regions outside
+/// the island's round outline over its square-edged children, without insetting
+/// the table or inspector. This canvas has no hitbox and cannot block clicks.
+fn island_corner_mask(dark: bool) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let (start, end) = if dark { DARK_GRADIENT } else { LIGHT_GRADIENT };
+            let start = rgb(start);
+            let end = rgb(end);
+            let radius = f32::from(ISLAND_RADIUS);
+            let x0 = f32::from(bounds.origin.x);
+            let x1 = x0 + f32::from(bounds.size.width);
+            let y0 = f32::from(bounds.origin.y);
+            let y1 = y0 + f32::from(bounds.size.height);
+            let width = f32::from(window.viewport_size().width).max(1.);
+            for right in [false, true] {
+                let x = if right { x1 } else { x0 };
+                let t = (x / width).clamp(0., 1.);
+                let color = Hsla::from(Rgba {
+                    r: start.r + (end.r - start.r) * t,
+                    g: start.g + (end.g - start.g) * t,
+                    b: start.b + (end.b - start.b) * t,
+                    a: 1.,
+                });
+                for bottom in [false, true] {
+                    let y = if bottom { y1 } else { y0 };
+                    let sx = if right { -1. } else { 1. };
+                    let sy = if bottom { -1. } else { 1. };
+                    let at = |u: f32, v: f32| point(px(x + sx * u), px(y + sy * v));
+                    let mut path = PathBuilder::fill();
+                    path.move_to(at(0., 0.));
+                    path.line_to(at(radius, 0.));
+                    let control = radius * (1. - 0.552_284_8);
+                    path.cubic_bezier_to(at(0., radius), at(control, 0.), at(0., control));
+                    path.close();
+                    if let Ok(path) = path.build() {
+                        window.paint_path(path, color);
+                    }
+                }
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+}
 impl Render for LibraryApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let delegate = self.table.read(cx).delegate();
@@ -2833,9 +2883,24 @@ impl Render for LibraryApp {
             theme.colors.caret = caret;
         });
 
+        let dark = cx.theme().is_dark();
+        let background = if dark {
+            linear_gradient(
+                90.,
+                linear_color_stop(Hsla::from(rgb(DARK_GRADIENT.0)), 0.),
+                linear_color_stop(Hsla::from(rgb(DARK_GRADIENT.1)), 1.),
+            )
+        } else {
+            linear_gradient(
+                90.,
+                linear_color_stop(Hsla::from(rgb(LIGHT_GRADIENT.0)), 0.),
+                linear_color_stop(Hsla::from(rgb(LIGHT_GRADIENT.1)), 1.),
+            )
+        };
+
         v_flex()
             .size_full()
-            .bg(cx.theme().background)
+            .bg(background.clone())
             .text_color(cx.theme().foreground)
             // Handlers sit on this ancestor so bindings fire for any focused
             // descendant (table, toolbar, sidebar), not only the DataTable.
@@ -2896,7 +2961,7 @@ impl Render for LibraryApp {
                 // lights sit in the bar's built-in 80 px left padding, its
                 // empty stretches drag the window, and it draws its own
                 // bottom hairline.
-                TitleBar::new().pl_0().child(
+                TitleBar::new().pl_0().bg(background).child(
                     h_flex()
                         .w_full()
                         .gap_2()
@@ -2979,14 +3044,25 @@ impl Render for LibraryApp {
                 ),
             )
             .child(
-                // The grid and the sidebar share one row: the grid gives
-                // way by width when the window cannot hold both at full
-                // size. The sidebar never overlays the grid, so its empty
-                // stretches cannot swallow clicks aimed at (or through to)
-                // rows.
+                // Each pane owns its surface; the row's gutters reveal the
+                // window gradient without changing the table or inspector.
                 h_flex()
                     .flex_1()
                     .min_h_0()
+                    .min_w_0()
+                    .items_stretch()
+                    .gap_2()
+                    .p_2()
+                    .child(
+                        div()
+                            .w(px(180.))
+                            .flex_shrink_0()
+                            .h_full()
+                            .rounded(ISLAND_RADIUS)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().background),
+                    )
                     .child(
                         // `h_flex` centers its children on the cross axis
                         // instead of stretching them, so the wrapper must
@@ -3013,16 +3089,28 @@ impl Render for LibraryApp {
                                 .when_some(header_row_height(filters_visible), |table, height| {
                                     table.header_row_height(height)
                                 });
-                            let wrap = div().flex_1().min_w_0().h_full();
+                            let wrap = div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .relative()
+                                .rounded(ISLAND_RADIUS)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().background)
+                                .overflow_hidden();
                             // While inline editing, keep Root Tab/TabPrev inside
                             // the grid so focus cannot walk to toolbar/sidebar.
                             if editing {
                                 wrap.track_focus(&self.inline_trap)
                                     .focus_trap("inline-edit-trap", &self.inline_trap)
                                     .child(table)
+                                    .child(island_corner_mask(dark))
                                     .into_any_element()
                             } else {
-                                wrap.child(table).into_any_element()
+                                wrap.child(table)
+                                    .child(island_corner_mask(dark))
+                                    .into_any_element()
                             }
                         },
                     )
@@ -3032,11 +3120,17 @@ impl Render for LibraryApp {
                         el.child(
                             div()
                                 .id("detail-sidebar-clip")
+                                .relative()
                                 .h_full()
                                 .w(sidebar_width)
                                 .overflow_hidden()
+                                .rounded(ISLAND_RADIUS)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().background)
                                 .flex_shrink_0()
-                                .child(self.render_side_panel(cx)),
+                                .child(self.render_side_panel(cx))
+                                .child(island_corner_mask(dark)),
                         )
                     }),
             )

@@ -175,7 +175,6 @@ fn kind_tint(color: Hsla) -> Div {
 pub fn render_panel(view: DetailView<'_>, actions: Option<AnyElement>, cx: &App) -> Div {
     let muted = cx.theme().muted_foreground;
     let danger = cx.theme().danger;
-    let border = cx.theme().border;
     let tint = tint_color(&view, cx.theme().is_dark());
 
     let content: AnyElement = match view {
@@ -212,8 +211,6 @@ pub fn render_panel(view: DetailView<'_>, actions: Option<AnyElement>, cx: &App)
         .flex_shrink_0()
         .w_full()
         .bg(cx.theme().background)
-        .border_l_1()
-        .border_color(border)
         .text_size(FIELD_TEXT_SIZE)
         // The tint is a sibling of the scroller, not a child, so it stays
         // pinned to the sidebar's top edge as the fields scroll under it.
