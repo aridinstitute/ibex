@@ -22,7 +22,8 @@ use gpui_kit::{AppContext as _, *};
 use crate::db::DbWorker;
 use crate::kind::AppAssets;
 use crate::library::{
-    CycleColumnSort, LibraryApp, LibraryDelegate, ToggleDetailPanel, PAGE_SIZE,
+    CycleColumnSort, FocusColumnFilter, LibraryApp, LibraryDelegate, ToggleDetailPanel,
+    ToggleEditMode, PAGE_SIZE,
 };
 use crate::settings::Settings;
 
@@ -67,9 +68,16 @@ fn run() -> Result<()> {
     gpui_kit::application().with_assets(AppAssets).run(move |cx| {
         gpui_kit::init(cx);
         crate::theme::apply(cx.window_appearance().into(), cx);
+        // `LibraryApp` is an ancestor of every control in the window, so these
+        // fire whether the table, toolbar, or sidebar holds focus. All skip
+        // `Input` so typing in filter/edit fields is undisturbed. Double-Esc
+        // to clear filters is handled by a keystroke observer so it still
+        // works while an input owns the single-Esc binding.
         cx.bind_keys([
-            KeyBinding::new("]", ToggleDetailPanel, Some("LibraryApp")),
-            KeyBinding::new("space", CycleColumnSort, Some("LibraryApp")),
+            KeyBinding::new("]", ToggleDetailPanel, Some("LibraryApp && !Input")),
+            KeyBinding::new("space", CycleColumnSort, Some("LibraryApp && !Input")),
+            KeyBinding::new("e", ToggleEditMode, Some("LibraryApp && !Input")),
+            KeyBinding::new("f", FocusColumnFilter, Some("LibraryApp && !Input")),
         ]);
         if let Err(err) = gpui_kit::open_window(
             // The window draws its own title bar (the toolbar inside
