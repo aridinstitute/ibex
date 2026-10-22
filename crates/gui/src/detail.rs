@@ -6,7 +6,7 @@ use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use oeuvre_core::{format_published_label, format_recorded_date, CreatorRole, ResourceDetail};
+use oeuvre_core::{CreatorRole, ResourceDetail, format_published_label, format_recorded_date};
 
 use crate::kind::{kind_color, kind_label};
 
@@ -122,10 +122,7 @@ pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
 fn value_element(lines: &[String]) -> AnyElement {
     match lines {
         [line] => div().child(line.clone()).into_any_element(),
-        _ => v_flex()
-            .gap_1()
-            .children(lines.to_vec())
-            .into_any_element(),
+        _ => v_flex().gap_1().children(lines.to_vec()).into_any_element(),
     }
 }
 
@@ -170,8 +167,9 @@ fn kind_tint(color: Hsla) -> Div {
 /// The right-side sidebar for the current [`DetailView`]: a column beside
 /// the grid, sharing the row with it rather than overlapping it, so the
 /// grid's rows are never behind the sidebar's empty stretches. Opaque,
-/// fixed-width — the grid gives way when the window is too narrow to hold
-/// both — and scrollable when the field list outgrows the window.
+/// preferred 320px width (clamped by the library to the viewport) — the
+/// grid gives way when the window is too narrow to hold both — and scrollable
+/// when the field list outgrows the window.
 /// `actions`, when present, rides the sidebar's top-right corner over the
 /// kind tint.
 pub fn render_panel(view: DetailView<'_>, actions: Option<AnyElement>, cx: &App) -> Div {
@@ -197,9 +195,11 @@ pub fn render_panel(view: DetailView<'_>, actions: Option<AnyElement>, cx: &App)
             .bordered(false)
             .columns(1)
             .label_width(FIELD_LABEL_WIDTH)
-            .children(field_rows(detail).into_iter().map(|(label, lines)| {
-                DescriptionItem::new(label).value(value_element(&lines))
-            }))
+            .children(
+                field_rows(detail)
+                    .into_iter()
+                    .map(|(label, lines)| DescriptionItem::new(label).value(value_element(&lines))),
+            )
             .into_any_element(),
     };
 
@@ -210,7 +210,7 @@ pub fn render_panel(view: DetailView<'_>, actions: Option<AnyElement>, cx: &App)
         .relative()
         .h_full()
         .flex_shrink_0()
-        .w(PANEL_WIDTH)
+        .w_full()
         .bg(cx.theme().background)
         .border_l_1()
         .border_color(border)
@@ -287,7 +287,15 @@ mod tests {
         let labels: Vec<&str> = rows.iter().map(|(label, _)| label.as_str()).collect();
         assert_eq!(
             labels,
-            ["Title", "Kind", "Author", "Published", "In", "Added", "Edited"]
+            [
+                "Title",
+                "Kind",
+                "Author",
+                "Published",
+                "In",
+                "Added",
+                "Edited"
+            ]
         );
         assert_eq!(rows[0].1, vec!["Quantum bibliometrics"]);
         assert_eq!(rows[1].1, vec!["Journal article"]);

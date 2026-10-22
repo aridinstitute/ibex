@@ -26,11 +26,7 @@ impl Handler for Health {
     const NAME: &'static str = "health";
     type Output = HealthReport;
 
-    async fn run(
-        self,
-        state: &AppState,
-        ev: &mut Event,
-    ) -> Result<HealthReport, CommandError> {
+    async fn run(self, state: &AppState, ev: &mut Event) -> Result<HealthReport, CommandError> {
         let t = Instant::now();
         let probe = state.store().ping().await;
         ev.set(event::STORE_LATENCY_US, t.elapsed().as_micros() as u64);

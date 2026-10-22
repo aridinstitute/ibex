@@ -3,12 +3,12 @@ mod sink;
 
 pub(crate) use keys::Key;
 pub(crate) use keys::{
-    APP_UPTIME_MS, APP_VERSION, DURATION_US, ERROR_KIND, ERROR_MESSAGE, PERSON_DISPLAY,
-    PERSON_ID, REQUEST_ID, RESOURCE_CHANGED_FIELDS, RESOURCE_FILTER_CREATOR,
-    RESOURCE_FILTER_KIND, RESOURCE_FILTER_PUBLISHED_FROM, RESOURCE_FILTER_PUBLISHED_TO,
-    RESOURCE_FILTER_TITLE, RESOURCE_ID, RESOURCE_KIND, RESOURCE_PAGE_LIMIT,
-    RESOURCE_PAGE_OFFSET, RESOURCE_SORT_DIRECTION, RESOURCE_SORT_FIELD, RESOURCE_TITLE, SERIES_ID,
-    SERIES_TITLE, STATUS, STORE_BACKEND, STORE_LATENCY_US, STORE_OK, SURFACE,
+    APP_UPTIME_MS, APP_VERSION, DURATION_US, ERROR_KIND, ERROR_MESSAGE, PERSON_DISPLAY, PERSON_ID,
+    REQUEST_ID, RESOURCE_CHANGED_FIELDS, RESOURCE_FILTER_CREATOR, RESOURCE_FILTER_KIND,
+    RESOURCE_FILTER_PUBLISHED_FROM, RESOURCE_FILTER_PUBLISHED_TO, RESOURCE_FILTER_SEARCH,
+    RESOURCE_FILTER_TITLE, RESOURCE_ID, RESOURCE_KIND, RESOURCE_PAGE_LIMIT, RESOURCE_PAGE_OFFSET,
+    RESOURCE_SORT_DIRECTION, RESOURCE_SORT_FIELD, RESOURCE_TITLE, SERIES_ID, SERIES_TITLE, STATUS,
+    STORE_BACKEND, STORE_LATENCY_US, STORE_OK, SURFACE,
 };
 pub use sink::JsonLinesSink;
 
@@ -153,10 +153,7 @@ impl Event {
             status,
             duration: elapsed,
             ts_unix_ms: self.ts_unix_ms,
-            fields: deduped
-                .into_iter()
-                .map(|(k, v)| (k.as_str(), v))
-                .collect(),
+            fields: deduped.into_iter().map(|(k, v)| (k.as_str(), v)).collect(),
         }
     }
 }
@@ -222,7 +219,13 @@ impl serde::Serialize for FinishedEvent {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
 
-        let base = ["ts_unix_ms", "execution_id", "command", "status", "duration_us"];
+        let base = [
+            "ts_unix_ms",
+            "execution_id",
+            "command",
+            "status",
+            "duration_us",
+        ];
         let mut map = serializer.serialize_map(Some(base.len() + self.fields.len()))?;
         map.serialize_entry("ts_unix_ms", &self.ts_unix_ms)?;
         map.serialize_entry("execution_id", &self.id)?;

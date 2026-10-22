@@ -5,9 +5,7 @@ use oeuvre_core::Store;
 use tracing::Instrument;
 
 use crate::command::{self, Call, CommandError, Outcome};
-use crate::event::{
-    self, EventSink, ExecutionId, JsonLinesSink, Status, Event,
-};
+use crate::event::{self, Event, EventSink, ExecutionId, JsonLinesSink, Status};
 
 /// Which shell is driving. Stamped on every wide event as `surface`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

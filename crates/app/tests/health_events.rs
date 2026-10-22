@@ -33,10 +33,7 @@ async fn health_emits_exactly_one_ok_event() {
     assert_eq!(ev.command(), "health");
     assert_eq!(ev.status(), Status::Ok);
     assert!(ev.get("store.latency_us").is_some());
-    assert_eq!(
-        ev.get("store.backend"),
-        Some(&FieldValue::from("stub"))
-    );
+    assert_eq!(ev.get("store.backend"), Some(&FieldValue::from("stub")));
     assert_eq!(ev.get("store.ok"), Some(&FieldValue::from(true)));
 }
 
@@ -66,11 +63,7 @@ impl Store for HangStore {
         std::future::pending().await
     }
 
-    async fn create_person(
-        &self,
-        _name: Name,
-        _aliases: Vec<Name>,
-    ) -> Result<Person, StoreError> {
+    async fn create_person(&self, _name: Name, _aliases: Vec<Name>) -> Result<Person, StoreError> {
         std::future::pending().await
     }
 
@@ -145,9 +138,7 @@ impl Wake for NoopWaker {
 #[tokio::test]
 async fn dropped_execute_emits_cancelled() {
     let sink = MemorySink::new();
-    let state = AppState::builder(HangStore)
-        .sink(sink.clone())
-        .build();
+    let state = AppState::builder(HangStore).sink(sink.clone()).build();
 
     let mut fut: Pin<Box<dyn Future<Output = Result<Outcome, CommandError>> + Send>> =
         Box::pin(state.execute(Command::Health(Health)));

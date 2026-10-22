@@ -12,6 +12,100 @@ use oeuvre_core::{
     SortDirection, Store, UtcMillis,
 };
 
+#[tokio::test]
+
+async fn search_matches_title_or_publisher_before_paging() {
+    let store = MemoryStore::new();
+    let mut matching = Vec::new();
+    for (title, publisher, kind) in [
+        ("Mixed Needle title", None, ResourceKind::Book),
+        (
+            "Publisher only",
+            Some("The NEEDLE Press"),
+            ResourceKind::Book,
+        ),
+        ("Needle in both", Some("Needle Press"), ResourceKind::Book),
+        ("Unrelated", None, ResourceKind::Book),
+        ("Wrong kind", Some("Needle Press"), ResourceKind::Journal),
+    ] {
+        let row = store
+            .create_resource(NewResource {
+                kind,
+                title: NonEmptyStr::try_new(title).unwrap(),
+                publisher: publisher.map(str::to_owned),
+                creators: vec![],
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap();
+        if ["Mixed Needle title", "Publisher only", "Needle in both"].contains(&title) {
+            matching.push(row.id);
+        }
+    }
+    let query = ResourceQuery {
+        sort: Some((ResourceSort::Title, SortDirection::Ascending)),
+        filter: ResourceFilter {
+            search: Some(NonEmptyStr::try_new("nEeDlE").unwrap()),
+            kind: Some(ResourceKind::Book),
+            ..ResourceFilter::none()
+        },
+    };
+    let mut found = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = store
+            .list_resources_query_page(&query, offset, 1)
+            .await
+            .unwrap();
+        assert_eq!(page.rows.len(), 1);
+        found.push(page.rows[0].id);
+        match page.next_offset {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    assert_eq!(found.len(), 3);
+    found.sort_by_key(|id| id.to_string());
+    matching.sort_by_key(|id| id.to_string());
+    assert_eq!(found, matching);
+    let mut title_only = query.clone();
+    title_only.filter.search = None;
+    title_only.filter.title = Some(NonEmptyStr::try_new("needle").unwrap());
+    assert_eq!(
+        store
+            .list_resources_query_page(&title_only, 0, 10)
+            .await
+            .unwrap()
+            .rows
+            .len(),
+        2
+    );
+    let mut miss = query.clone();
+    miss.filter.search = Some(NonEmptyStr::try_new("no such publisher or title").unwrap());
+    assert!(
+        store
+            .list_resources_query_page(&miss, 0, 10)
+            .await
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    let mut cleared = query;
+    cleared.filter.search = None;
+    assert_eq!(
+        store
+            .list_resources_query_page(&cleared, 0, 10)
+            .await
+            .unwrap()
+            .rows
+            .len(),
+        4
+    );
+}
 fn sorted(field: ResourceSort, direction: SortDirection) -> ResourceQuery {
     ResourceQuery::sorted(field, direction)
 }
@@ -25,6 +119,7 @@ fn titled(needle: &str) -> ResourceQuery {
     ResourceQuery {
         sort: None,
         filter: ResourceFilter {
+            search: None,
             title: Some(NonEmptyStr::try_new(needle).expect("needle non-empty")),
             creator: None,
             published: None,
@@ -39,6 +134,7 @@ fn by_creator(person: PersonId) -> ResourceQuery {
     ResourceQuery {
         sort: None,
         filter: ResourceFilter {
+            search: None,
             title: None,
             creator: Some(person),
             published: None,
@@ -53,6 +149,7 @@ fn ranged(from: Option<i64>, to: Option<i64>) -> ResourceQuery {
     ResourceQuery {
         sort: None,
         filter: ResourceFilter {
+            search: None,
             title: None,
             creator: None,
             published: Some(PublishedRange {
@@ -165,22 +262,14 @@ async fn title_ascending_walks_case_insensitive_pages() {
         .expect("create container");
 
     let first = store
-        .list_resources_query_page(
-            &sorted(ResourceSort::Title, SortDirection::Ascending),
-            0,
-            2,
-        )
+        .list_resources_query_page(&sorted(ResourceSort::Title, SortDirection::Ascending), 0, 2)
         .await
         .expect("first title page");
     assert_eq!(titles(&first), ["alpha waves", "Beta modes"]);
     assert_eq!(first.next_offset, Some(2));
 
     let second = store
-        .list_resources_query_page(
-            &sorted(ResourceSort::Title, SortDirection::Ascending),
-            2,
-            2,
-        )
+        .list_resources_query_page(&sorted(ResourceSort::Title, SortDirection::Ascending), 2, 2)
         .await
         .expect("second title page");
     assert_eq!(titles(&second), ["charlie nodes", "Journal of Nothing"]);
@@ -555,6 +644,7 @@ async fn title_filter_keeps_the_sort_order_within_matches() {
     let query = ResourceQuery {
         sort: Some((ResourceSort::Title, SortDirection::Ascending)),
         filter: ResourceFilter {
+            search: None,
             title: Some(NonEmptyStr::try_new("DE").expect("needle non-empty")),
             creator: None,
             published: None,
@@ -653,6 +743,7 @@ async fn creator_filter_keeps_the_sort_order_within_matches() {
     let query = ResourceQuery {
         sort: Some((ResourceSort::Title, SortDirection::Ascending)),
         filter: ResourceFilter {
+            search: None,
             title: None,
             creator: Some(ada),
             published: None,
@@ -770,6 +861,7 @@ async fn published_range_keeps_sort_order_within_matches() {
     let query = ResourceQuery {
         sort: Some((ResourceSort::Title, SortDirection::Ascending)),
         filter: ResourceFilter {
+            search: None,
             title: None,
             creator: None,
             published: Some(PublishedRange {
@@ -818,6 +910,7 @@ async fn filters_and_together() {
     let query = ResourceQuery {
         sort: None,
         filter: ResourceFilter {
+            search: None,
             title: Some(NonEmptyStr::try_new("ALPHA").expect("needle non-empty")),
             creator: Some(ada),
             published: Some(PublishedRange {
@@ -989,7 +1082,21 @@ async fn filtered_query_page_command_emits_filter_event() {
     let events = sink.take();
     assert_eq!(events.len(), 1);
     let ev = &events[0];
-    assert_eq!(ev.get("resource.filter_title"), Some(&FieldValue::from("MOD")));
+    assert_eq!(
+        ev.get("resource.filter_title"),
+        Some(&FieldValue::from("MOD"))
+    );
+
+    let mut search = newest_first();
+    search.filter.search = Some(NonEmptyStr::try_new("MOD").unwrap());
+    state.execute(query_page_call(search, 0, 10)).await.unwrap();
+    let events = sink.take();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].get("resource.filter_search"),
+        Some(&FieldValue::from("MOD"))
+    );
+    assert_eq!(events[0].get("resource.filter_title"), None);
 
     // A creator-filtered listing names the person by id.
     let Outcome::ListResourcesQueryPage(creator_page) = state
@@ -1046,6 +1153,7 @@ async fn filtered_query_page_command_emits_filter_event() {
             ResourceQuery {
                 sort: None,
                 filter: ResourceFilter {
+                    search: None,
                     title: Some(NonEmptyStr::try_new("MODE").expect("needle non-empty")),
                     creator: Some(author_id),
                     published: Some(PublishedRange {
@@ -1068,7 +1176,10 @@ async fn filtered_query_page_command_emits_filter_event() {
     let events = sink.take();
     assert_eq!(events.len(), 1);
     let ev = &events[0];
-    assert_eq!(ev.get("resource.filter_title"), Some(&FieldValue::from("MODE")));
+    assert_eq!(
+        ev.get("resource.filter_title"),
+        Some(&FieldValue::from("MODE"))
+    );
     assert_eq!(
         ev.get("resource.filter_creator"),
         Some(&FieldValue::from(author_id.to_string()))
@@ -1135,11 +1246,11 @@ async fn query_page_command_emits_wide_event_fields() {
         ev.get("resource.sort_direction"),
         Some(&FieldValue::from("descending"))
     );
-    assert_eq!(ev.get("resource.page_offset"), Some(&FieldValue::from(2u64)));
     assert_eq!(
-        ev.get("resource.page_limit"),
-        Some(&FieldValue::from(2u32))
+        ev.get("resource.page_offset"),
+        Some(&FieldValue::from(2u64))
     );
+    assert_eq!(ev.get("resource.page_limit"), Some(&FieldValue::from(2u32)));
 
     // The default order carries no sort field, so the event stays honest
     // about what drove the listing.
@@ -1155,7 +1266,10 @@ async fn query_page_command_emits_wide_event_fields() {
     let ev = &events[0];
     assert_eq!(ev.get("resource.sort_field"), None);
     assert_eq!(ev.get("resource.sort_direction"), None);
-    assert_eq!(ev.get("resource.page_offset"), Some(&FieldValue::from(0u64)));
+    assert_eq!(
+        ev.get("resource.page_offset"),
+        Some(&FieldValue::from(0u64))
+    );
     assert_eq!(ev.get("resource.page_limit"), Some(&FieldValue::from(2u32)));
 }
 
@@ -1180,5 +1294,8 @@ async fn query_page_zero_limit_is_invalid() {
     assert_eq!(ev.status(), Status::Error);
     assert_eq!(ev.get("error.kind"), Some(&FieldValue::from("invalid")));
     // Input dimensions land on the event even though the run failed early.
-    assert_eq!(ev.get("resource.sort_field"), Some(&FieldValue::from("title")));
+    assert_eq!(
+        ev.get("resource.sort_field"),
+        Some(&FieldValue::from("title"))
+    );
 }

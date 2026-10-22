@@ -225,14 +225,13 @@ impl UtcMillis {
     /// The year's January 1, midnight UTC — the boundary a year-bracketed
     /// range keys on. `None` when the year falls outside the calendar.
     pub fn jan_1_utc(year: i64) -> Option<Self> {
-        let date = time::Date::from_calendar_date(
-            i32::try_from(year).ok()?,
-            time::Month::January,
-            1,
-        )
-        .ok()?;
+        let date =
+            time::Date::from_calendar_date(i32::try_from(year).ok()?, time::Month::January, 1)
+                .ok()?;
         let midnight = time::PrimitiveDateTime::new(date, time::Time::MIDNIGHT);
-        Some(Self::from_unix_ms(midnight.assume_utc().unix_timestamp() * 1_000))
+        Some(Self::from_unix_ms(
+            midnight.assume_utc().unix_timestamp() * 1_000,
+        ))
     }
 }
 
@@ -384,6 +383,8 @@ impl ResourceQuery {
 /// matches every resource.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResourceFilter {
+    /// Case-insensitive substring matching the title OR publisher.
+    pub search: Option<NonEmptyStr>,
     /// Case-insensitive substring the title must contain.
     pub title: Option<NonEmptyStr>,
     /// A person with a creator edge to the resource, sole or shared.
@@ -400,6 +401,7 @@ impl ResourceFilter {
     /// The filter that matches every resource.
     pub fn none() -> Self {
         Self {
+            search: None,
             title: None,
             creator: None,
             published: None,
@@ -418,6 +420,7 @@ impl ResourceFilter {
     /// True when at least one predicate is set, so the listing narrows.
     pub fn is_active(&self) -> bool {
         self.title.is_some()
+            || self.search.is_some()
             || self.creator.is_some()
             || self.kind.is_some()
             || self
@@ -585,9 +588,8 @@ const RECORDED_MONTHS: [&str; 12] = [
 /// table reads the same day whatever timezone it opens in, and tests stay
 /// deterministic.
 pub fn format_recorded_date(instant: UtcMillis) -> String {
-    let stamp =
-        time::OffsetDateTime::from_unix_timestamp(instant.as_unix_ms().div_euclid(1_000))
-            .expect("recorded stamp within OffsetDateTime range");
+    let stamp = time::OffsetDateTime::from_unix_timestamp(instant.as_unix_ms().div_euclid(1_000))
+        .expect("recorded stamp within OffsetDateTime range");
     format!(
         "{} {}, {}",
         RECORDED_MONTHS[(stamp.month() as usize) - 1],
@@ -682,8 +684,6 @@ pub struct NewResource {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ResourceError {
-    #[error("resource requires at least one creator")]
-    EmptyCreators,
     #[error("duplicate creator person_id and role")]
     DuplicateCreator,
     #[error("parent_id is forbidden for this kind")]
@@ -715,10 +715,7 @@ pub struct Resource {
     pub date_edited: UtcMillis,
 }
 
-fn validate_creators(kind: ResourceKind, creators: &[Creator]) -> Result<(), ResourceError> {
-    if creators.is_empty() && !kind.is_container() {
-        return Err(ResourceError::EmptyCreators);
-    }
+fn validate_creators(creators: &[Creator]) -> Result<(), ResourceError> {
     for (i, creator) in creators.iter().enumerate() {
         if creators[..i]
             .iter()
@@ -763,7 +760,7 @@ impl Resource {
             .enumerate()
             .map(|(i, spec)| Creator::from_spec(i as u32, spec))
             .collect();
-        validate_creators(new.kind, &creators)?;
+        validate_creators(&creators)?;
         validate_parent_presence(new.kind, new.parent_id)?;
         validate_series(new.series_id, new.series_number.as_ref())?;
         // One instant stamps both record-keeping dates: the record joined
@@ -815,7 +812,7 @@ impl Resource {
         date_added: UtcMillis,
         date_edited: UtcMillis,
     ) -> Result<Self, ResourceError> {
-        validate_creators(kind, &creators)?;
+        validate_creators(&creators)?;
         validate_parent_presence(kind, parent_id)?;
         validate_series(series_id, series_number.as_ref())?;
         Ok(Self {
@@ -976,7 +973,10 @@ mod tests {
             format_recorded_date(UtcMillis::from_unix_ms(1_609_459_200_000)),
             "Jan 1, 2021"
         );
-        assert_eq!(format_recorded_date(UtcMillis::from_unix_ms(0)), "Jan 1, 1970");
+        assert_eq!(
+            format_recorded_date(UtcMillis::from_unix_ms(0)),
+            "Jan 1, 1970"
+        );
         // The millisecond half floors, so the label never rolls to the
         // next day on sub-second remainders.
         assert_eq!(
@@ -986,23 +986,21 @@ mod tests {
     }
 
     #[test]
-    fn try_new_rejects_empty_creators() {
-        let err = Resource::try_new(ResourceId::generate(), new_book(vec![], None)).unwrap_err();
-        assert_eq!(err, ResourceError::EmptyCreators);
-    }
+    fn try_new_allows_empty_creators() {
+        let book = Resource::try_new(ResourceId::generate(), new_book(vec![], None)).unwrap();
+        assert!(book.creators.is_empty());
 
-    #[test]
-    fn try_new_allows_empty_creators_on_containers() {
         for kind in [
             ResourceKind::Journal,
             ResourceKind::Podcast,
             ResourceKind::Blog,
+            ResourceKind::DictionaryEntry,
         ] {
             let resource = Resource::try_new(
                 ResourceId::generate(),
                 NewResource {
                     kind,
-                    title: title("Container"),
+                    title: title("Unsigned"),
                     creators: vec![],
                     publisher: None,
                     published: None,
@@ -1255,8 +1253,8 @@ mod tests {
     }
 
     #[test]
-    fn from_stored_rejects_corrupt_empty_creators() {
-        let err = Resource::from_stored(
+    fn from_stored_allows_empty_creators() {
+        let resource = Resource::from_stored(
             ResourceId::generate(),
             ResourceKind::Book,
             title("Orphan"),
@@ -1270,8 +1268,8 @@ mod tests {
             UtcMillis::from_unix_ms(0),
             UtcMillis::from_unix_ms(0),
         )
-        .unwrap_err();
-        assert_eq!(err, ResourceError::EmptyCreators);
+        .unwrap();
+        assert!(resource.creators.is_empty());
     }
 
     #[test]

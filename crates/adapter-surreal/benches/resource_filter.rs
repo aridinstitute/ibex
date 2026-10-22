@@ -24,7 +24,7 @@
 //! at large sizes it is expected to hit the cap; a timed-out case is
 //! measured as a timeout instead of aborting the run or hanging for hours.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use oeuvre_adapter_surreal::SurrealStore;
 use oeuvre_app::seed::seed_demo_library;
 use oeuvre_core::{
@@ -82,6 +82,7 @@ fn cases(creator: PersonId) -> Vec<(&'static str, ResourceQuery)> {
     let title_only = |needle_text: &str| ResourceQuery {
         sort: None,
         filter: ResourceFilter {
+            search: None,
             title: Some(needle(needle_text)),
             ..ResourceFilter::none()
         },
@@ -90,42 +91,58 @@ fn cases(creator: PersonId) -> Vec<(&'static str, ResourceQuery)> {
         ("unfiltered", ResourceQuery::newest_first()),
         ("title_narrow", title_only("Citation")),
         ("title_broad", title_only("e")),
-        ("creator", ResourceQuery {
-            sort: None,
-            filter: ResourceFilter {
-                creator: Some(creator),
-                ..ResourceFilter::none()
+        (
+            "creator",
+            ResourceQuery {
+                sort: None,
+                filter: ResourceFilter {
+                    search: None,
+                    creator: Some(creator),
+                    ..ResourceFilter::none()
+                },
             },
-        }),
-        ("published_range", ResourceQuery {
-            sort: None,
-            filter: ResourceFilter {
-                published: Some(PublishedRange {
-                    from: Some(year(1970)),
-                    to: Some(year(1980)),
-                }),
-                ..ResourceFilter::none()
+        ),
+        (
+            "published_range",
+            ResourceQuery {
+                sort: None,
+                filter: ResourceFilter {
+                    search: None,
+                    published: Some(PublishedRange {
+                        from: Some(year(1970)),
+                        to: Some(year(1980)),
+                    }),
+                    ..ResourceFilter::none()
+                },
             },
-        }),
-        ("combined", ResourceQuery {
-            sort: None,
-            filter: ResourceFilter {
-                title: Some(needle("Citation")),
-                published: Some(PublishedRange {
-                    from: Some(year(1970)),
-                    to: Some(year(2000)),
-                }),
-                ..ResourceFilter::none()
+        ),
+        (
+            "combined",
+            ResourceQuery {
+                sort: None,
+                filter: ResourceFilter {
+                    search: None,
+                    title: Some(needle("Citation")),
+                    published: Some(PublishedRange {
+                        from: Some(year(1970)),
+                        to: Some(year(2000)),
+                    }),
+                    ..ResourceFilter::none()
+                },
             },
-        }),
+        ),
         (MISS_CASE, title_only("zzz-no-such-title")),
-        ("title_filter_title_sort", ResourceQuery {
-            sort: Some((ResourceSort::Title, SortDirection::Ascending)),
-            filter: ResourceFilter {
-                title: Some(needle("Report")),
-                ..ResourceFilter::none()
+        (
+            "title_filter_title_sort",
+            ResourceQuery {
+                sort: Some((ResourceSort::Title, SortDirection::Ascending)),
+                filter: ResourceFilter {
+                    search: None,
+                    title: Some(needle("Report")),
+                    ..ResourceFilter::none()
+                },
             },
-        }),
+        ),
     ]
 }
 
@@ -134,7 +151,9 @@ fn bench_resource_filter(c: &mut Criterion) {
 
     for n in sizes() {
         let store = rt
-            .block_on(SurrealStore::open_memory_with_query_timeout(Some(QUERY_TIMEOUT)))
+            .block_on(SurrealStore::open_memory_with_query_timeout(Some(
+                QUERY_TIMEOUT,
+            )))
             .expect("open");
         let seeded = Instant::now();
         rt.block_on(seed_demo_library(&store, n)).expect("seed");
@@ -173,9 +192,9 @@ fn bench_resource_filter(c: &mut Criterion) {
                     "case {name} matched no rows at n={n}; seed or filter drifted"
                 ),
                 Ok(_) => {}
-                Err(err) => eprintln!(
-                    "resource_filter: case {name} at n={n} failed its guard query: {err}"
-                ),
+                Err(err) => {
+                    eprintln!("resource_filter: case {name} at n={n} failed its guard query: {err}")
+                }
             }
 
             group.bench_with_input(BenchmarkId::new(*name, n), &n, |b, _| {

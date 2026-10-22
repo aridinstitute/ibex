@@ -223,7 +223,9 @@ async fn detail_emits_exactly_one_ok_event() {
     // Setup commands each log their own event; count only the detail call.
     sink.take();
     let Outcome::GetResourceDetail(detail) = state
-        .execute(Command::GetResourceDetail(GetResourceDetail { id: book.id }))
+        .execute(Command::GetResourceDetail(GetResourceDetail {
+            id: book.id,
+        }))
         .await
         .unwrap()
     else {

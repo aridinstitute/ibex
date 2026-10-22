@@ -170,11 +170,7 @@ impl Handler for DeletePerson {
         ev.set(event::PERSON_ID, self.id.to_string());
     }
 
-    async fn run(
-        self,
-        state: &AppState,
-        _ev: &mut Event,
-    ) -> Result<DeletedPerson, CommandError> {
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<DeletedPerson, CommandError> {
         state
             .store()
             .delete_person(self.id)

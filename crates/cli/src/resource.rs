@@ -1,8 +1,6 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
-use oeuvre_app::command::{
-    GetResource, ListResources, ListResourcesQueryPage, UpdateResource,
-};
+use oeuvre_app::command::{GetResource, ListResources, ListResourcesQueryPage, UpdateResource};
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
     BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId,
@@ -182,6 +180,7 @@ fn listing_query(args: &ListArgs) -> Result<Option<ResourceQuery>> {
     Ok(Some(ResourceQuery {
         sort: None,
         filter: ResourceFilter {
+            search: None,
             title,
             creator,
             published,
@@ -203,9 +202,8 @@ async fn list(state: &AppState, args: ListArgs) -> Result<()> {
         // Unfiltered keeps the plain listing: the same rows through the
         // command the library already had.
         None => {
-            let Outcome::ListResources(rows) = state
-                .execute(Command::ListResources(ListResources))
-                .await?
+            let Outcome::ListResources(rows) =
+                state.execute(Command::ListResources(ListResources)).await?
             else {
                 bail!("unexpected outcome from list_resources");
             };
@@ -289,8 +287,8 @@ fn merge_update(existing: &Resource, args: &UpdateArgs) -> Result<NewResource> {
     let mut edit = existing.to_new();
 
     if let Some(kind) = &args.kind {
-        edit.kind = ResourceKind::from_slug(kind)
-            .with_context(|| format!("unknown --kind '{kind}'"))?;
+        edit.kind =
+            ResourceKind::from_slug(kind).with_context(|| format!("unknown --kind '{kind}'"))?;
     }
     if let Some(title) = &args.title {
         edit.title = NonEmptyStr::try_new(title.clone())
@@ -500,9 +498,11 @@ mod tests {
 
     #[test]
     fn no_flags_keep_the_plain_listing() {
-        assert!(listing_query(&list_args(None, None, None, None))
-            .expect("no flags parse")
-            .is_none());
+        assert!(
+            listing_query(&list_args(None, None, None, None))
+                .expect("no flags parse")
+                .is_none()
+        );
     }
 
     #[test]

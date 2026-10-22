@@ -3,15 +3,16 @@ use std::path::Path;
 use std::time::Duration;
 
 use oeuvre_core::{
-    creator_label_name, format_creators_label, published_label_from, BibliographicDate, Creator,
-    CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceFilter,
-    ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series,
-    SeriesId, SortDirection, SortedResourcePage, Store, StoreError, StoreHealth, UtcMillis,
+    BibliographicDate, Creator, CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person,
+    PersonId, Resource, ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery,
+    ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store,
+    StoreError, StoreHealth, UtcMillis, creator_label_name, format_creators_label,
+    published_label_from,
 };
+use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
 use surrealdb::opt::Config;
 use surrealdb::types::{RecordId, RecordIdKey, SerdeWrapper, SurrealValue, ToSql};
-use surrealdb::Surreal;
 
 const NS: &str = "oeuvre";
 const DB: &str = "oeuvre";
@@ -121,9 +122,7 @@ struct ContainerTitleRow {
 
 impl SurrealStore {
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
-        let db = Surreal::new::<SurrealKv>(path)
-            .await
-            .map_err(map_err)?;
+        let db = Surreal::new::<SurrealKv>(path).await.map_err(map_err)?;
         db.use_ns(NS).use_db(DB).await.map_err(map_err)?;
         let store = Self { db };
         store.ensure_schema().await?;
@@ -159,9 +158,7 @@ impl SurrealStore {
         // uses CONTAINS over name_keys.
         let _ = self
             .db
-            .query(
-                "DEFINE INDEX IF NOT EXISTS person_name_keys ON TABLE person FIELDS name_keys",
-            )
+            .query("DEFINE INDEX IF NOT EXISTS person_name_keys ON TABLE person FIELDS name_keys")
             .await;
 
         // Sorted pages resolve the first created edge per resource row; the
@@ -235,6 +232,12 @@ impl SurrealStore {
             .await;
 
         let _ = self.backfill_record_dates().await;
+        self.db
+            .query(include_str!("primary_creator_sort.surql"))
+            .await
+            .map_err(map_err)?
+            .check()
+            .map_err(map_err)?;
 
         Ok(())
     }
@@ -286,10 +289,7 @@ impl SurrealStore {
         PersonDoc {
             name: person.name.clone(),
             aliases: person.aliases.clone(),
-            name_keys: person
-                .name_keys()
-                .map(|k| k.as_str().to_owned())
-                .collect(),
+            name_keys: person.name_keys().map(|k| k.as_str().to_owned()).collect(),
         }
     }
 
@@ -347,10 +347,7 @@ impl SurrealStore {
         (date_added, date_edited)
     }
 
-    async fn load_creators_from_edges(
-        &self,
-        id: ResourceId,
-    ) -> Result<Vec<Creator>, StoreError> {
+    async fn load_creators_from_edges(&self, id: ResourceId) -> Result<Vec<Creator>, StoreError> {
         let resource_thing = Self::resource_key(id);
         let mut response = self
             .db
@@ -367,10 +364,9 @@ impl SurrealStore {
         for row in rows {
             let person_id = Self::thing_to_person_id(&row.person)?;
             let credited_as = match row.credited_as {
-                Some(s) => Some(
-                    NonEmptyStr::try_new(s)
-                        .map_err(|e| StoreError::invalid(e.to_string()))?,
-                ),
+                Some(s) => {
+                    Some(NonEmptyStr::try_new(s).map_err(|e| StoreError::invalid(e.to_string()))?)
+                }
                 None => None,
             };
             creators.push(Creator {
@@ -392,10 +388,7 @@ impl SurrealStore {
         creators: &[Creator],
     ) -> Result<(), StoreError> {
         for creator in creators {
-            let credited = creator
-                .credited_as
-                .as_ref()
-                .map(|s| s.as_str().to_owned());
+            let credited = creator.credited_as.as_ref().map(|s| s.as_str().to_owned());
             self.db
                 .query(
                     "RELATE $from -> created -> $to \
@@ -426,10 +419,7 @@ impl SurrealStore {
 
         // Creator edges for this page's rows only; per-resource order comes
         // from the `order` field, re-sorted after grouping.
-        let edge_things: Vec<RecordId> = ids
-            .iter()
-            .map(|id| Self::resource_key(*id))
-            .collect();
+        let edge_things: Vec<RecordId> = ids.iter().map(|id| Self::resource_key(*id)).collect();
         let mut response = self
             .db
             .query(
@@ -445,10 +435,9 @@ impl SurrealStore {
         for edge in edge_rows {
             let resource_id = Self::thing_to_resource_id(&edge.out)?;
             let credited_as = match edge.credited_as {
-                Some(s) => Some(
-                    NonEmptyStr::try_new(s)
-                        .map_err(|e| StoreError::invalid(e.to_string()))?,
-                ),
+                Some(s) => {
+                    Some(NonEmptyStr::try_new(s).map_err(|e| StoreError::invalid(e.to_string()))?)
+                }
                 None => None,
             };
             let label = creator_label_name(credited_as.as_ref(), &edge.name);
@@ -479,10 +468,8 @@ impl SurrealStore {
             }
         }
         if !missing.is_empty() {
-            let parent_things: Vec<RecordId> = missing
-                .iter()
-                .map(|id| Self::resource_key(*id))
-                .collect();
+            let parent_things: Vec<RecordId> =
+                missing.iter().map(|id| Self::resource_key(*id)).collect();
             let mut response = self
                 .db
                 .query("SELECT id, title FROM resource WHERE id IN $ids")
@@ -491,10 +478,7 @@ impl SurrealStore {
                 .map_err(map_err)?;
             let title_rows: Vec<ContainerTitleRow> = response.take(0).map_err(map_err)?;
             for title_row in title_rows {
-                title_by_id.insert(
-                    Self::thing_to_resource_id(&title_row.id)?,
-                    title_row.title,
-                );
+                title_by_id.insert(Self::thing_to_resource_id(&title_row.id)?, title_row.title);
             }
         }
 
@@ -513,7 +497,8 @@ impl SurrealStore {
                 }
                 None => None,
             };
-            let (date_added, date_edited) = Self::recorded_dates(row.date_added, row.date_edited, id);
+            let (date_added, date_edited) =
+                Self::recorded_dates(row.date_added, row.date_edited, id);
             summaries.push(ResourceSummary {
                 id,
                 kind: row.kind,
@@ -546,21 +531,14 @@ fn map_err(err: surrealdb::Error) -> StoreError {
 #[async_trait::async_trait]
 impl Store for SurrealStore {
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
-        self.db
-            .query("RETURN true")
-            .await
-            .map_err(map_err)?;
+        self.db.query("RETURN true").await.map_err(map_err)?;
         Ok(StoreHealth {
             backend: "surrealdb",
             ok: true,
         })
     }
 
-    async fn create_person(
-        &self,
-        name: Name,
-        aliases: Vec<Name>,
-    ) -> Result<Person, StoreError> {
+    async fn create_person(&self, name: Name, aliases: Vec<Name>) -> Result<Person, StoreError> {
         let id = PersonId::generate();
         let person = Person::try_new(id, name, aliases)?;
         let key = Self::person_key(id);
@@ -692,10 +670,7 @@ impl Store for SurrealStore {
         let id = ResourceId::generate();
         let resource = Resource::try_new(id, new)?;
 
-        self.db
-            .query("BEGIN TRANSACTION")
-            .await
-            .map_err(map_err)?;
+        self.db.query("BEGIN TRANSACTION").await.map_err(map_err)?;
 
         let persist = async {
             let created: Option<ResourceDoc> = self
@@ -717,10 +692,7 @@ impl Store for SurrealStore {
 
         match persist {
             Ok(()) => {
-                self.db
-                    .query("COMMIT TRANSACTION")
-                    .await
-                    .map_err(map_err)?;
+                self.db.query("COMMIT TRANSACTION").await.map_err(map_err)?;
                 Ok(resource)
             }
             Err(err) => {
@@ -748,17 +720,11 @@ impl Store for SurrealStore {
         // An edit restamps date_edited (try_new_updated stamps now) but
         // carries the record's date_added forward, whatever legacy row it
         // replaced.
-        let (date_added, _) = Self::recorded_dates(
-            existing_doc.date_added,
-            existing_doc.date_edited,
-            id,
-        );
+        let (date_added, _) =
+            Self::recorded_dates(existing_doc.date_added, existing_doc.date_edited, id);
         let resource = Resource::try_new_updated(id, date_added, new)?;
 
-        self.db
-            .query("BEGIN TRANSACTION")
-            .await
-            .map_err(map_err)?;
+        self.db.query("BEGIN TRANSACTION").await.map_err(map_err)?;
 
         let persist = async {
             let updated: Option<ResourceDoc> = self
@@ -787,10 +753,7 @@ impl Store for SurrealStore {
 
         match persist {
             Ok(()) => {
-                self.db
-                    .query("COMMIT TRANSACTION")
-                    .await
-                    .map_err(map_err)?;
+                self.db.query("COMMIT TRANSACTION").await.map_err(map_err)?;
                 Ok(resource)
             }
             Err(err) => {
@@ -801,11 +764,14 @@ impl Store for SurrealStore {
     }
 
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError> {
-        let doc: Option<ResourceDoc> = self
+        // Storage-only sort keys never enter the detail projection.
+        let mut response = self
             .db
-            .select(Self::resource_key(id))
+            .query("SELECT * OMIT primary_creator_last_name FROM ONLY $resource")
+            .bind(("resource", Self::resource_key(id)))
             .await
             .map_err(map_err)?;
+        let doc: Option<ResourceDoc> = response.take(0).map_err(map_err)?;
         let doc = doc.ok_or_else(|| StoreError::not_found(format!("resource {id}")))?;
         let creators = self.load_creators_from_edges(id).await?;
 
@@ -818,13 +784,12 @@ impl Store for SurrealStore {
             None => None,
         };
         let series_number = match doc.series_number {
-            Some(s) => Some(
-                NonEmptyStr::try_new(s).map_err(|e| StoreError::invalid(e.to_string()))?,
-            ),
+            Some(s) => {
+                Some(NonEmptyStr::try_new(s).map_err(|e| StoreError::invalid(e.to_string()))?)
+            }
             None => None,
         };
-        let (date_added, date_edited) =
-            Self::recorded_dates(doc.date_added, doc.date_edited, id);
+        let (date_added, date_edited) = Self::recorded_dates(doc.date_added, doc.date_edited, id);
 
         Resource::from_stored(
             id,
@@ -891,10 +856,7 @@ impl Store for SurrealStore {
         };
 
         let rows = self.summaries_for_rows(rows).await?;
-        Ok(ResourcePage {
-            rows,
-            next_before,
-        })
+        Ok(ResourcePage { rows, next_before })
     }
 
     async fn list_resources_query_page(
@@ -979,30 +941,15 @@ impl Store for SurrealStore {
                      LIMIT $limit START $offset"
                 )
             }
-            // The primary-creator key needs the first created edge per row:
-            // a correlated subquery aliases it, the middle level computes
-            // the family-name key over that alias, and the outer level adds
-            // the no-data marker — one level per reference so the edge query
-            // runs once per row.
+            // The key is maintained on writes, avoiding per-row creator lookups.
             Some((ResourceSort::PrimaryCreator, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, sort_key, \
-                            (IF sort_key THEN false ELSE true END) AS sort_missing \
-                     FROM ( \
-                         SELECT *, \
-                             (IF first[0].credited_as THEN \
-                                  array::last(string::split(first[0].credited_as, ' ')) \
-                              ELSE IF first[0].name.last THEN first[0].name.last \
-                              ELSE IF first[0].name.first THEN first[0].name.first \
-                              ELSE NONE END) AS sort_key \
-                         FROM ( \
-                             SELECT *, (SELECT order, credited_as, in.name AS name FROM created \
-                                  WHERE out = $parent.id ORDER BY order LIMIT 1) AS first \
-                             FROM {from_sql}{where_sql} \
-                         ) \
-                     ) \
-                     ORDER BY sort_missing {dir}, sort_key COLLATE {dir}, id DESC \
+                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                            primary_creator_last_name, \
+                            (IF primary_creator_last_name THEN false ELSE true END) AS sort_missing \
+                     FROM {from_sql}{where_sql} \
+                     ORDER BY sort_missing {dir}, primary_creator_last_name COLLATE {dir}, id DESC \
                      LIMIT $limit START $offset"
                 )
             }
@@ -1016,6 +963,9 @@ impl Store for SurrealStore {
         // once here instead of per row inside the query.
         if let Some(needle) = query.filter.title.as_ref() {
             statement = statement.bind(("title_needle", needle.as_str().to_lowercase()));
+        }
+        if let Some(needle) = query.filter.search.as_ref() {
+            statement = statement.bind(("search_needle", needle.as_str().to_lowercase()));
         }
         // The creator binds as its record id, matching the created edges'
         // `in` links without string building.
@@ -1079,6 +1029,9 @@ fn filter_where(filter: &ResourceFilter) -> String {
     if filter.title.is_some() {
         clauses.push("string::lowercase(title) CONTAINS $title_needle");
     }
+    if filter.search.is_some() {
+        clauses.push("(string::lowercase(title) CONTAINS $search_needle OR string::lowercase(publisher ?? '') CONTAINS $search_needle)");
+    }
     // The kind clause compares against the wrapped enum's stored slug.
     if filter.kind.is_some() {
         clauses.push("kind = $kind");
@@ -1093,9 +1046,7 @@ fn filter_where(filter: &ResourceFilter) -> String {
     // their clause is present.
     if let Some(range) = filter.published {
         if range.from.is_some() {
-            clauses.push(
-                "(IF published THEN published.instant >= $published_from ELSE false END)",
-            );
+            clauses.push("(IF published THEN published.instant >= $published_from ELSE false END)");
         }
         if range.to.is_some() {
             clauses.push("(IF published THEN published.instant < $published_to ELSE false END)");
@@ -1116,6 +1067,100 @@ mod tests {
         ResourceSort, SortDirection, Store, UtcMillis,
     };
 
+    #[tokio::test]
+
+    async fn search_matches_title_or_publisher_before_paging() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let mut matching = Vec::new();
+        for (title, publisher, kind) in [
+            ("Mixed Needle title", None, ResourceKind::Book),
+            (
+                "Publisher only",
+                Some("The NEEDLE Press"),
+                ResourceKind::Book,
+            ),
+            ("Needle in both", Some("Needle Press"), ResourceKind::Book),
+            ("Unrelated", None, ResourceKind::Book),
+            ("Wrong kind", Some("Needle Press"), ResourceKind::Journal),
+        ] {
+            let row = store
+                .create_resource(NewResource {
+                    kind,
+                    title: NonEmptyStr::try_new(title).unwrap(),
+                    publisher: publisher.map(str::to_owned),
+                    creators: vec![],
+                    published: None,
+                    accessed: None,
+                    parent_id: None,
+                    series_id: None,
+                    series_number: None,
+                })
+                .await
+                .unwrap();
+            if ["Mixed Needle title", "Publisher only", "Needle in both"].contains(&title) {
+                matching.push(row.id);
+            }
+        }
+        let query = ResourceQuery {
+            sort: Some((ResourceSort::Title, SortDirection::Ascending)),
+            filter: ResourceFilter {
+                search: Some(NonEmptyStr::try_new("nEeDlE").unwrap()),
+                kind: Some(ResourceKind::Book),
+                ..ResourceFilter::none()
+            },
+        };
+        let mut found = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = store
+                .list_resources_query_page(&query, offset, 1)
+                .await
+                .unwrap();
+            assert_eq!(page.rows.len(), 1);
+            found.push(page.rows[0].id);
+            match page.next_offset {
+                Some(next) => offset = next,
+                None => break,
+            }
+        }
+        assert_eq!(found.len(), 3);
+        found.sort_by_key(|id| id.to_string());
+        matching.sort_by_key(|id| id.to_string());
+        assert_eq!(found, matching);
+        let mut title_only = query.clone();
+        title_only.filter.search = None;
+        title_only.filter.title = Some(NonEmptyStr::try_new("needle").unwrap());
+        assert_eq!(
+            store
+                .list_resources_query_page(&title_only, 0, 10)
+                .await
+                .unwrap()
+                .rows
+                .len(),
+            2
+        );
+        let mut miss = query.clone();
+        miss.filter.search = Some(NonEmptyStr::try_new("no such publisher or title").unwrap());
+        assert!(
+            store
+                .list_resources_query_page(&miss, 0, 10)
+                .await
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        let mut cleared = query;
+        cleared.filter.search = None;
+        assert_eq!(
+            store
+                .list_resources_query_page(&cleared, 0, 10)
+                .await
+                .unwrap()
+                .rows
+                .len(),
+            4
+        );
+    }
     const UNIX_MS_2021_01_01_UTC: i64 = 1_609_459_200_000;
 
     async fn page_article(
@@ -1212,6 +1257,7 @@ mod tests {
         let query = ResourceQuery {
             sort: None,
             filter: ResourceFilter {
+                search: None,
                 creator: Some(ada),
                 ..ResourceFilter::none()
             },
@@ -1278,10 +1324,11 @@ mod tests {
                 "cursor must never yield an empty page with rows remaining"
             );
             assert!(page.rows.len() <= 2);
-            assert!(page
-                .rows
-                .iter()
-                .all(|row| before.is_none_or(|b| row.id.as_ulid() < b.as_ulid())));
+            assert!(
+                page.rows
+                    .iter()
+                    .all(|row| before.is_none_or(|b| row.id.as_ulid() < b.as_ulid()))
+            );
             if let Some(next) = page.next_before {
                 assert_eq!(Some(next), page.rows.last().map(|row| row.id));
             }
@@ -1460,7 +1507,100 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "surrealdb 3.3.4's Mem engine drops ORDER BY when the row source is not a plain table scan and orders nondeterministically on the record id alone; known upstream regression, passes on the file engine the GUI runs on"]
+    async fn primary_creator_last_name_is_stored_and_tracks_related_writes() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let person = store
+            .create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let resource = sortable_resource(&store, vec![(person.id, None)], "Algorithms", None).await;
+        let read_key = || async {
+            let mut response = store
+                .db
+                .query("SELECT VALUE primary_creator_last_name FROM ONLY $resource")
+                .bind(("resource", SurrealStore::resource_key(resource.id)))
+                .await
+                .unwrap();
+            response.take::<Option<String>>(0).unwrap()
+        };
+        assert_eq!(read_key().await.as_deref(), Some("Lovelace"));
+        store
+            .update_person(
+                person.id,
+                Name::try_new(Some("Ada"), Some("Byron"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(read_key().await.as_deref(), Some("Byron"));
+        store
+            .db
+            .query("UPDATE created SET credited_as = 'A. King' WHERE out = $resource")
+            .bind(("resource", SurrealStore::resource_key(resource.id)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(read_key().await.as_deref(), Some("King"));
+        // Reordering an existing edge changes which creator supplies the key.
+        let other = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        store
+            .db
+            .query("RELATE $person->created->$resource SET order = 1, role = 'author'")
+            .bind(("person", SurrealStore::person_key(other.id)))
+            .bind(("resource", SurrealStore::resource_key(resource.id)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(read_key().await.as_deref(), Some("King"));
+        store
+            .db
+            .query("UPDATE created SET order = 2 WHERE out = $resource AND credited_as = 'A. King'")
+            .bind(("resource", SurrealStore::resource_key(resource.id)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(read_key().await.as_deref(), Some("Hopper"));
+        // Simulate an older database with neither the field nor migration marker.
+        store.db.query("REMOVE FIELD primary_creator_last_name ON resource; UPDATE resource UNSET primary_creator_last_name; DELETE oeuvre_migration:primary_creator_last_name;")
+            .await.unwrap().check().unwrap();
+        store.ensure_schema().await.unwrap();
+        assert_eq!(read_key().await.as_deref(), Some("Hopper"));
+        // Refreshing sort metadata must not mark the resource as edited.
+        let detail = store.get_resource(resource.id).await.unwrap();
+        assert_eq!(detail.date_edited, resource.date_edited);
+        store
+            .db
+            .query("DELETE created WHERE out = $resource")
+            .bind(("resource", SurrealStore::resource_key(resource.id)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(read_key().await, None);
+        assert_eq!(
+            store
+                .get_resource(resource.id)
+                .await
+                .unwrap()
+                .title
+                .as_str(),
+            "Algorithms"
+        );
+    }
+
+    #[tokio::test]
     async fn sorted_primary_creator_keys_on_family_name_from_the_edges() {
         let store = SurrealStore::open_memory().await.unwrap();
         let hopper = store
@@ -1494,7 +1634,8 @@ mod tests {
             None,
         )
         .await;
-        let by_hopper = sortable_resource(&store, vec![(hopper.id, None)], "Compiler origins", None).await;
+        let by_hopper =
+            sortable_resource(&store, vec![(hopper.id, None)], "Compiler origins", None).await;
         let by_augustine =
             sortable_resource(&store, vec![(augustine.id, None)], "Confessions", None).await;
         // A credited string keys on its last word, tying the coauthored book
@@ -1513,11 +1654,17 @@ mod tests {
         let mut lovelace_pair = [coauthored.id, credited.id];
         lovelace_pair.sort_by_key(|id| std::cmp::Reverse(id.as_ulid()));
         let title_of = |id: &ResourceId| -> String {
-            [&coauthored, &by_hopper, &by_augustine, &credited, &container]
-                .iter()
-                .find(|r| r.id == *id)
-                .map(|r| r.title.as_str().to_owned())
-                .unwrap_or_default()
+            [
+                &coauthored,
+                &by_hopper,
+                &by_augustine,
+                &credited,
+                &container,
+            ]
+            .iter()
+            .find(|r| r.id == *id)
+            .map(|r| r.title.as_str().to_owned())
+            .unwrap_or_default()
         };
         let expected: Vec<String> = [
             "Confessions".to_owned(),
@@ -1578,7 +1725,13 @@ mod tests {
             ("Middle era", "B-movie era", 1_500_000_000_000),
             ("Old chronicle", "Zzz era", 1_000_000_000_000),
         ] {
-            sortable_resource(&store, vec![(grace.id, None)], title, Some((instant, label))).await;
+            sortable_resource(
+                &store,
+                vec![(grace.id, None)],
+                title,
+                Some((instant, label)),
+            )
+            .await;
         }
         // The container has no date, so it lands last in ascending order.
         sortable_container(&store, "Speculum").await;
@@ -1723,8 +1876,7 @@ mod tests {
             .await
             .unwrap();
 
-        let first =
-            sortable_resource(&store, vec![(grace.id, None)], "First", None).await;
+        let first = sortable_resource(&store, vec![(grace.id, None)], "First", None).await;
         std::thread::sleep(Duration::from_millis(3));
         sortable_resource(&store, vec![(grace.id, None)], "Second", None).await;
 
@@ -1743,10 +1895,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            sorted_titles(&ascending),
-            ["Second", "First, retitled"]
-        );
+        assert_eq!(sorted_titles(&ascending), ["Second", "First, retitled"]);
 
         let descending = store
             .list_resources_query_page(
@@ -1756,10 +1905,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            sorted_titles(&descending),
-            ["First, retitled", "Second"]
-        );
+        assert_eq!(sorted_titles(&descending), ["First, retitled", "Second"]);
     }
 
     #[tokio::test]
@@ -1882,6 +2028,7 @@ mod tests {
         ResourceQuery {
             sort: None,
             filter: ResourceFilter {
+                search: None,
                 title: Some(NonEmptyStr::try_new(needle).unwrap()),
                 creator: None,
                 published: None,
@@ -1981,32 +2128,27 @@ mod tests {
         let query = ResourceQuery {
             sort: Some((ResourceSort::Title, SortDirection::Ascending)),
             filter: ResourceFilter {
+                search: None,
                 title: Some(NonEmptyStr::try_new("DE").unwrap()),
                 creator: None,
                 published: None,
                 kind: None,
             },
         };
-        let first = store
-            .list_resources_query_page(&query, 0, 1)
-            .await
-            .unwrap();
+        let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
         assert_eq!(sorted_titles(&first), ["Beta modes"]);
         assert_eq!(first.next_offset, Some(1));
 
-        let second = store
-            .list_resources_query_page(&query, 1, 1)
-            .await
-            .unwrap();
+        let second = store.list_resources_query_page(&query, 1, 1).await.unwrap();
         assert_eq!(sorted_titles(&second), ["GAMMA nodes"]);
         assert_eq!(second.next_offset, None);
     }
-
 
     fn creator_query(person: PersonId) -> ResourceQuery {
         ResourceQuery {
             sort: None,
             filter: ResourceFilter {
+                search: None,
                 title: None,
                 creator: Some(person),
                 published: None,
@@ -2097,23 +2239,18 @@ mod tests {
         let query = ResourceQuery {
             sort: Some((ResourceSort::Title, SortDirection::Ascending)),
             filter: ResourceFilter {
+                search: None,
                 title: None,
                 creator: Some(ada.id),
                 published: None,
                 kind: None,
             },
         };
-        let first = store
-            .list_resources_query_page(&query, 0, 1)
-            .await
-            .unwrap();
+        let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
         assert_eq!(sorted_titles(&first), ["Alpha Waves"]);
         assert_eq!(first.next_offset, Some(1));
 
-        let second = store
-            .list_resources_query_page(&query, 1, 1)
-            .await
-            .unwrap();
+        let second = store.list_resources_query_page(&query, 1, 1).await.unwrap();
         assert_eq!(sorted_titles(&second), ["Gamma Nodes"]);
         assert_eq!(second.next_offset, None);
     }
@@ -2140,13 +2277,19 @@ mod tests {
         // Ada co-authors one resource whose first creator is Grace, so the
         // filter key and the sort key deliberately differ.
         sortable_resource(&store, vec![(grace.id, None)], "Grace Solo", None).await;
-        sortable_resource(&store, vec![(grace.id, None), (ada.id, None)], "Shared Work", None)
-            .await;
+        sortable_resource(
+            &store,
+            vec![(grace.id, None), (ada.id, None)],
+            "Shared Work",
+            None,
+        )
+        .await;
         sortable_resource(&store, vec![(ada.id, None)], "Ada Solo", None).await;
 
         let query = ResourceQuery {
             sort: Some((ResourceSort::PrimaryCreator, SortDirection::Ascending)),
             filter: ResourceFilter {
+                search: None,
                 creator: Some(ada.id),
                 ..ResourceFilter::none()
             },
@@ -2165,6 +2308,7 @@ mod tests {
         ResourceQuery {
             sort: None,
             filter: ResourceFilter {
+                search: None,
                 title: None,
                 creator: None,
                 published: Some(oeuvre_core::PublishedRange {
@@ -2193,9 +2337,14 @@ mod tests {
             ("Beta modes", 2_000, "1900"),
             ("charlie nodes", 3_000, "2000"),
         ] {
-            let id = sortable_resource(&store, vec![(grace.id, None)], title, Some((instant, label)))
-                .await
-                .id;
+            let id = sortable_resource(
+                &store,
+                vec![(grace.id, None)],
+                title,
+                Some((instant, label)),
+            )
+            .await
+            .id;
             created.push((id, instant, title));
         }
         let delta = sortable_resource(&store, vec![(grace.id, None)], "Delta notes", None)
@@ -2273,13 +2422,19 @@ mod tests {
             ("alpha waves", 1_000, "1999"),
             ("Delta notes", 4_000, "2002"),
         ] {
-            sortable_resource(&store, vec![(grace.id, None)], title, Some((instant, label)))
-                .await;
+            sortable_resource(
+                &store,
+                vec![(grace.id, None)],
+                title,
+                Some((instant, label)),
+            )
+            .await;
         }
 
         let query = ResourceQuery {
             sort: Some((ResourceSort::Title, SortDirection::Ascending)),
             filter: ResourceFilter {
+                search: None,
                 title: None,
                 creator: None,
                 published: Some(oeuvre_core::PublishedRange {
@@ -2289,17 +2444,11 @@ mod tests {
                 kind: None,
             },
         };
-        let first = store
-            .list_resources_query_page(&query, 0, 1)
-            .await
-            .unwrap();
+        let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
         assert_eq!(sorted_titles(&first), ["Beta modes"]);
         assert_eq!(first.next_offset, Some(1));
 
-        let second = store
-            .list_resources_query_page(&query, 1, 1)
-            .await
-            .unwrap();
+        let second = store.list_resources_query_page(&query, 1, 1).await.unwrap();
         assert_eq!(sorted_titles(&second), ["GAMMA nodes"]);
         assert_eq!(second.next_offset, None);
     }
@@ -2324,18 +2473,39 @@ mod tests {
 
         // Every predicate alone matches several rows; only their
         // intersection names one.
-        sortable_resource(&store, vec![(ada.id, None)], "alpha waves", Some((1_000, "1999")))
-            .await;
-        sortable_resource(&store, vec![(ada.id, None)], "alpha nodes", Some((2_000, "2001")))
-            .await;
-        sortable_resource(&store, vec![(grace.id, None)], "alpha notes", Some((2_000, "2000")))
-            .await;
-        sortable_resource(&store, vec![(grace.id, None)], "beta waves", Some((1_000, "1998")))
-            .await;
+        sortable_resource(
+            &store,
+            vec![(ada.id, None)],
+            "alpha waves",
+            Some((1_000, "1999")),
+        )
+        .await;
+        sortable_resource(
+            &store,
+            vec![(ada.id, None)],
+            "alpha nodes",
+            Some((2_000, "2001")),
+        )
+        .await;
+        sortable_resource(
+            &store,
+            vec![(grace.id, None)],
+            "alpha notes",
+            Some((2_000, "2000")),
+        )
+        .await;
+        sortable_resource(
+            &store,
+            vec![(grace.id, None)],
+            "beta waves",
+            Some((1_000, "1998")),
+        )
+        .await;
 
         let query = ResourceQuery {
             sort: None,
             filter: ResourceFilter {
+                search: None,
                 title: Some(NonEmptyStr::try_new("ALPHA").unwrap()),
                 creator: Some(ada.id),
                 published: Some(oeuvre_core::PublishedRange {
@@ -2447,15 +2617,17 @@ mod tests {
         let store = SurrealStore::open_memory().await.unwrap();
         let id = PersonId::generate();
         assert!(store.get_person(id).await.unwrap_err().is_not_found());
-        assert!(store
-            .update_person(
-                id,
-                Name::try_new(None::<&str>, Some("X"), None::<&str>).unwrap(),
-                vec![],
-            )
-            .await
-            .unwrap_err()
-            .is_not_found());
+        assert!(
+            store
+                .update_person(
+                    id,
+                    Name::try_new(None::<&str>, Some("X"), None::<&str>).unwrap(),
+                    vec![],
+                )
+                .await
+                .unwrap_err()
+                .is_not_found()
+        );
         assert!(store.delete_person(id).await.unwrap_err().is_not_found());
     }
 
@@ -2485,14 +2657,8 @@ mod tests {
     async fn find_returns_two_people_with_same_name() {
         let store = SurrealStore::open_memory().await.unwrap();
         let shared = Name::try_new(Some("John"), Some("Smith"), None::<&str>).unwrap();
-        let a = store
-            .create_person(shared.clone(), vec![])
-            .await
-            .unwrap();
-        let b = store
-            .create_person(shared.clone(), vec![])
-            .await
-            .unwrap();
+        let a = store.create_person(shared.clone(), vec![]).await.unwrap();
+        let b = store.create_person(shared.clone(), vec![]).await.unwrap();
 
         let hits = store.find_persons_by_name(&shared).await.unwrap();
         assert_eq!(hits.len(), 2);
@@ -2571,7 +2737,10 @@ mod tests {
         assert_eq!(loaded.creators[1].person_id, editor.id);
         assert_eq!(loaded.creators[1].order, 1);
         assert_eq!(
-            loaded.creators[1].credited_as.as_ref().map(NonEmptyStr::as_str),
+            loaded.creators[1]
+                .credited_as
+                .as_ref()
+                .map(NonEmptyStr::as_str),
             Some("ed.")
         );
     }
@@ -2636,7 +2805,10 @@ mod tests {
         assert_eq!(updated.creators[0].person_id, editor.id);
         assert_eq!(updated.creators[0].role, CreatorRole::Editor);
         assert_eq!(
-            updated.creators[0].credited_as.as_ref().map(NonEmptyStr::as_str),
+            updated.creators[0]
+                .credited_as
+                .as_ref()
+                .map(NonEmptyStr::as_str),
             Some("ed.")
         );
         assert_eq!(updated.creators[1].person_id, author.id);
@@ -2742,7 +2914,10 @@ mod tests {
             .query("CREATE type::record('resource', $id) SET kind = $kind, title = $title")
             .bind(("id", id.to_string()))
             .bind(("kind", SerdeWrapper(ResourceKind::Book)))
-            .bind(("title", SerdeWrapper(NonEmptyStr::try_new("Legacy Book").unwrap())))
+            .bind((
+                "title",
+                SerdeWrapper(NonEmptyStr::try_new("Legacy Book").unwrap()),
+            ))
             .await
             .unwrap();
         store
@@ -3053,9 +3228,11 @@ mod tests {
 
         let listed = store.list_resources().await.unwrap();
         assert_eq!(listed.len(), 3);
-        assert!(listed
-            .windows(2)
-            .all(|w| w[0].id.as_ulid() > w[1].id.as_ulid()));
+        assert!(
+            listed
+                .windows(2)
+                .all(|w| w[0].id.as_ulid() > w[1].id.as_ulid())
+        );
 
         let by_id = |id: ResourceId| {
             listed

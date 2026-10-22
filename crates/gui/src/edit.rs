@@ -4,12 +4,12 @@
 //! rules run under plain unit tests; `LibraryApp` owns the input entities
 //! and wires them to the worker.
 
-use gpui_kit::component::searchable_list::SearchableListItem;
 use gpui_kit::SharedString;
+use gpui_kit::component::searchable_list::SearchableListItem;
 
 use oeuvre_core::{
-    utc_year_from_millis, BibliographicDate, NewResource, NonEmptyStr, Resource, ResourceId,
-    ResourceKind, SeriesId, UtcMillis,
+    BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId, Resource,
+    ResourceId, ResourceKind, SeriesId, UtcMillis, utc_year_from_millis,
 };
 
 use crate::kind::kind_label;
@@ -18,7 +18,9 @@ use crate::kind::kind_label;
 /// into this plain shape at save time, so the payload build below stays
 /// window-free and unit-testable. Parent and series are ids, not free
 /// text: the parent arrives from a dropdown keyed by id, the series rides
-/// through until series storage lands a listing API.
+/// through until series storage lands a listing API. Creators are person
+/// specs; the inline multi-select picks people and defaults new picks to
+/// Author.
 pub struct EditDraft {
     pub title: String,
     pub kind: ResourceKind,
@@ -28,6 +30,7 @@ pub struct EditDraft {
     pub accessed_year: String,
     pub series: String,
     pub series_number: String,
+    pub creators: Vec<CreatorSpec>,
 }
 
 /// The value each input opens with: the stored record's own values,
@@ -40,12 +43,32 @@ pub fn prefill_draft(record: &Resource) -> EditDraft {
         publisher: record.publisher.clone().unwrap_or_default(),
         published_year: date_year(record.published.as_ref()),
         accessed_year: date_year(record.accessed.as_ref()),
-        series: record.series_id.map(|id| id.to_string()).unwrap_or_default(),
+        series: record
+            .series_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
         series_number: record
             .series_number
             .as_ref()
             .map(|number| number.as_str().to_owned())
             .unwrap_or_default(),
+        creators: record.to_new().creators,
+    }
+}
+
+/// Empty draft for creating a new Book row inline: no title yet, no
+/// creators, no optionals. Save validates the title before create.
+pub fn empty_create_draft() -> EditDraft {
+    EditDraft {
+        title: String::new(),
+        kind: ResourceKind::Book,
+        parent: None,
+        publisher: String::new(),
+        published_year: String::new(),
+        accessed_year: String::new(),
+        series: String::new(),
+        series_number: String::new(),
+        creators: Vec::new(),
     }
 }
 
@@ -56,13 +79,37 @@ pub fn prefill_draft(record: &Resource) -> EditDraft {
 /// the dropdown's options carry only stored ids.
 pub fn build_update(record: &Resource, draft: &EditDraft) -> Result<NewResource, String> {
     let mut edit = record.to_new();
+    apply_draft_fields(&mut edit, draft)?;
+    Ok(edit)
+}
 
+/// Draft to a create payload: same scalar rules as update, no stored
+/// record to ride through. Parent/series/accessed stay whatever the draft
+/// carries (inline create leaves them empty).
+pub fn build_create(draft: &EditDraft) -> Result<NewResource, String> {
+    let mut new = NewResource {
+        kind: draft.kind,
+        title: NonEmptyStr::try_new("placeholder").expect("literal"),
+        creators: Vec::new(),
+        publisher: None,
+        published: None,
+        accessed: None,
+        parent_id: None,
+        series_id: None,
+        series_number: None,
+    };
+    apply_draft_fields(&mut new, draft)?;
+    Ok(new)
+}
+
+/// Shared field merge for update and create payloads.
+fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), String> {
     let title = draft.title.trim();
-    edit.title =
-        NonEmptyStr::try_new(title).map_err(|_| "Title must not be empty".to_owned())?;
+    edit.title = NonEmptyStr::try_new(title).map_err(|_| "Title must not be empty".to_owned())?;
 
     edit.kind = draft.kind;
     edit.parent_id = draft.parent;
+    edit.creators = draft.creators.clone();
 
     let publisher = draft.publisher.trim();
     edit.publisher = (!publisher.is_empty()).then(|| publisher.to_owned());
@@ -78,12 +125,33 @@ pub fn build_update(record: &Resource, draft: &EditDraft) -> Result<NewResource,
     let number = draft.series_number.trim();
     edit.series_number = (!number.is_empty())
         .then(|| {
-            NonEmptyStr::try_new(number)
-                .map_err(|_| "Series number must not be empty".to_owned())
+            NonEmptyStr::try_new(number).map_err(|_| "Series number must not be empty".to_owned())
         })
         .transpose()?;
 
-    Ok(edit)
+    Ok(())
+}
+
+/// Person ids from a multi-select, merged into creator specs: keep role and
+/// credited-as when the person was already on the record, otherwise Author.
+pub fn creators_from_person_ids(
+    person_ids: &[PersonId],
+    previous: &[CreatorSpec],
+) -> Vec<CreatorSpec> {
+    person_ids
+        .iter()
+        .map(|person_id| {
+            previous
+                .iter()
+                .find(|c| c.person_id == *person_id)
+                .cloned()
+                .unwrap_or(CreatorSpec {
+                    person_id: *person_id,
+                    role: CreatorRole::Author,
+                    credited_as: None,
+                })
+        })
+        .collect()
 }
 
 /// One dropdown row for the kind box: the label reads, the kind keys.
@@ -136,8 +204,8 @@ fn year_field(label: &str, text: &str) -> Result<Option<BibliographicDate>, Stri
     let year: i64 = text
         .parse()
         .map_err(|_| format!("{label} must be a whole year, got '{text}'"))?;
-    let instant = UtcMillis::jan_1_utc(year)
-        .ok_or_else(|| format!("{label} is outside the calendar"))?;
+    let instant =
+        UtcMillis::jan_1_utc(year).ok_or_else(|| format!("{label} is outside the calendar"))?;
     BibliographicDate::try_new(instant, None)
         .map(Some)
         .map_err(|_| format!("{label} is outside the calendar"))
@@ -145,10 +213,13 @@ fn year_field(label: &str, text: &str) -> Result<Option<BibliographicDate>, Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{EditDraft, KindItem, SearchableListItem, build_update, kind_items, prefill_draft};
+    use super::{
+        EditDraft, KindItem, SearchableListItem, build_create, build_update,
+        creators_from_person_ids, empty_create_draft, kind_items, prefill_draft,
+    };
     use oeuvre_core::{
-        BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId,
-        Resource, ResourceId, ResourceKind, SeriesId, UtcMillis,
+        BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId, Resource,
+        ResourceId, ResourceKind, SeriesId, UtcMillis,
     };
 
     /// A record carrying every scalar the form edits, in a shape the form
@@ -189,7 +260,7 @@ mod tests {
         .expect("record valid")
     }
 
-    fn draft_with(title: &str) -> EditDraft {
+    fn draft_with(title: &str, creators: Vec<CreatorSpec>) -> EditDraft {
         EditDraft {
             title: title.into(),
             kind: ResourceKind::BookSection,
@@ -199,6 +270,7 @@ mod tests {
             accessed_year: "2020".into(),
             series: "".into(),
             series_number: "".into(),
+            creators,
         }
     }
 
@@ -212,8 +284,13 @@ mod tests {
         assert_eq!(draft.publisher, "MIT Press");
         assert_eq!(draft.published_year, "1991");
         assert_eq!(draft.accessed_year, "2020");
-        assert_eq!(draft.series, record.series_id.expect("series set").to_string());
+        assert_eq!(
+            draft.series,
+            record.series_id.expect("series set").to_string()
+        );
         assert_eq!(draft.series_number, "LCL 26");
+        assert_eq!(draft.creators.len(), 1);
+        assert_eq!(draft.creators[0].person_id, record.creators[0].person_id);
     }
 
     #[test]
@@ -226,6 +303,7 @@ mod tests {
         edit.parent_id = None;
         edit.series_id = None;
         edit.series_number = None;
+        edit.creators = Vec::new();
         record = Resource::try_new(record.id, edit).expect("stripped record valid");
 
         let draft = prefill_draft(&record);
@@ -235,6 +313,7 @@ mod tests {
         assert_eq!(draft.accessed_year, "");
         assert_eq!(draft.series, "");
         assert_eq!(draft.series_number, "");
+        assert!(draft.creators.is_empty());
         // Title is never optional, so it still prefills.
         assert_eq!(draft.title, "Citation Networks");
     }
@@ -242,7 +321,7 @@ mod tests {
     #[test]
     fn build_update_applies_edits_and_clears_emptied() {
         let record = loaded_record();
-        let mut draft = draft_with("Retitled");
+        let mut draft = draft_with("Retitled", record.to_new().creators);
         draft.kind = ResourceKind::Book;
         draft.parent = Some(ResourceId::generate());
         draft.publisher = "Penguin".into();
@@ -263,7 +342,9 @@ mod tests {
                 .expect("published set")
                 .instant()
                 .as_unix_ms(),
-            UtcMillis::jan_1_utc(2024).expect("year in calendar").as_unix_ms(),
+            UtcMillis::jan_1_utc(2024)
+                .expect("year in calendar")
+                .as_unix_ms(),
         );
         assert_eq!(new.accessed, None);
         assert_eq!(new.series_id, record.series_id);
@@ -271,34 +352,113 @@ mod tests {
     }
 
     #[test]
-    fn build_update_rides_creators_through() {
+    fn build_update_applies_creators_from_draft() {
         let record = loaded_record();
-        let new = build_update(&record, &draft_with("Retitled")).expect("draft merges");
+        let previous = record.to_new().creators;
+        let other = PersonId::generate();
+        let mut draft = draft_with("Retitled", previous.clone());
+        draft.creators = creators_from_person_ids(&[other], &previous);
+
+        let new = build_update(&record, &draft).expect("draft merges");
         assert_eq!(new.creators.len(), 1);
-        assert_eq!(new.creators[0].person_id, record.creators[0].person_id);
+        assert_eq!(new.creators[0].person_id, other);
         assert_eq!(new.creators[0].role, CreatorRole::Author);
-        assert_eq!(
-            new.creators[0].credited_as.as_ref().map(|c| c.as_str()),
-            Some("A. Author"),
-        );
+        assert_eq!(new.creators[0].credited_as, None);
         // The helper draft carries no parent, so the merge clears the
         // record's: an unselected dropdown means no parent.
         assert_eq!(new.parent_id, None);
     }
 
     #[test]
+    fn build_update_allows_empty_creators() {
+        let record = loaded_record();
+        let draft = draft_with("Retitled", Vec::new());
+        let new = build_update(&record, &draft).expect("empty creators ok");
+        assert!(new.creators.is_empty());
+    }
+
+    #[test]
+    fn build_create_from_empty_draft_rejects_blank_title() {
+        let err = build_create(&empty_create_draft()).expect_err("blank title");
+        assert_eq!(err, "Title must not be empty");
+    }
+
+    #[test]
+    fn build_create_makes_book_with_optional_fields() {
+        let author = PersonId::generate();
+        let mut draft = empty_create_draft();
+        draft.title = "Unsigned dictionary".into();
+        draft.publisher = "OUP".into();
+        draft.published_year = "2020".into();
+        draft.creators = vec![CreatorSpec {
+            person_id: author,
+            role: CreatorRole::Author,
+            credited_as: None,
+        }];
+
+        let new = build_create(&draft).expect("create payload");
+        assert_eq!(new.kind, ResourceKind::Book);
+        assert_eq!(new.title.as_str(), "Unsigned dictionary");
+        assert_eq!(new.publisher.as_deref(), Some("OUP"));
+        assert_eq!(new.creators.len(), 1);
+        assert_eq!(new.parent_id, None);
+        assert_eq!(new.accessed, None);
+        assert_eq!(new.series_id, None);
+    }
+
+    #[test]
+    fn creators_from_person_ids_keeps_prior_credited_as() {
+        let author = PersonId::generate();
+        let previous = vec![CreatorSpec {
+            person_id: author,
+            role: CreatorRole::Editor,
+            credited_as: Some(NonEmptyStr::try_new("A. Author").unwrap()),
+        }];
+        let merged = creators_from_person_ids(&[author], &previous);
+        assert_eq!(merged[0].role, CreatorRole::Editor);
+        assert_eq!(
+            merged[0].credited_as.as_ref().map(|c| c.as_str()),
+            Some("A. Author"),
+        );
+    }
+
+    #[test]
+    fn sidebar_selection_adds_and_removes_authors_without_losing_existing_credit() {
+        let record = loaded_record();
+        let previous = record.to_new().creators;
+        let existing = previous[0].person_id;
+        let added = PersonId::generate();
+        let mut draft = prefill_draft(&record);
+        draft.creators = creators_from_person_ids(&[existing, added], &previous);
+        let updated = build_update(&record, &draft).unwrap();
+        assert_eq!(updated.creators[0], previous[0]);
+        assert_eq!(updated.creators[1].person_id, added);
+        assert_eq!(updated.creators[1].role, CreatorRole::Author);
+
+        draft.creators = creators_from_person_ids(&[added], &previous);
+        let updated = build_update(&record, &draft).unwrap();
+        assert_eq!(updated.creators.len(), 1);
+        assert_eq!(updated.creators[0].person_id, added);
+    }
+
+    #[test]
     fn build_update_rejects_bad_values() {
         let record = loaded_record();
+        let creators = record.to_new().creators;
 
-        let err = build_update(&record, &draft_with("   ")).expect_err("blank title rejects");
+        let err = build_update(&record, &draft_with("   ", creators.clone()))
+            .expect_err("blank title rejects");
         assert_eq!(err, "Title must not be empty");
 
-        let mut draft = draft_with("Retitled");
+        let mut draft = draft_with("Retitled", creators.clone());
         draft.published_year = "soon".into();
         let err = build_update(&record, &draft).expect_err("bad year rejects");
-        assert!(err.contains("Published year"), "message names the field: {err}");
+        assert!(
+            err.contains("Published year"),
+            "message names the field: {err}"
+        );
 
-        let mut draft = draft_with("Retitled");
+        let mut draft = draft_with("Retitled", creators);
         draft.series = "not-an-id".into();
         let err = build_update(&record, &draft).expect_err("bad series rejects");
         assert!(err.contains("Series"), "message names the field: {err}");
@@ -308,7 +468,11 @@ mod tests {
     fn kind_items_cover_every_kind_alphabetized() {
         let items = kind_items();
         assert_eq!(items.len(), ResourceKind::ALL.len());
-        let labels: Vec<String> = items.iter().map(KindItem::title).map(String::from).collect();
+        let labels: Vec<String> = items
+            .iter()
+            .map(KindItem::title)
+            .map(String::from)
+            .collect();
         let mut sorted = labels.clone();
         sorted.sort_by_key(|label| label.to_lowercase());
         assert_eq!(labels, sorted);

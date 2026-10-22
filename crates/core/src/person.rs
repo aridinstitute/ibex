@@ -119,9 +119,7 @@ impl NameKey {
     }
 }
 
-fn normalize_part(
-    part: Option<impl AsRef<str>>,
-) -> Result<Option<NonEmptyStr>, NameError> {
+fn normalize_part(part: Option<impl AsRef<str>>) -> Result<Option<NonEmptyStr>, NameError> {
     match part {
         None => Ok(None),
         Some(s) => {
@@ -180,11 +178,7 @@ pub struct Person {
 }
 
 impl Person {
-    pub fn try_new(
-        id: PersonId,
-        name: Name,
-        aliases: Vec<Name>,
-    ) -> Result<Self, PersonError> {
+    pub fn try_new(id: PersonId, name: Name, aliases: Vec<Name>) -> Result<Self, PersonError> {
         for (i, alias) in aliases.iter().enumerate() {
             if alias == &name {
                 return Err(PersonError::AliasDuplicatesPrimary);
@@ -303,12 +297,8 @@ mod tests {
     fn person_try_new_rejects_duplicate_aliases() {
         let primary = Name::try_new(Some("Samuel"), Some("Clemens"), None::<&str>).unwrap();
         let alias = Name::try_new(Some("Mark"), Some("Twain"), None::<&str>).unwrap();
-        let err = Person::try_new(
-            PersonId::generate(),
-            primary,
-            vec![alias.clone(), alias],
-        )
-        .unwrap_err();
+        let err =
+            Person::try_new(PersonId::generate(), primary, vec![alias.clone(), alias]).unwrap_err();
         assert_eq!(err, PersonError::DuplicateAlias);
     }
 
@@ -316,8 +306,8 @@ mod tests {
     fn person_indexed_names_primary_then_aliases() {
         let primary = Name::try_new(Some("Samuel"), Some("Clemens"), None::<&str>).unwrap();
         let alias = Name::try_new(Some("Mark"), Some("Twain"), None::<&str>).unwrap();
-        let person = Person::try_new(PersonId::generate(), primary.clone(), vec![alias.clone()])
-            .unwrap();
+        let person =
+            Person::try_new(PersonId::generate(), primary.clone(), vec![alias.clone()]).unwrap();
         let names: Vec<_> = person.indexed_names().cloned().collect();
         assert_eq!(names, vec![primary, alias]);
         assert_eq!(person.name_keys().count(), 2);

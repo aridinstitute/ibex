@@ -4,8 +4,7 @@ use oeuvre_app::command::{CreatePerson, CreateResource, ListResourcesPage};
 use oeuvre_app::testing::{MemorySink, MemoryStore};
 use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
 use oeuvre_core::{
-    CreatorRole, CreatorSpec, Name, NewResource, NonEmptyStr, PersonId, ResourceId,
-    ResourceKind,
+    CreatorRole, CreatorSpec, Name, NewResource, NonEmptyStr, PersonId, ResourceId, ResourceKind,
 };
 
 async fn seed_author(state: &AppState) -> PersonId {
@@ -89,17 +88,19 @@ async fn pages_walk_the_library_newest_first() {
             "cursor must not yield an empty page with rows remaining"
         );
         assert!(page.rows.len() <= 2);
-        assert!(page
-            .rows
-            .iter()
-            .all(|row| before.is_none_or(|b| row.id.as_ulid() < b.as_ulid())));
+        assert!(
+            page.rows
+                .iter()
+                .all(|row| before.is_none_or(|b| row.id.as_ulid() < b.as_ulid()))
+        );
         if let Some(next) = page.next_before {
             assert_eq!(Some(next), page.rows.last().map(|row| row.id));
         }
-        assert!(page
-            .rows
-            .iter()
-            .all(|row| row.creators_label == "Augustine"));
+        assert!(
+            page.rows
+                .iter()
+                .all(|row| row.creators_label == "Augustine")
+        );
         walked.extend(page.rows.iter().map(|row| row.id));
         match page.next_before {
             Some(next) => before = Some(next),
@@ -155,8 +156,7 @@ async fn list_resources_page_emits_wide_event_fields() {
     }
     let _ = sink.take();
 
-    let Outcome::ListResourcesPage(first) = state.execute(page_call(None, 2)).await.unwrap()
-    else {
+    let Outcome::ListResourcesPage(first) = state.execute(page_call(None, 2)).await.unwrap() else {
         panic!("expected ListResourcesPage");
     };
     assert_eq!(first.rows.len(), 2);
@@ -167,10 +167,7 @@ async fn list_resources_page_emits_wide_event_fields() {
     let ev = &events[0];
     assert_eq!(ev.command(), "list_resources_page");
     assert_eq!(ev.status(), Status::Ok);
-    assert_eq!(
-        ev.get("resource.page_limit"),
-        Some(&FieldValue::from(2u32))
-    );
+    assert_eq!(ev.get("resource.page_limit"), Some(&FieldValue::from(2u32)));
     assert!(
         ev.get("resource.id").is_none(),
         "no cursor means no resource.id field"

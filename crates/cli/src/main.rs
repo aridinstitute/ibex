@@ -116,8 +116,7 @@ mod tests {
 
     #[test]
     fn parses_memory_flag() {
-        let cli = Cli::try_parse_from(["ovr", "--memory", "resource", "list"])
-            .expect("valid args");
+        let cli = Cli::try_parse_from(["ovr", "--memory", "resource", "list"]).expect("valid args");
         assert!(cli.memory);
     }
 

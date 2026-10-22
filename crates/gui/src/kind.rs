@@ -224,14 +224,23 @@ mod tests {
     fn labels_are_sentence_case() {
         assert_eq!(kind_label(ResourceKind::Book), "Book");
         assert_eq!(kind_label(ResourceKind::JournalArticle), "Journal article");
-        assert_eq!(kind_label(ResourceKind::ComputerProgram), "Computer program");
+        assert_eq!(
+            kind_label(ResourceKind::ComputerProgram),
+            "Computer program"
+        );
         assert_eq!(kind_label(ResourceKind::PodcastEpisode), "Podcast episode");
     }
 
     #[test]
     fn related_kinds_get_distinct_icons() {
-        assert_ne!(kind_icon(ResourceKind::Podcast), kind_icon(ResourceKind::PodcastEpisode));
-        assert_ne!(kind_icon(ResourceKind::Book), kind_icon(ResourceKind::BookSection));
+        assert_ne!(
+            kind_icon(ResourceKind::Podcast),
+            kind_icon(ResourceKind::PodcastEpisode)
+        );
+        assert_ne!(
+            kind_icon(ResourceKind::Book),
+            kind_icon(ResourceKind::BookSection)
+        );
     }
 
     #[test]

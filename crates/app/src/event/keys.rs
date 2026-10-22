@@ -35,6 +35,7 @@ pub(crate) const RESOURCE_FILTER_KIND: Key = Key::new("resource.filter_kind");
 pub(crate) const RESOURCE_FILTER_PUBLISHED_FROM: Key = Key::new("resource.filter_published_from");
 pub(crate) const RESOURCE_FILTER_PUBLISHED_TO: Key = Key::new("resource.filter_published_to");
 pub(crate) const RESOURCE_FILTER_TITLE: Key = Key::new("resource.filter_title");
+pub(crate) const RESOURCE_FILTER_SEARCH: Key = Key::new("resource.filter_search");
 pub(crate) const RESOURCE_PAGE_LIMIT: Key = Key::new("resource.page_limit");
 pub(crate) const RESOURCE_PAGE_OFFSET: Key = Key::new("resource.page_offset");
 pub(crate) const RESOURCE_SORT_FIELD: Key = Key::new("resource.sort_field");
@@ -69,6 +70,7 @@ mod tests {
         RESOURCE_FILTER_PUBLISHED_FROM,
         RESOURCE_FILTER_PUBLISHED_TO,
         RESOURCE_FILTER_TITLE,
+        RESOURCE_FILTER_SEARCH,
         RESOURCE_PAGE_LIMIT,
         RESOURCE_PAGE_OFFSET,
         RESOURCE_SORT_FIELD,
@@ -82,12 +84,10 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for key in ALL {
             let s = key.as_str();
+            assert!(seen.insert(s), "duplicate key string: {s}");
             assert!(
-                seen.insert(s),
-                "duplicate key string: {s}"
-            );
-            assert!(
-                s.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c == '.')
+                s.chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '_' || c == '.')
                     && !s.is_empty()
                     && !s.starts_with('.')
                     && !s.ends_with('.')

@@ -57,4 +57,5 @@ Only create commits when the user asks. Never amend pushed history or skip hooks
 - Prefer small, reviewable changes scoped to the request.
 - Match existing Rust workspace layout and naming (`oeuvre-*` crates under `crates/`).
 - Do not expand scope into unrelated refactors or drive-by docs.
+- Scope formatting to touched files; check the diff afterward and remove unrelated formatting changes (avoid `cargo fmt --all` for local UI edits).
 - Ask before destructive git operations (force push, hard reset).

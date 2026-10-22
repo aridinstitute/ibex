@@ -3,11 +3,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use oeuvre_core::{
-    creator_label_name, format_creators_label, primary_creator_sort_key, published_label_from,
     BibliographicDate, Creator, CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr,
     Person, PersonId, Resource, ResourceFilter, ResourceId, ResourceKind, ResourcePage,
-    ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage,
-    Store, StoreError, StoreHealth, UtcMillis,
+    ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
+    SortedResourcePage, Store, StoreError, StoreHealth, UtcMillis, creator_label_name,
+    format_creators_label, primary_creator_sort_key, published_label_from,
 };
 
 use crate::event::{EventSink, FinishedEvent};
@@ -257,11 +257,7 @@ impl MemoryStore {
                 for (id, row) in resources.iter() {
                     keyed.push((
                         *id,
-                        SortKey::Text(
-                            row.publisher
-                                .as_ref()
-                                .map(|p| p.as_str().to_lowercase()),
-                        ),
+                        SortKey::Text(row.publisher.as_ref().map(|p| p.as_str().to_lowercase())),
                     ));
                 }
             }
@@ -302,19 +298,21 @@ impl MemoryStore {
             .title
             .as_ref()
             .map(|title| title.as_str().to_lowercase());
+        let search = filter
+            .search
+            .as_ref()
+            .map(|text| text.as_str().to_lowercase());
         // Creator membership resolves under its own lock, released before
         // the resource rows lock, so no path holds both at once.
-        let by_creator: Option<HashSet<ResourceId>> = filter
-            .creator
-            .map(|creator| {
-                self.created
-                    .lock()
-                    .expect("MemoryStore lock")
-                    .iter()
-                    .filter(|edge| edge.person_id == creator)
-                    .map(|edge| edge.resource_id)
-                    .collect()
-            });
+        let by_creator: Option<HashSet<ResourceId>> = filter.creator.map(|creator| {
+            self.created
+                .lock()
+                .expect("MemoryStore lock")
+                .iter()
+                .filter(|edge| edge.person_id == creator)
+                .map(|edge| edge.resource_id)
+                .collect()
+        });
         let published = filter
             .published
             .filter(|range| range.is_active())
@@ -338,6 +336,16 @@ impl MemoryStore {
                 }
                 if let Some(needle) = needle.as_deref() {
                     if !resource.title.as_str().to_lowercase().contains(needle) {
+                        return false;
+                    }
+                }
+                if let Some(needle) = search.as_deref() {
+                    let title_matches = resource.title.as_str().to_lowercase().contains(needle);
+                    let publisher_matches = resource
+                        .publisher
+                        .as_ref()
+                        .is_some_and(|publisher| publisher.to_lowercase().contains(needle));
+                    if !title_matches && !publisher_matches {
                         return false;
                     }
                 }
