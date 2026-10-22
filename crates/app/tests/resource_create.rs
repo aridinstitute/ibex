@@ -152,14 +152,14 @@ async fn create_resource_missing_person_is_not_found() {
 }
 
 #[tokio::test]
-async fn create_resource_empty_creators_is_invalid() {
+async fn create_resource_empty_creators_is_allowed() {
     let sink = MemorySink::new();
     let state = AppState::builder(MemoryStore::new())
         .surface(Surface::Test)
         .sink(sink.clone())
         .build();
 
-    let err = state
+    let Outcome::CreateResource(resource) = state
         .execute(Command::CreateResource(CreateResource {
             new: NewResource {
                 kind: ResourceKind::Book,
@@ -174,8 +174,11 @@ async fn create_resource_empty_creators_is_invalid() {
             },
         }))
         .await
-        .unwrap_err();
-    assert!(matches!(err, CommandError::Invalid(_)));
+        .expect("empty creators allowed")
+    else {
+        panic!("expected CreateResource");
+    };
+    assert!(resource.creators.is_empty());
 }
 
 #[tokio::test]

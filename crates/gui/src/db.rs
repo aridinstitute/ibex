@@ -2,8 +2,8 @@
 //! page requests over channels, so gpui's executor never runs Surreal I/O.
 
 use oeuvre_app::command::{
-    GetResource, GetResourceDetail, ListPersons, ListResourcesPage, ListResourcesQueryPage,
-    UpdateResource,
+    CreateResource, GetResource, GetResourceDetail, ListPersons, ListResourcesPage,
+    ListResourcesQueryPage, UpdateResource,
 };
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
@@ -34,6 +34,10 @@ pub enum DbRequest {
     },
     UpdateResource {
         id: ResourceId,
+        new: NewResource,
+        reply: oneshot::Sender<Result<Resource, String>>,
+    },
+    CreateResource {
         new: NewResource,
         reply: oneshot::Sender<Result<Resource, String>>,
     },
@@ -148,6 +152,17 @@ impl DbWorker {
                                     });
                                 let _ = reply.send(result);
                             }
+                            DbRequest::CreateResource { new, reply } => {
+                                let result = state
+                                    .execute(Command::CreateResource(CreateResource { new }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::CreateResource(resource) => Ok(resource),
+                                        _ => Err("unexpected outcome from create_resource".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
                             DbRequest::ListPersons { reply } => {
                                 let result = state
                                     .execute(Command::ListPersons(ListPersons))
@@ -248,6 +263,16 @@ impl DbWorker {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DbRequest::UpdateResource { id, new, reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    /// Insert a new resource from `new`, handing back the stored record.
+    pub async fn create_resource(&self, new: NewResource) -> Result<Resource, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::CreateResource { new, reply: tx })
             .map_err(|_| "db worker stopped".to_string())?;
         rx.await
             .map_err(|_| "db worker dropped the request".to_string())?
@@ -591,6 +616,35 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("not found"), "message says not found: {err}");
+    }
+
+    #[tokio::test]
+    async fn worker_creates_resource_through_command() {
+        let store = MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 2).await.unwrap();
+        let state = AppState::builder(store).surface(Surface::Test).build();
+        let worker = DbWorker::spawn(state);
+
+        let created = worker
+            .create_resource(oeuvre_core::NewResource {
+                kind: oeuvre_core::ResourceKind::Book,
+                title: oeuvre_core::NonEmptyStr::try_new("Inline draft book")
+                    .expect("title non-empty"),
+                creators: vec![],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(created.title.as_str(), "Inline draft book");
+        assert!(created.creators.is_empty());
+
+        let again = worker.resource(created.id).await.unwrap();
+        assert_eq!(again.title.as_str(), "Inline draft book");
     }
 
 }

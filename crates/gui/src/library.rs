@@ -11,16 +11,16 @@ use gpui_kit::assets::IconName as AssetIconName;
 use gpui_kit::base::{transition, Transition as MotionTransition};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Enter, Input, InputEvent, InputState};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    ActiveTheme as _, FocusableExt as _, Icon, IconName, IndexPath, Selectable as _, Sizable as _,
-    Size, ThemeColor, ThemeMode, TitleBar, h_flex, v_flex,
+    ActiveTheme as _, FocusTrapElement as _, FocusableExt as _, Icon, IconName, IndexPath,
+    Selectable as _, Sizable as _, Size, ThemeColor, ThemeMode, TitleBar, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
+use gpui_kit::{Focusable as _, *};
 
 use oeuvre_core::{
     format_recorded_date, NonEmptyStr, ParentRule, Person, PersonId, PublishedRange, Resource,
@@ -32,8 +32,11 @@ use crate::db::DbWorker;
 use crate::detail::{
     render_panel, DetailFetch, DetailView, FIELD_LABEL_WIDTH, FIELD_TEXT_SIZE, PANEL_WIDTH,
 };
-use crate::edit::{EditDraft, KindItem, build_update, kind_items, prefill_draft};
+use crate::edit::{EditDraft, KindItem, build_create, build_update, kind_items, prefill_draft};
 use crate::icons::symbol;
+use crate::inline_edit::{
+    creators_badge_trigger, InlineField, InlineRowEdit, InlineSession, PersonItem,
+};
 use crate::kind::{kind_color, kind_label, kind_symbol};
 use crate::settings::Settings;
 
@@ -75,6 +78,11 @@ const COLUMN_KEYS: [&str; COLUMNS] = [
 const DEFAULT_TITLE_WIDTH: f32 = 310.;
 
 const CELL_TEXT_SIZE: Pixels = px(13.);
+/// Inline editors read slightly larger than static cells so the caret and
+/// typed text stay obvious on the accent row.
+const INLINE_CELL_TEXT_SIZE: Pixels = px(14.);
+/// Kind dropdown is wider than the 28px icon column so labels aren't clipped.
+const INLINE_KIND_MENU_WIDTH: Pixels = px(220.);
 /// Header labels are one step below the cell text: the table default is 9px
 /// (`text_xs` at the 12px rem), which reads as an afterthought.
 const HEADER_TEXT_SIZE: Pixels = px(11.);
@@ -118,6 +126,9 @@ pub struct LibraryDelegate {
     /// the generation it was issued for, so a reply landing after a newer
     /// change is dropped instead of clobbering the newer listing.
     listing_gen: u64,
+    /// Inline row edit/create session; `render_td` swaps cells for editors
+    /// while this is `Ready` or `Create`.
+    inline: Option<InlineSession>,
 }
 
 impl LibraryDelegate {
@@ -138,6 +149,7 @@ impl LibraryDelegate {
             selected_col: None,
             settings,
             listing_gen: 0,
+            inline: None,
         }
     }
 
@@ -244,6 +256,8 @@ impl LibraryDelegate {
         self.listing_gen += 1;
         self.loading = true;
         self.error = None;
+        // A fresh listing invalidates in-row editors (row indices move).
+        self.inline = None;
         let worker = self.worker.clone();
         let sort = self.sort;
         let filter = self.filter.clone();
@@ -303,8 +317,32 @@ impl LibraryDelegate {
     }
 
     /// The id backing a row, so selection events can drive id-keyed fetches.
+    /// A create draft at row 0 has no id yet.
     pub fn row_id(&self, row_ix: usize) -> Option<ResourceId> {
-        self.rows.get(row_ix).map(|row| row.id)
+        let Some(data_ix) = self.data_row_ix(row_ix) else {
+            return None;
+        };
+        self.rows.get(data_ix).map(|row| row.id)
+    }
+
+    /// Map a table row index to a stored summary index. `None` means the
+    /// create-draft overlay row (not in `rows`).
+    fn data_row_ix(&self, row_ix: usize) -> Option<usize> {
+        if self.inline.as_ref().is_some_and(|s| s.is_create()) {
+            if row_ix == 0 {
+                None
+            } else {
+                Some(row_ix - 1)
+            }
+        } else {
+            Some(row_ix)
+        }
+    }
+
+    fn inline_editing_row(&self, row_ix: usize) -> Option<&InlineRowEdit> {
+        let session = self.inline.as_ref()?;
+        let form = session.ready_form()?;
+        (form.row_ix == row_ix).then_some(form)
     }
 
     pub fn worker(&self) -> &DbWorker {
@@ -405,11 +443,13 @@ impl LibraryDelegate {
 }
 
 impl TableDelegate for LibraryDelegate {
-    fn columns_count(&self, _cx: &App) -> usize {        COLUMNS
+    fn columns_count(&self, _cx: &App) -> usize {
+        COLUMNS
     }
 
     fn rows_count(&self, _cx: &App) -> usize {
-        self.rows.len()
+        let draft = self.inline.as_ref().is_some_and(|s| s.is_create()) as usize;
+        self.rows.len() + draft
     }
 
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
@@ -545,7 +585,118 @@ impl TableDelegate for LibraryDelegate {
             .overflow_hidden()
             .items_center()
             .text_size(CELL_TEXT_SIZE);
-        let Some(row) = self.rows.get(row_ix) else {
+        // Inline editors replace labels for the active row's editable columns.
+        if let Some(form) = self.inline_editing_row(row_ix) {
+            let on_accent = cell_on_accent(self.selected_row, self.selected_col, row_ix, col_ix);
+            let (text, muted) = cell_text_colors(on_accent, cx.theme());
+            let cell = cell.text_color(text).text_size(INLINE_CELL_TEXT_SIZE);
+            return match col_ix {
+                COL_KIND => {
+                    // Icon is painted by us (Combobox triggers stay invisible on
+                    // the 28px column); the Combobox sits on top for clicks.
+                    let kind = form.selected_kind(cx);
+                    let icon_color = if on_accent {
+                        text
+                    } else {
+                        kind_color(kind, cx.theme().is_dark())
+                    };
+                    let label: SharedString = kind_label(kind).into();
+                    cell.justify_center().child(
+                        div()
+                            .relative()
+                            .size_full()
+                            .child(
+                                div()
+                                    .id(("inline-kind-icon", row_ix))
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(icon_color)
+                                    .child(kind_symbol(kind).with_size(px(18.)))
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(label.clone()).build(window, cx)
+                                    }),
+                            )
+                            .child(
+                                Combobox::new(&form.kind)
+                                    .appearance(false)
+                                    .placeholder("Kind")
+                                    .search_placeholder("Search kinds")
+                                    .menu_width(INLINE_KIND_MENU_WIDTH)
+                                    .menu_max_h(px(320.))
+                                    .render_trigger(|_, _, _| {
+                                        div().size_full().into_any_element()
+                                    })
+                                    .w_full()
+                                    .h_full(),
+                            ),
+                    )
+                }
+                COL_TITLE => cell.child(
+                    Input::new(&form.title)
+                        .appearance(false)
+                        .text_size(INLINE_CELL_TEXT_SIZE)
+                        .text_color(text)
+                        .w_full(),
+                ),
+                COL_CREATORS => cell.child(
+                    Combobox::new(&form.creators)
+                        .appearance(false)
+                        .cleanable(true)
+                        .placeholder("Creators")
+                        .search_placeholder("Search people")
+                        .menu_width(px(280.))
+                        .render_trigger(|trigger, _window, cx| {
+                            creators_badge_trigger(trigger.selection(), trigger.placeholder(), cx)
+                        })
+                        .w_full(),
+                ),
+                COL_PUBLISHED => cell.child(
+                    Input::new(&form.published_year)
+                        .appearance(false)
+                        .text_size(INLINE_CELL_TEXT_SIZE)
+                        .text_color(muted)
+                        .w_full(),
+                ),
+                COL_PUBLISHER => cell.child(
+                    Input::new(&form.publisher)
+                        .appearance(false)
+                        .text_size(INLINE_CELL_TEXT_SIZE)
+                        .text_color(muted)
+                        .w_full(),
+                ),
+                COL_ADDED => cell.text_color(muted).child(
+                    form.record
+                        .as_ref()
+                        .map(|r| format_recorded_date(r.date_added))
+                        .unwrap_or_default(),
+                ),
+                COL_EDITED => {
+                    if let Some(error) = form.error.clone() {
+                        let danger = cx.theme().danger;
+                        cell.text_color(danger)
+                            .child(div().min_w_0().truncate().child(error))
+                    } else {
+                        cell.text_color(muted).child(
+                            form.record
+                                .as_ref()
+                                .map(|r| format_recorded_date(r.date_edited))
+                                .unwrap_or_default(),
+                        )
+                    }
+                }
+                _ => unreachable!("columns_count is {COLUMNS}"),
+            };
+        }
+
+        let Some(data_ix) = self.data_row_ix(row_ix) else {
+            // Create draft occupies row 0 only while editors are Ready/Create;
+            // Loading never uses the create slot without a form.
+            return cell;
+        };
+        let Some(row) = self.rows.get(data_ix) else {
             return cell;
         };
         // Text follows the accent fill on the highlighted row or column,
@@ -602,7 +753,10 @@ impl TableDelegate for LibraryDelegate {
         }
     }
     fn cell_text(&self, row_ix: usize, col_ix: usize, _cx: &App) -> String {
-        let Some(row) = self.rows.get(row_ix) else {
+        let Some(data_ix) = self.data_row_ix(row_ix) else {
+            return String::new();
+        };
+        let Some(row) = self.rows.get(data_ix) else {
             return String::new();
         };
         match col_ix {
@@ -908,6 +1062,78 @@ fn widths_by_key(widths: &[Pixels]) -> BTreeMap<String, f64> {
         .collect()
 }
 
+/// Focus one inline editor without holding a borrow of `InlineRowEdit`.
+fn focus_inline_entities(
+    field: InlineField,
+    kind: &Entity<ComboboxState<SearchableVec<KindItem>>>,
+    title: &Entity<InputState>,
+    creators: &Entity<ComboboxState<SearchableVec<PersonItem>>>,
+    published: &Entity<InputState>,
+    publisher: &Entity<InputState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let handle = match field {
+        InlineField::Kind => kind.read(cx).focus_handle(cx),
+        InlineField::Title => title.read(cx).focus_handle(cx),
+        InlineField::Creators => creators.read(cx).focus_handle(cx),
+        InlineField::Published => published.read(cx).focus_handle(cx),
+        InlineField::Publisher => publisher.read(cx).focus_handle(cx),
+    };
+    window.focus(&handle, cx);
+}
+
+/// Advance `active_field` by `delta`, focus that editor, keep the row selected.
+fn step_inline_field(
+    table: &Entity<TableState<LibraryDelegate>>,
+    delta: isize,
+    window: &mut Window,
+    cx: &mut Context<LibraryApp>,
+) {
+    let (row_ix, entities, current) = {
+        let delegate = table.read(cx).delegate();
+        let Some(form) = delegate.inline.as_ref().and_then(|s| s.ready_form()) else {
+            return;
+        };
+        (
+            form.row_ix,
+            (
+                form.kind.clone(),
+                form.title.clone(),
+                form.creators.clone(),
+                form.published_year.clone(),
+                form.publisher.clone(),
+            ),
+            form.active_field,
+        )
+    };
+    let ix = InlineField::ALL
+        .iter()
+        .position(|f| *f == current)
+        .unwrap_or(1);
+    let len = InlineField::ALL.len() as isize;
+    let next = InlineField::ALL[((ix as isize) + delta).rem_euclid(len) as usize];
+    table.update(cx, |table, cx| {
+        if let Some(form) = table.delegate_mut().inline.as_mut().and_then(|s| s.ready_form_mut()) {
+            form.active_field = next;
+        }
+        table.delegate_mut().selected_row = Some(row_ix);
+        table.delegate_mut().selected_col = None;
+        table.set_selected_row(row_ix, cx);
+    });
+    let (kind, title, creators, published, publisher) = entities;
+    focus_inline_entities(
+        next,
+        &kind,
+        &title,
+        &creators,
+        &published,
+        &publisher,
+        window,
+        cx,
+    );
+}
+
 /// Whether this cell sits on the table's solid accent fill (selected row
 /// or selected column). Callers paint white text only for that portion.
 fn cell_on_accent(
@@ -945,7 +1171,11 @@ gpui_kit::actions!([
     ToggleDetailPanel,
     CycleColumnSort,
     ToggleEditMode,
+    BeginInlineEdit,
+    BeginNewRow,
     FocusColumnFilter,
+    InlineNextField,
+    InlinePrevField,
 ]);
 
 /// Two Esc presses within this window clear filters and hide the filter row.
@@ -1050,6 +1280,9 @@ pub struct LibraryApp {
     /// Observed after action dispatch so it still works while an Input owns
     /// the single-Esc binding.
     last_escape_at: Option<Instant>,
+    /// Focus trap host for the grid while an inline session is open so Root
+    /// Tab/TabPrev cannot walk focus into the toolbar or sidebar.
+    inline_trap: FocusHandle,
 }
 
 /// The edit flow's two states: fetching the raw record the form edits,
@@ -1205,6 +1438,8 @@ impl EditForm {
             accessed_year: value(&self.accessed_year),
             series: value(&self.series),
             series_number: value(&self.series_number),
+            // Sidebar does not edit creators yet; ride the stored list through.
+            creators: self.record.to_new().creators,
         }
     }
 }
@@ -1259,6 +1494,13 @@ impl LibraryApp {
                     this.select_row(*row_ix, window, cx);
                 }
                 TableEvent::SelectColumn(col_ix) => {
+                    // While inline editing, Tab/arrows mean field focus — not
+                    // column selection. Restore the row highlight and move
+                    // the caret into the matching editor.
+                    if this.has_inline(cx) {
+                        this.focus_inline_col(*col_ix, window, cx);
+                        return;
+                    }
                     // Column highlight is visual only: keep the detail for
                     // the last selected resource so Space can sort without
                     // wiping the sidebar.
@@ -1323,22 +1565,29 @@ impl LibraryApp {
             &title_input,
             window,
             |this, input, event: &InputEvent, window, cx| {
-                // Focus and blur leave the listing alone; only edits count.
-                if !matches!(event, InputEvent::Change) {
-                    return;
+                match event {
+                    // Focus and blur leave the listing alone; only edits count.
+                    InputEvent::Change => {
+                        let needle = title_predicate(&input.read(cx).value());
+                        let selected_id = this
+                            .table
+                            .read(cx)
+                            .selected_row()
+                            .and_then(|ix| this.table.read(cx).delegate().row_id(ix));
+                        this.table.update(cx, |table, cx| {
+                            table
+                                .delegate_mut()
+                                .request_title_filter(needle, selected_id, window, cx);
+                        });
+                        cx.notify();
+                    }
+                    // Match the creator box: Enter commits the filter and
+                    // returns keyboard focus to the grid.
+                    InputEvent::PressEnter {
+                        secondary: false, ..
+                    } => this.focus_table(window, cx),
+                    _ => {}
                 }
-                let needle = title_predicate(&input.read(cx).value());
-                let selected_id = this
-                    .table
-                    .read(cx)
-                    .selected_row()
-                    .and_then(|ix| this.table.read(cx).delegate().row_id(ix));
-                this.table.update(cx, |table, cx| {
-                    table
-                        .delegate_mut()
-                        .request_title_filter(needle, selected_id, window, cx);
-                });
-                cx.notify();
             },
         )
         .detach();
@@ -1405,11 +1654,13 @@ impl LibraryApp {
         let published_to_input = cx.new(|cx| InputState::new(window, cx).placeholder("To"));
         for input in [&published_from_input, &published_to_input] {
             cx.subscribe_in(input, window, |this, _input, event: &InputEvent, window, cx| {
-                // Only edits re-key the listing; focus and blur leave it be.
-                if !matches!(event, InputEvent::Change) {
-                    return;
+                match event {
+                    InputEvent::Change => this.apply_year_range(window, cx),
+                    InputEvent::PressEnter {
+                        secondary: false, ..
+                    } => this.focus_table(window, cx),
+                    _ => {}
                 }
-                this.apply_year_range(window, cx);
             })
             .detach();
         }
@@ -1429,11 +1680,18 @@ impl LibraryApp {
 
         // After-dispatch observer: Input/DataTable may consume a single Esc,
         // but a second within the window still clears filters from anywhere.
+        // While inline edit is open, the first Esc cancels that session.
         cx.observe_keystrokes(|this, event, window, cx| {
             if event.keystroke.key != "escape"
                 || event.keystroke.modifiers.modified()
             {
                 this.last_escape_at = None;
+                return;
+            }
+            if this.has_inline(cx) {
+                this.last_escape_at = None;
+                this.cancel_inline(cx);
+                this.focus_table(window, cx);
                 return;
             }
             let now = Instant::now();
@@ -1462,13 +1720,30 @@ impl LibraryApp {
             edit: None,
             detail_gens: HashMap::new(),
             last_escape_at: None,
+            inline_trap: cx.focus_handle(),
         }
     }
 
     /// Row selection: the panel follows the id immediately, then prefetch
     /// warms the rows around it so the next step up or down is instant.
     fn select_row(&mut self, row_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // Leaving the inline row cancels in-row editors (create draft included).
+        let leave_inline = self
+            .table
+            .read(cx)
+            .delegate()
+            .inline
+            .as_ref()
+            .is_some_and(|session| session.row_ix() != row_ix);
+        if leave_inline {
+            self.cancel_inline(cx);
+        }
+
         let Some(id) = self.table.read(cx).delegate().row_id(row_ix) else {
+            // Create-draft row: no stored id, no detail panel.
+            self.selected = None;
+            self.detail = None;
+            cx.notify();
             return;
         };
         self.selected = Some(id);
@@ -1704,14 +1979,289 @@ impl LibraryApp {
         cx.notify();
     }
 
-    /// `e` opens the edit form (and the sidebar if it was closed) and focuses
-    /// the title field; a second press closes the form without saving.
+    /// Enter opens the sidebar edit form (and the sidebar if it was closed)
+    /// and focuses the title field; a second press closes without saving.
     fn toggle_edit_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.edit {
             Some(EditFetch::Ready(_)) => self.cancel_edit(cx),
             Some(EditFetch::Loading(_)) => {}
             None => self.request_edit(window, cx),
         }
+    }
+
+    fn focus_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.table.focus_handle(cx);
+        window.focus(&handle, cx);
+    }
+
+    /// Whether an inline edit or create session is open on the table.
+    fn has_inline(&self, cx: &App) -> bool {
+        self.table.read(cx).delegate().inline.is_some()
+    }
+
+    /// Drop the inline session without writing.
+    fn cancel_inline(&mut self, cx: &mut Context<Self>) {
+        self.table.update(cx, |table, _| {
+            table.delegate_mut().inline = None;
+            // Column selection is suppressed while editing so Tab/arrows
+            // can drive cell focus instead.
+            table.col_selectable = true;
+        });
+        cx.notify();
+    }
+
+    /// Focus the inline editor for `col_ix`, keeping the edit row selected.
+    fn focus_inline_col(&mut self, col_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let field = InlineField::from_col(col_ix);
+        let (row_ix, entities, active) = {
+            let delegate = self.table.read(cx).delegate();
+            let session = delegate.inline.as_ref();
+            let row_ix = session.map(|s| s.row_ix());
+            let form = session.and_then(|s| s.ready_form()).map(|f| {
+                (
+                    f.kind.clone(),
+                    f.title.clone(),
+                    f.creators.clone(),
+                    f.published_year.clone(),
+                    f.publisher.clone(),
+                    f.active_field,
+                )
+            });
+            let (entities, active) = match form {
+                Some((kind, title, creators, published, publisher, active)) => (
+                    Some((kind, title, creators, published, publisher)),
+                    active,
+                ),
+                None => (None, InlineField::Title),
+            };
+            (row_ix, entities, active)
+        };
+        // Non-editable cols (Added/Edited) still restore the row so a
+        // DataTable column loop cannot leave selection mode as Column.
+        let field = field.unwrap_or(active);
+        self.table.update(cx, |table, cx| {
+            if let Some(row_ix) = row_ix {
+                table.delegate_mut().selected_row = Some(row_ix);
+                table.delegate_mut().selected_col = None;
+                table.set_selected_row(row_ix, cx);
+            }
+            if let Some(form) = table.delegate_mut().inline.as_mut().and_then(|s| s.ready_form_mut())
+            {
+                form.active_field = field;
+            }
+        });
+        if let Some((kind, title, creators, published, publisher)) = entities {
+            focus_inline_entities(
+                field,
+                &kind,
+                &title,
+                &creators,
+                &published,
+                &publisher,
+                window,
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// Tab / Shift-Tab / ← / → while inline: move between editable cells.
+    fn focus_inline_delta(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        step_inline_field(&self.table, delta, window, cx);
+        cx.notify();
+    }
+
+    /// E toggles spreadsheet-style inline edit for the selected row.
+    fn toggle_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_inline(cx) {
+            self.cancel_inline(cx);
+            self.focus_table(window, cx);
+            return;
+        }
+        self.begin_inline_edit(window, cx);
+    }
+
+    /// Fetch the selected record and open borderless cell editors on its row.
+    fn begin_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected else {
+            return;
+        };
+        let Some(row_ix) = self.table.read(cx).selected_row() else {
+            return;
+        };
+        // Sidebar and inline are mutually exclusive.
+        self.edit = None;
+        self.table.update(cx, |table, cx| {
+            table.col_selectable = false;
+            table.delegate_mut().selected_col = None;
+            table.delegate_mut().inline = Some(InlineSession::Loading { id, row_ix });
+            table.set_selected_row(row_ix, cx);
+        });
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let record = worker.resource(id).await;
+            let people = worker.list_persons().await.unwrap_or_default();
+            _ = app.update_in(window, |app, window, cx| {
+                let still = matches!(
+                    app.table.read(cx).delegate().inline.as_ref(),
+                    Some(InlineSession::Loading {
+                        id: loading,
+                        row_ix: _
+                    }) if *loading == id
+                );
+                if !still || app.selected != Some(id) {
+                    return;
+                }
+                match record {
+                    Ok(record) => {
+                        let form = InlineRowEdit::for_edit(record, &people, row_ix, window, cx);
+                        // Land the form in the delegate before focusing so
+                        // the next paint owns the focused Input entity.
+                        let title = form.title.clone();
+                        app.table.update(cx, |table, _| {
+                            table.delegate_mut().inline =
+                                Some(InlineSession::Ready(Box::new(form)));
+                        });
+                        let handle = title.read(cx).focus_handle(cx);
+                        window.focus(&handle, cx);
+                    }
+                    Err(err) => {
+                        app.table.update(cx, |table, _| {
+                            table.delegate_mut().inline = None;
+                            table.col_selectable = true;
+                        });
+                        if app.selected == Some(id) {
+                            app.detail = Some((id, DetailFetch::Failed(err)));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// N opens a new Book draft as table row 0 in the same inline chrome.
+    fn begin_new_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(
+            self.table.read(cx).delegate().inline.as_ref(),
+            Some(InlineSession::Create(_))
+        ) {
+            return;
+        }
+        self.edit = None;
+        self.table.update(cx, |table, _| {
+            table.delegate_mut().inline = None;
+        });
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let people = worker.list_persons().await.unwrap_or_default();
+            _ = app.update_in(window, |app, window, cx| {
+                let form = InlineRowEdit::for_create(&people, window, cx);
+                let title = form.title.clone();
+                app.table.update(cx, |table, cx| {
+                    table.col_selectable = false;
+                    table.delegate_mut().inline = Some(InlineSession::Create(Box::new(form)));
+                    table.delegate_mut().selected_row = Some(0);
+                    table.delegate_mut().selected_col = None;
+                    table.set_selected_row(0, cx);
+                });
+                let handle = title.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+                app.selected = None;
+                app.detail = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// ⌘↩ while inline: update or create from the cell editors.
+    fn save_inline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = self
+            .table
+            .read(cx)
+            .delegate()
+            .inline
+            .as_ref()
+            .and_then(|s| s.ready_form())
+        else {
+            return;
+        };
+        if form.saving {
+            return;
+        }
+        let draft = form.draft(cx);
+        let record = form.record.clone();
+        let payload = if let Some(record) = &record {
+            build_update(record, &draft)
+        } else {
+            build_create(&draft)
+        };
+        let new = match payload {
+            Ok(new) => new,
+            Err(message) => {
+                self.table.update(cx, |table, _| {
+                    if let Some(form) = table.delegate_mut().inline.as_mut().and_then(|s| s.ready_form_mut())
+                    {
+                        form.error = Some(message);
+                    }
+                });
+                cx.notify();
+                return;
+            }
+        };
+        self.table.update(cx, |table, _| {
+            if let Some(form) = table.delegate_mut().inline.as_mut().and_then(|s| s.ready_form_mut())
+            {
+                form.saving = true;
+                form.error = None;
+            }
+        });
+        self.focus_table(window, cx);
+        let worker = self.table.read(cx).delegate().worker().clone();
+        let update_id = record.as_ref().map(|r| r.id);
+        cx.spawn_in(window, async move |app, window| {
+            let reply = if let Some(id) = update_id {
+                worker.update_resource(id, new).await.map(|r| r.id)
+            } else {
+                worker.create_resource(new).await.map(|r| r.id)
+            };
+            _ = app.update_in(window, |app, window, cx| {
+                match reply {
+                    Ok(id) => {
+                        app.table.update(cx, |table, _| {
+                            table.delegate_mut().inline = None;
+                            table.col_selectable = true;
+                        });
+                        app.selected = Some(id);
+                        *app.detail_gens.entry(id).or_default() += 1;
+                        app.detail_inflight.remove(&id);
+                        app.detail_cache.invalidate(&id);
+                        app.detail = Some((id, DetailFetch::Loading));
+                        app.fetch_detail(id, window, cx);
+                        app.table.update(cx, |table, cx| {
+                            table
+                                .delegate_mut()
+                                .reload_from_top(Some(id), None, window, cx);
+                        });
+                    }
+                    Err(err) => {
+                        app.table.update(cx, |table, _| {
+                            if let Some(form) =
+                                table.delegate_mut().inline.as_mut().and_then(|s| s.ready_form_mut())
+                            {
+                                form.error = Some(err);
+                                form.saving = false;
+                            }
+                        });
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Open the edit form for the selected resource: fetch the raw record
@@ -1726,6 +2276,7 @@ impl LibraryApp {
         if self.edit.is_some() {
             return;
         }
+        self.cancel_inline(cx);
         self.edit = Some(EditFetch::Loading(id));
         self.detail_open = true;
         let worker = self.table.read(cx).delegate().worker().clone();
@@ -1904,6 +2455,9 @@ impl LibraryApp {
             form.saving = true;
             form.error = None;
         }
+        // Hand the keyboard back to the grid so arrow keys work while the
+        // save runs; a rejected draft above keeps focus on the form.
+        self.focus_table(window, cx);
         let worker = self.table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
             let reply = worker.update_resource(id, new).await;
@@ -2111,13 +2665,30 @@ impl Render for LibraryApp {
             cx,
         );
 
+        // Theme caret is the accent blue (matches the selected-row fill), so
+        // while inline editing swap it to white or the caret vanishes.
+        let editing = self.has_inline(cx);
+        let caret = if editing {
+            cx.theme().primary_foreground
+        } else {
+            cx.theme().primary
+        };
+        gpui_kit::component::Theme::update(cx, |theme| {
+            theme.colors.caret = caret;
+        });
+
         v_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             // Handlers sit on this ancestor so bindings fire for any focused
             // descendant (table, toolbar, sidebar), not only the DataTable.
-            .key_context("LibraryApp")
+            // `InlineEdit` tags the tree so Tab bindings can target this mode.
+            .key_context(if editing {
+                "LibraryApp InlineEdit"
+            } else {
+                "LibraryApp"
+            })
             .on_action(cx.listener(|this, _: &ToggleDetailPanel, _window, cx| {
                 this.toggle_detail_panel(cx);
             }))
@@ -2127,8 +2698,39 @@ impl Render for LibraryApp {
             .on_action(cx.listener(|this, _: &ToggleEditMode, window, cx| {
                 this.toggle_edit_mode(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &BeginInlineEdit, window, cx| {
+                this.toggle_inline_edit(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &BeginNewRow, window, cx| {
+                this.begin_new_row(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &FocusColumnFilter, window, cx| {
                 this.focus_selected_column_filter(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &InlineNextField, window, cx| {
+                if this.has_inline(cx) {
+                    this.focus_inline_delta(1, window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &InlinePrevField, window, cx| {
+                if this.has_inline(cx) {
+                    this.focus_inline_delta(-1, window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            // Single-line inputs bind ⌘↩ to Enter{secondary} and propagate;
+            // catch that here while sidebar or inline edit is open.
+            .on_action(cx.listener(|this, enter: &Enter, window, cx| {
+                if enter.secondary && this.has_inline(cx) {
+                    this.save_inline(window, cx);
+                } else if enter.secondary && this.edit.is_some() {
+                    this.save_edit(window, cx);
+                } else {
+                    cx.propagate();
+                }
             }))
             .child(
                 // The toolbar doubles as the window's title bar: the traffic
@@ -2190,28 +2792,35 @@ impl Render for LibraryApp {
                         // scroll body, the rows list) collapses, and the
                         // header-only strip floats mid-window with no
                         // rows and no empty state.
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(
-                                DataTable::new(&self.table)
-                                    .with_size(Size::XSmall)
-                                    .bordered(false)
-                                    .stripe(true)
-                                    // The table holds focus from the first frame (so
-                                    // the detail-panel key works), which makes the
-                                    // kit's keyboard focus ring draw on every arrow
-                                    // key. The table fills this container edge to
-                                    // edge, so only the ring's top edge is inside
-                                    // the window, and it reads as a stray bar under
-                                    // the toolbar. The row highlight already shows
-                                    // where focus is; the ring adds nothing.
-                                    .focus_ring(false)
-                                    .when_some(header_row_height(filters_visible), |table, height| {
-                                        table.header_row_height(height)
-                                    }),
-                            ),
+                        {
+                            let table = DataTable::new(&self.table)
+                                .with_size(Size::XSmall)
+                                .bordered(false)
+                                .stripe(true)
+                                // The table holds focus from the first frame (so
+                                // the detail-panel key works), which makes the
+                                // kit's keyboard focus ring draw on every arrow
+                                // key. The table fills this container edge to
+                                // edge, so only the ring's top edge is inside
+                                // the window, and it reads as a stray bar under
+                                // the toolbar. The row highlight already shows
+                                // where focus is; the ring adds nothing.
+                                .focus_ring(false)
+                                .when_some(header_row_height(filters_visible), |table, height| {
+                                    table.header_row_height(height)
+                                });
+                            let wrap = div().flex_1().min_w_0().h_full();
+                            // While inline editing, keep Root Tab/TabPrev inside
+                            // the grid so focus cannot walk to toolbar/sidebar.
+                            if editing {
+                                wrap.track_focus(&self.inline_trap)
+                                    .focus_trap("inline-edit-trap", &self.inline_trap)
+                                    .child(table)
+                                    .into_any_element()
+                            } else {
+                                wrap.child(table).into_any_element()
+                            }
+                        }
                     )
                     // Clip the fixed-width panel while the outer width
                     // animates; keep it mounted until the close finishes.
