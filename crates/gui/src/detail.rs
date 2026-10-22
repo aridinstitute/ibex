@@ -1,14 +1,13 @@
-//! Right-side detail panel: one field per row, label left and value right,
-//! the way Zotero's item pane aligns them.
+//! Right-side detail panel: identity and actions above a labelled metadata list.
 
 use gpui_kit::component::description_list::{DescriptionItem, DescriptionList};
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use oeuvre_core::{CreatorRole, ResourceDetail, format_published_label, format_recorded_date};
 
-use crate::kind::{kind_color, kind_label};
+use crate::kind::{kind_color, kind_label, kind_symbol};
 
 /// Panel width on the right side of the library grid.
 pub const PANEL_WIDTH: Pixels = px(320.);
@@ -63,19 +62,31 @@ pub fn role_label(role: CreatorRole) -> String {
     .to_owned()
 }
 
-/// (field name, value lines) rows for a detail, absent fields omitted the
-/// way the CLI summary row omits them. Title and Kind always show; a creator
-/// group carries one line per name.
+/// The byline prefers authors, then the first credited creator role.
+fn primary_creator_index(detail: &ResourceDetail) -> Option<usize> {
+    detail
+        .creators
+        .iter()
+        .position(|group| group.role == CreatorRole::Author)
+        .or_else(|| (!detail.creators.is_empty()).then_some(0))
+}
+
+fn byline(detail: &ResourceDetail) -> Option<String> {
+    primary_creator_index(detail).map(|index| detail.creators[index].names.join(", "))
+}
+
+/// Metadata below the identity header; the kind, title and primary creator
+/// group are already visible above it. Other creator roles remain here.
 pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
-    let mut rows: Vec<(String, Vec<String>)> = vec![
-        ("Title".to_string(), vec![detail.title.as_str().to_owned()]),
-        ("Kind".to_string(), vec![kind_label(detail.kind)]),
-    ];
+    let mut rows = Vec::new();
+    let primary = primary_creator_index(detail);
     rows.extend(
         detail
             .creators
             .iter()
-            .map(|group| (role_label(group.role), group.names.clone())),
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != primary)
+            .map(|(_, group)| (role_label(group.role), group.names.clone())),
     );
     if let Some(publisher) = &detail.publisher {
         rows.push(("Publisher".to_string(), vec![publisher.clone()]));
@@ -170,8 +181,7 @@ fn kind_tint(color: Hsla) -> Div {
 /// preferred 320px width (clamped by the library to the viewport) — the
 /// grid gives way when the window is too narrow to hold both — and scrollable
 /// when the field list outgrows the window.
-/// `actions`, when present, rides the sidebar's top-right corner over the
-/// kind tint.
+/// The loaded resource's identity, actions and metadata share one scroll area.
 pub fn render_panel(view: DetailView<'_>, actions: Option<AnyElement>, cx: &App) -> Div {
     let muted = cx.theme().muted_foreground;
     let danger = cx.theme().danger;
@@ -190,16 +200,47 @@ pub fn render_panel(view: DetailView<'_>, actions: Option<AnyElement>, cx: &App)
             .text_color(danger)
             .child(error.to_string())
             .into_any_element(),
-        DetailView::Fields(detail) => DescriptionList::new()
-            .bordered(false)
-            .columns(1)
-            .label_width(FIELD_LABEL_WIDTH)
-            .children(
-                field_rows(detail)
-                    .into_iter()
-                    .map(|(label, lines)| DescriptionItem::new(label).value(value_element(&lines))),
-            )
-            .into_any_element(),
+        DetailView::Fields(detail) => {
+            let header = v_flex()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            kind_symbol(detail.kind)
+                                .with_size(px(16.))
+                                .text_color(kind_color(detail.kind, cx.theme().is_dark())),
+                        )
+                        .child(div().text_color(muted).child(kind_label(detail.kind))),
+                )
+                .child(
+                    div()
+                        .text_size(px(20.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(detail.title.as_str().to_owned()),
+                )
+                .when_some(byline(detail), |header, names| {
+                    header.child(div().text_color(muted).child(names))
+                })
+                .when_some(actions, |header, actions| {
+                    header.child(h_flex().pt_2().child(actions))
+                });
+            v_flex()
+                .gap_3()
+                .child(header)
+                .child(div().border_b_1().border_color(cx.theme().border))
+                .child(
+                    DescriptionList::new()
+                        .bordered(false)
+                        .columns(1)
+                        .label_width(FIELD_LABEL_WIDTH)
+                        .children(field_rows(detail).into_iter().map(|(label, lines)| {
+                            DescriptionItem::new(label).value(value_element(&lines))
+                        })),
+                )
+                .into_any_element()
+        }
     };
 
     v_flex()
@@ -215,16 +256,6 @@ pub fn render_panel(view: DetailView<'_>, actions: Option<AnyElement>, cx: &App)
         // The tint is a sibling of the scroller, not a child, so it stays
         // pinned to the sidebar's top edge as the fields scroll under it.
         .when_some(tint, |el, tint| el.child(kind_tint(tint)))
-        .when_some(actions, |el, actions| {
-            el.child(
-                h_flex()
-                    .justify_end()
-                    .px_2()
-                    .pt_1()
-                    .flex_shrink_0()
-                    .child(actions),
-            )
-        })
         .child(
             div()
                 .id("detail-panel")
@@ -241,7 +272,7 @@ mod tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
     use super::{
-        DetailView, TINT_ALPHA, TINT_FADE, field_rows, role_label, tint_color, tint_stops,
+        DetailView, TINT_ALPHA, TINT_FADE, byline, field_rows, role_label, tint_color, tint_stops,
     };
     use crate::kind::kind_color;
     use oeuvre_core::{
@@ -282,27 +313,42 @@ mod tests {
 
         let rows = field_rows(&detail);
         let labels: Vec<&str> = rows.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(labels, ["Published", "In", "Added", "Edited"]);
+        assert_eq!(rows[0].1, vec!["Summer 2021"]);
+        assert_eq!(rows[1].1, vec!["Journal of Citation Studies"]);
+        assert_eq!(rows[2].1, vec!["Jan 1, 2021"]);
+        assert_eq!(rows[3].1, vec!["Jan 1, 2021"]);
+        assert_eq!(byline(&detail), Some("Ada Lovelace, G. Hopper".to_string()));
+    }
+
+    #[test]
+    fn byline_falls_back_to_first_creator_and_preserves_other_roles() {
+        let mut detail = journal_article();
+        detail.creators = vec![
+            DetailCreators {
+                role: CreatorRole::Editor,
+                names: vec!["Grace Hopper".into()],
+            },
+            DetailCreators {
+                role: CreatorRole::Translator,
+                names: vec!["Alan Turing".into()],
+            },
+        ];
+        assert_eq!(byline(&detail).as_deref(), Some("Grace Hopper"));
         assert_eq!(
-            labels,
-            [
-                "Title",
-                "Kind",
-                "Author",
-                "Published",
-                "In",
-                "Added",
-                "Edited"
-            ]
+            field_rows(&detail)[0],
+            ("Translator".into(), vec!["Alan Turing".into()])
         );
-        assert_eq!(rows[0].1, vec!["Quantum bibliometrics"]);
-        assert_eq!(rows[1].1, vec!["Journal article"]);
-        // Creator groups carry one line per name; the panel stacks them.
-        assert_eq!(rows[2].1, vec!["Ada Lovelace", "G. Hopper"]);
-        assert_eq!(rows[3].1, vec!["Summer 2021"]);
-        assert_eq!(rows[4].1, vec!["Journal of Citation Studies"]);
-        // The record-keeping stamps read as day labels.
-        assert_eq!(rows[5].1, vec!["Jan 1, 2021"]);
-        assert_eq!(rows[6].1, vec!["Jan 1, 2021"]);
+        detail.creators.push(DetailCreators {
+            role: CreatorRole::Author,
+            names: vec!["Ada Lovelace".into()],
+        });
+        assert_eq!(byline(&detail).as_deref(), Some("Ada Lovelace"));
+        assert_eq!(field_rows(&detail)[0].0, "Editor");
+        assert_eq!(field_rows(&detail)[1].0, "Translator");
+        detail.creators.clear();
+        assert_eq!(byline(&detail), None);
+        assert_eq!(field_rows(&detail)[0].0, "Published");
     }
 
     #[test]

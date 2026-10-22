@@ -2651,9 +2651,9 @@ impl LibraryApp {
     /// The right-side sidebar: the edit form while one is open, the detail
     /// fields otherwise. The form keeps the sidebar's anchor, width, and
     /// surface but drops the kind tint, so its inputs sit on a plain
-    /// background. The detail carries the edit pencil in its top-right
-    /// corner; no row selected means nothing to edit, and an open form
-    /// means the sidebar already is the editor.
+    /// background. The detail shows the edit pencil below the byline; no
+    /// row selected means nothing to edit, and an open form means the
+    /// sidebar already is the editor.
     fn render_side_panel(&self, cx: &mut Context<Self>) -> Div {
         match &self.edit {
             Some(EditFetch::Ready(form)) => self.render_edit_panel(form, cx),
