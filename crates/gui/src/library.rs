@@ -119,7 +119,7 @@ pub struct LibraryDelegate {
     selected_row: Option<usize>,
     /// Mirrors the table's selected column the same way; row and column
     /// selection are exclusive, and cell text follows whichever portion
-    /// sits on the accent fill.
+    /// sits on the accent tint.
     selected_col: Option<usize>,
     /// Persisted GUI settings: column widths loaded from config.toml ride
     /// through `column`, and finished resizes are written back by
@@ -499,6 +499,24 @@ impl TableDelegate for LibraryDelegate {
         }
     }
 
+    fn render_tr(
+        &mut self,
+        row_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        // Reserve the same 1px border on every row so selecting one changes
+        // only paint, not its content box. Transparent rules remain invisible.
+        div()
+            .id(("row", row_ix))
+            .border_1()
+            .border_color(transparent_white())
+            .when(self.selected_row == Some(row_ix), |row| {
+                row.border_color(cx.theme().table_active_border.opacity(0.5))
+                    .rounded(px(6.))
+            })
+    }
+
     fn render_th(
         &mut self,
         col_ix: usize,
@@ -598,7 +616,6 @@ impl TableDelegate for LibraryDelegate {
             let cell = inline_active_cell(
                 cell.text_color(text).text_size(INLINE_CELL_TEXT_SIZE),
                 active,
-                on_accent,
                 cx.theme(),
             );
             return match col_ix {
@@ -606,11 +623,7 @@ impl TableDelegate for LibraryDelegate {
                     // Icon is painted by us (Combobox triggers stay invisible on
                     // the 28px column); the Combobox sits on top for clicks.
                     let kind = form.selected_kind(cx);
-                    let icon_color = if on_accent {
-                        text
-                    } else {
-                        kind_color(kind, cx.theme().is_dark())
-                    };
+                    let icon_color = kind_color(kind, cx.theme().is_dark());
                     let label: SharedString = kind_label(kind).into();
                     cell.justify_center().child(
                         div()
@@ -708,21 +721,14 @@ impl TableDelegate for LibraryDelegate {
         let Some(row) = self.rows.get(data_ix) else {
             return cell;
         };
-        // Text follows the accent fill on the highlighted row or column,
-        // not the other axis that stays on the normal table surface.
+        // The accent tint keeps foreground text readable on selected rows and columns.
         let on_accent = cell_on_accent(self.selected_row, self.selected_col, row_ix, col_ix);
         let (text, muted) = cell_text_colors(on_accent, cx.theme());
         let cell = cell.text_color(text);
         match col_ix {
             COL_KIND => {
                 let label: SharedString = kind_label(row.kind).into();
-                // The accent fill muddies a family hue, so the icon goes
-                // monochrome along with the rest of the highlighted cell.
-                let icon_color = if on_accent {
-                    muted
-                } else {
-                    kind_color(row.kind, cx.theme().is_dark())
-                };
+                let icon_color = kind_color(row.kind, cx.theme().is_dark());
                 cell.justify_center().child(
                     div()
                         .id(("kind", row_ix))
@@ -1138,8 +1144,7 @@ fn step_inline_field(
     );
 }
 
-/// Whether this cell sits on the table's solid accent fill (selected row
-/// or selected column). Callers paint white text only for that portion.
+/// Whether this cell sits on the selected row or column's accent tint.
 fn cell_on_accent(
     selected_row: Option<usize>,
     selected_col: Option<usize>,
@@ -1149,26 +1154,19 @@ fn cell_on_accent(
     selected_row == Some(row_ix) || selected_col == Some(col_ix)
 }
 
-/// Hairline around the field Tab currently owns, so the edit row's accent
-/// fill alone isn't the only cue for which cell is active.
-fn inline_active_cell(cell: Div, active: bool, on_accent: bool, colors: &ThemeColor) -> Div {
+/// Hairline around the field Tab currently owns, distinct from the row tint.
+fn inline_active_cell(cell: Div, active: bool, colors: &ThemeColor) -> Div {
     if !active {
         return cell;
     }
-    let border = if on_accent {
-        colors.primary_foreground
-    } else {
-        colors.ring
-    };
-    cell.border_1().border_color(border).rounded(px(2.))
+    cell.border_1().border_color(colors.ring).rounded(px(2.))
 }
 
-/// (primary, secondary) cell text. Accent-filled cells use the accent's
-/// foreground; secondary columns stay slightly dimmed for hierarchy.
+/// Selected cells retain normal foreground text on the pale accent tint;
+/// secondary columns are dimmed slightly rather than switching to white.
 fn cell_text_colors(on_accent: bool, colors: &ThemeColor) -> (Hsla, Hsla) {
     if on_accent {
-        let on_accent = colors.primary_foreground;
-        (on_accent, on_accent.opacity(0.8))
+        (colors.foreground, colors.foreground.opacity(0.75))
     } else {
         (colors.foreground, colors.muted_foreground)
     }
@@ -2796,16 +2794,31 @@ const LIGHT_GRADIENT: (u32, u32) = (0xeae8e2, 0xd9dde5);
 const DARK_GRADIENT: (u32, u32) = (0x292722, 0x262c35);
 const ISLAND_RADIUS: Pixels = px(16.);
 
+fn mix_rgb(from: Rgba, to: Rgba, amount: f32) -> Rgba {
+    Rgba {
+        r: from.r + (to.r - from.r) * amount,
+        g: from.g + (to.g - from.g) * amount,
+        b: from.b + (to.b - from.b) * amount,
+        a: 1.,
+    }
+}
+
+/// The far edge borrows the active theme's accent, not a second hard-coded blue.
+/// Share the stops with the corner mask so its cutouts match the backdrop.
+fn workspace_gradient_stops(dark: bool, accent: Hsla) -> (Rgba, Rgba) {
+    let (start, end) = if dark { DARK_GRADIENT } else { LIGHT_GRADIENT };
+    let amount = if dark { 0.16 } else { 0.12 };
+    (rgb(start), mix_rgb(rgb(end), accent.to_rgb(), amount))
+}
+
 /// GPUI's overflow clip is rectangular. Paint just the four regions outside
 /// the island's round outline over its square-edged children, without insetting
 /// the table or inspector. This canvas has no hitbox and cannot block clicks.
-fn island_corner_mask(dark: bool) -> impl IntoElement {
+fn island_corner_mask(stops: (Rgba, Rgba)) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
-            let (start, end) = if dark { DARK_GRADIENT } else { LIGHT_GRADIENT };
-            let start = rgb(start);
-            let end = rgb(end);
+            let (start, end) = stops;
             let radius = f32::from(ISLAND_RADIUS);
             let x0 = f32::from(bounds.origin.x);
             let x1 = x0 + f32::from(bounds.size.width);
@@ -2815,12 +2828,7 @@ fn island_corner_mask(dark: bool) -> impl IntoElement {
             for right in [false, true] {
                 let x = if right { x1 } else { x0 };
                 let t = (x / width).clamp(0., 1.);
-                let color = Hsla::from(Rgba {
-                    r: start.r + (end.r - start.r) * t,
-                    g: start.g + (end.g - start.g) * t,
-                    b: start.b + (end.b - start.b) * t,
-                    a: 1.,
-                });
+                let color = Hsla::from(mix_rgb(start, end, t));
                 for bottom in [false, true] {
                     let y = if bottom { y1 } else { y0 };
                     let sx = if right { -1. } else { 1. };
@@ -2870,32 +2878,15 @@ impl Render for LibraryApp {
             cx,
         );
 
-        // Theme caret is the accent blue (matches the selected-row fill), so
-        // while inline editing swap it to white or the caret vanishes.
+        // The accent caret stays visible on the pale selection tint.
         let editing = self.has_inline(cx);
-        let caret = if editing {
-            cx.theme().primary_foreground
-        } else {
-            cx.theme().primary
-        };
-        gpui_kit::component::Theme::update(cx, |theme| {
-            theme.colors.caret = caret;
-        });
 
-        let dark = cx.theme().is_dark();
-        let background = if dark {
-            linear_gradient(
-                90.,
-                linear_color_stop(Hsla::from(rgb(DARK_GRADIENT.0)), 0.),
-                linear_color_stop(Hsla::from(rgb(DARK_GRADIENT.1)), 1.),
-            )
-        } else {
-            linear_gradient(
-                90.,
-                linear_color_stop(Hsla::from(rgb(LIGHT_GRADIENT.0)), 0.),
-                linear_color_stop(Hsla::from(rgb(LIGHT_GRADIENT.1)), 1.),
-            )
-        };
+        let stops = workspace_gradient_stops(cx.theme().is_dark(), cx.theme().primary);
+        let background = linear_gradient(
+            90.,
+            linear_color_stop(Hsla::from(stops.0), 0.),
+            linear_color_stop(Hsla::from(stops.1), 1.),
+        );
 
         v_flex()
             .size_full()
@@ -3075,7 +3066,7 @@ impl Render for LibraryApp {
                             let table = DataTable::new(&self.table)
                                 .with_size(Size::XSmall)
                                 .bordered(false)
-                                .stripe(true)
+                                .stripe(false)
                                 // The table holds focus from the first frame (so
                                 // the detail-panel key works), which makes the
                                 // kit's keyboard focus ring draw on every arrow
@@ -3104,11 +3095,11 @@ impl Render for LibraryApp {
                                 wrap.track_focus(&self.inline_trap)
                                     .focus_trap("inline-edit-trap", &self.inline_trap)
                                     .child(table)
-                                    .child(island_corner_mask(dark))
+                                    .child(island_corner_mask(stops))
                                     .into_any_element()
                             } else {
                                 wrap.child(table)
-                                    .child(island_corner_mask(dark))
+                                    .child(island_corner_mask(stops))
                                     .into_any_element()
                             }
                         },
@@ -3129,7 +3120,7 @@ impl Render for LibraryApp {
                                 .bg(cx.theme().background)
                                 .flex_shrink_0()
                                 .child(self.render_side_panel(cx))
-                                .child(island_corner_mask(dark)),
+                                .child(island_corner_mask(stops)),
                         )
                     }),
             )
@@ -3157,6 +3148,23 @@ mod panel_width_tests {
         assert_eq!(sidebar_target_width(px(240.)), px(240.));
         assert_eq!(sidebar_target_width(px(320.)), px(320.));
         assert_eq!(sidebar_target_width(px(900.)), px(320.));
+    }
+}
+
+#[cfg(test)]
+mod gradient_tests {
+    use super::workspace_gradient_stops;
+    use gpui_kit::{Hsla, rgb};
+
+    #[test]
+    fn workspace_gradient_follows_the_accent_in_both_themes() {
+        for dark in [false, true] {
+            let (start, blue_end) = workspace_gradient_stops(dark, Hsla::from(rgb(0x0064ff)));
+            let (_, red_end) = workspace_gradient_stops(dark, Hsla::from(rgb(0xff6400)));
+            assert_eq!(start, rgb(if dark { 0x292722 } else { 0xeae8e2 }));
+            assert!(blue_end.b > red_end.b);
+            assert!(red_end.r > blue_end.r);
+        }
     }
 }
 #[cfg(test)]
@@ -3341,7 +3349,7 @@ mod sort_cycle_tests {
     }
 
     #[test]
-    fn accent_fill_text_turns_white() {
+    fn accent_tint_keeps_dark_text_readable() {
         let colors = ThemeColor {
             foreground: rgb(0x111111).into(),
             muted_foreground: rgb(0x777777).into(),
@@ -3353,11 +3361,15 @@ mod sort_cycle_tests {
             (colors.foreground, colors.muted_foreground)
         );
         let (primary, secondary) = cell_text_colors(true, &colors);
-        assert_eq!(primary, white());
-        // Secondary columns stay white, only dimmed, so they still read
-        // on the blue fill.
-        assert_eq!((secondary.h, secondary.s, secondary.l), (0., 0., 1.));
-        assert!(secondary.a < 1. && secondary.a >= 0.75);
+        assert_eq!(primary, colors.foreground);
+        assert_eq!(
+            (secondary.h, secondary.s, secondary.l),
+            (
+                colors.foreground.h,
+                colors.foreground.s,
+                colors.foreground.l
+            )
+        );
     }
 
     #[test]

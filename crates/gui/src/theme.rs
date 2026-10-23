@@ -22,11 +22,10 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     let dark = mode.is_dark();
     let pick = |light: u32, dark_value: u32| if dark { dark_value } else { light };
     let blue = rgb(pick(0x0064ff, 0x0a84ff)).into();
-    // Text selections and dropdown highlights tint the surface, because
-    // their text keeps the theme foreground. Table selection fills solid,
-    // and the grid switches the highlighted row or column cells to
-    // `primary_foreground`.
+    // Selections tint neutral surfaces while retaining the normal text color;
+    // the table uses a lighter wash and a hairline in the accent hue.
     let tint = rgba(pick(0x0064ff47, 0x0a84ff4d)).into();
+    let row_tint = rgba(pick(0x0064ff26, 0x0a84ff33)).into();
 
     colors.primary = blue;
     colors.primary_hover = rgb(pick(0x0055e0, 0x3b9cff)).into();
@@ -42,7 +41,7 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     colors.link_hover = colors.primary_hover;
     colors.link_active = colors.primary_active;
     colors.selection = tint;
-    colors.table_active = blue;
+    colors.table_active = row_tint;
     colors.table_active_border = blue;
     colors.list_active = tint;
     colors.list_active_border = blue;
@@ -86,7 +85,11 @@ mod tests {
             assert_eq!(colors.ring, blue);
             assert_eq!(colors.table_active_border, blue);
             assert!(colors.primary.s > 0.95, "accent must be fully saturated");
-            assert_eq!(colors.table_active, blue, "selected rows fill solid");
+            assert_eq!(colors.table_active.h, blue.h);
+            assert!(
+                colors.table_active.a < 0.25,
+                "selected rows should tint, not fill"
+            );
             assert!(colors.list_active.a < 1., "dropdown highlights tint");
             assert!(colors.selection.a < 1., "text selection tints");
             for (field, after, before) in [
