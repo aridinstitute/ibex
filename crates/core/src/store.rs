@@ -63,6 +63,16 @@ pub trait Store: Send + Sync + 'static {
         new: NewResource,
     ) -> Result<Resource, StoreError>;
 
+    /// Flip only the favorite flag on `id`. Missing → [`StoreError::not_found`].
+    ///
+    /// Leaves every bibliographic field alone and does not restamp
+    /// `date_edited`: starring is a library bookmark, not a content edit.
+    async fn set_resource_favorite(
+        &self,
+        id: ResourceId,
+        favorite: bool,
+    ) -> Result<Resource, StoreError>;
+
     /// Load resource row + reconstruct `creators` from edges ordered by `order`.
     /// Missing resource → [`StoreError::not_found`].
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError>;
@@ -106,6 +116,7 @@ pub trait Store: Send + Sync + 'static {
     /// - `filter.search` holds when title OR publisher contains the needle,
     ///   comparing case-insensitively; missing publishers never match;
     /// - `filter.kind` holds when the row's kind equals it;
+    /// - `filter.favorite` holds when the row's favorite flag equals it;
     /// - set predicates AND together: a row must satisfy every one.
     ///
     /// `offset` is a 0-based window into the ordered list; the page returns
@@ -123,6 +134,13 @@ pub trait Store: Send + Sync + 'static {
         let _ = (query, offset, limit);
         Err(StoreError::new(
             "list_resources_query_page not supported by this store",
+        ))
+    }
+
+    /// Unfiltered totals across the full library, independent of pagination.
+    async fn resource_counts(&self) -> Result<crate::ResourceCounts, StoreError> {
+        Err(StoreError::new(
+            "resource_counts not supported by this store",
         ))
     }
 }

@@ -112,6 +112,14 @@ impl Store for HangStore {
         std::future::pending().await
     }
 
+    async fn set_resource_favorite(
+        &self,
+        _id: ResourceId,
+        _favorite: bool,
+    ) -> Result<Resource, StoreError> {
+        std::future::pending().await
+    }
+
     async fn get_resource(&self, _id: ResourceId) -> Result<Resource, StoreError> {
         std::future::pending().await
     }

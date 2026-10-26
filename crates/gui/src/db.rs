@@ -2,13 +2,13 @@
 //! page requests over channels, so gpui's executor never runs Surreal I/O.
 
 use oeuvre_app::command::{
-    CreateResource, GetResource, GetResourceDetail, ListPersons, ListResourcesPage,
-    ListResourcesQueryPage, UpdateResource,
+    CountResources, CreateResource, GetResource, GetResourceDetail, ListPersons, ListResourcesPage,
+    ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
 };
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
-    NewResource, Person, Resource, ResourceDetail, ResourceId, ResourcePage, ResourceQuery,
-    SortedResourcePage,
+    NewResource, Person, Resource, ResourceCounts, ResourceDetail, ResourceId, ResourcePage,
+    ResourceQuery, SortedResourcePage,
 };
 use tokio::sync::oneshot;
 
@@ -24,6 +24,9 @@ pub enum DbRequest {
         limit: u32,
         reply: oneshot::Sender<Result<SortedResourcePage, String>>,
     },
+    CountResources {
+        reply: oneshot::Sender<Result<ResourceCounts, String>>,
+    },
     GetDetail {
         id: ResourceId,
         reply: oneshot::Sender<Result<ResourceDetail, String>>,
@@ -35,6 +38,11 @@ pub enum DbRequest {
     UpdateResource {
         id: ResourceId,
         new: NewResource,
+        reply: oneshot::Sender<Result<Resource, String>>,
+    },
+    SetResourceFavorite {
+        id: ResourceId,
+        favorite: bool,
         reply: oneshot::Sender<Result<Resource, String>>,
     },
     CreateResource {
@@ -112,6 +120,17 @@ impl DbWorker {
                                     });
                                 let _ = reply.send(result);
                             }
+                            DbRequest::CountResources { reply } => {
+                                let result = state
+                                    .execute(Command::CountResources(CountResources))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::CountResources(counts) => Ok(counts),
+                                        _ => Err("unexpected outcome from count_resources".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
                             DbRequest::GetDetail { id, reply } => {
                                 let result = state
                                     .execute(Command::GetResourceDetail(GetResourceDetail { id }))
@@ -145,6 +164,27 @@ impl DbWorker {
                                     .and_then(|outcome| match outcome {
                                         Outcome::UpdateResource(resource) => Ok(resource),
                                         _ => Err("unexpected outcome from update_resource".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::SetResourceFavorite {
+                                id,
+                                favorite,
+                                reply,
+                            } => {
+                                let result = state
+                                    .execute(Command::SetResourceFavorite(SetResourceFavorite {
+                                        id,
+                                        favorite,
+                                    }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::SetResourceFavorite(resource) => Ok(resource),
+                                        _ => {
+                                            Err("unexpected outcome from set_resource_favorite"
+                                                .into())
+                                        }
                                     });
                                 let _ = reply.send(result);
                             }
@@ -217,6 +257,15 @@ impl DbWorker {
             .map_err(|_| "db worker dropped the request".to_string())?
     }
 
+    pub async fn resource_counts(&self) -> Result<ResourceCounts, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::CountResources { reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
     /// Fetch every person for the creator filter's dropdown.
     pub async fn list_persons(&self) -> Result<Vec<Person>, String> {
         let (tx, rx) = oneshot::channel();
@@ -259,6 +308,24 @@ impl DbWorker {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DbRequest::UpdateResource { id, new, reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    /// Toggle only the favorite flag on `id`.
+    pub async fn set_resource_favorite(
+        &self,
+        id: ResourceId,
+        favorite: bool,
+    ) -> Result<Resource, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::SetResourceFavorite {
+                id,
+                favorite,
+                reply: tx,
+            })
             .map_err(|_| "db worker stopped".to_string())?;
         rx.await
             .map_err(|_| "db worker dropped the request".to_string())?
@@ -327,6 +394,19 @@ mod tests {
         }
         assert_eq!(walked, 8);
         assert!(pages >= 3);
+    }
+
+    #[tokio::test]
+    async fn worker_counts_the_full_library_not_just_the_first_page() {
+        let store = MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 5)
+            .await
+            .unwrap();
+        let worker = DbWorker::spawn(AppState::builder(store).surface(Surface::Test).build());
+        assert_eq!(worker.list_page(None, 3).await.unwrap().rows.len(), 3);
+        let counts = worker.resource_counts().await.unwrap();
+        assert_eq!(counts.all_items, 8);
+        assert_eq!(counts.by_kind.values().sum::<u64>(), 8);
     }
 
     #[tokio::test]
@@ -425,6 +505,7 @@ mod tests {
                         creator: None,
                         published: None,
                         kind: None,
+                        favorite: None,
                     },
                 },
                 0,
@@ -497,6 +578,7 @@ mod tests {
                         creator: Some(ada.id),
                         published: None,
                         kind: None,
+                        favorite: None,
                     },
                 },
                 0,
@@ -539,6 +621,7 @@ mod tests {
                             to: oeuvre_core::UtcMillis::jan_1_utc(1964),
                         }),
                         kind: None,
+                        favorite: None,
                     },
                 },
                 0,
@@ -588,6 +671,7 @@ mod tests {
                             to: oeuvre_core::UtcMillis::jan_1_utc(1967),
                         }),
                         kind: None,
+                        favorite: None,
                     },
                 },
                 0,

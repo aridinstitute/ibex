@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use oeuvre_core::{
     BibliographicDate, Creator, CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person,
-    PersonId, Resource, ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery,
-    ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store,
-    StoreError, StoreHealth, UtcMillis, creator_label_name, format_creators_label,
-    published_label_from,
+    PersonId, Resource, ResourceCounts, ResourceFilter, ResourceId, ResourceKind, ResourcePage,
+    ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
+    SortedResourcePage, Store, StoreError, StoreHealth, UtcMillis, creator_label_name,
+    format_creators_label, published_label_from,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -70,6 +70,9 @@ struct ResourceDoc {
     series: Option<RecordId>,
     #[surreal(default)]
     series_number: Option<String>,
+    /// Legacy rows omit the field; treat missing as not favorited.
+    #[surreal(default)]
+    favorite: Option<bool>,
     #[surreal(default)]
     date_added: Option<i64>,
     #[surreal(default)]
@@ -118,6 +121,13 @@ struct ContainerTitleRow {
     id: RecordId,
     #[surreal(wrap)]
     title: NonEmptyStr,
+}
+
+#[derive(Debug, SurrealValue)]
+struct KindCountRow {
+    #[surreal(wrap)]
+    kind: ResourceKind,
+    total: i64,
 }
 
 impl SurrealStore {
@@ -214,6 +224,10 @@ impl SurrealStore {
                 "DEFINE INDEX IF NOT EXISTS resource_date_edited \
                  ON TABLE resource FIELDS date_edited",
             )
+            .await;
+        let _ = self
+            .db
+            .query("DEFINE INDEX IF NOT EXISTS resource_favorite ON TABLE resource FIELDS favorite")
             .await;
 
         let _ = self
@@ -325,6 +339,7 @@ impl SurrealStore {
                 .series_number
                 .as_ref()
                 .map(|s| s.as_str().to_owned()),
+            favorite: Some(resource.favorite),
             date_added: Some(resource.date_added.as_unix_ms()),
             date_edited: Some(resource.date_edited.as_unix_ms()),
         }
@@ -722,7 +737,9 @@ impl Store for SurrealStore {
         // replaced.
         let (date_added, _) =
             Self::recorded_dates(existing_doc.date_added, existing_doc.date_edited, id);
-        let resource = Resource::try_new_updated(id, date_added, new)?;
+        let mut resource = Resource::try_new_updated(id, date_added, new)?;
+        // Bibliographic replace never clears the star.
+        resource.favorite = existing_doc.favorite.unwrap_or(false);
 
         self.db.query("BEGIN TRANSACTION").await.map_err(map_err)?;
 
@@ -761,6 +778,26 @@ impl Store for SurrealStore {
                 Err(err)
             }
         }
+    }
+
+    async fn set_resource_favorite(
+        &self,
+        id: ResourceId,
+        favorite: bool,
+    ) -> Result<Resource, StoreError> {
+        // MERGE keeps every other field; a missing row yields empty → not-found.
+        let mut response = self
+            .db
+            .query("UPDATE ONLY $resource MERGE { favorite: $favorite }")
+            .bind(("resource", Self::resource_key(id)))
+            .bind(("favorite", favorite))
+            .await
+            .map_err(map_err)?;
+        let updated: Option<ResourceDoc> = response.take(0).map_err(map_err)?;
+        if updated.is_none() {
+            return Err(StoreError::not_found(format!("resource {id}")));
+        }
+        self.get_resource(id).await
     }
 
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError> {
@@ -802,6 +839,7 @@ impl Store for SurrealStore {
             parent_id,
             series_id,
             series_number,
+            doc.favorite.unwrap_or(false),
             date_added,
             date_edited,
         )
@@ -813,6 +851,34 @@ impl Store for SurrealStore {
         // projection path serves both reads.
         let page = self.list_resources_page(None, u32::MAX).await?;
         Ok(page.rows)
+    }
+
+    async fn resource_counts(&self) -> Result<ResourceCounts, StoreError> {
+        let mut response = self
+            .db
+            .query("SELECT kind, count() AS total FROM resource GROUP BY kind")
+            .query("SELECT count() AS total FROM resource WHERE favorite = true GROUP ALL")
+            .await
+            .map_err(map_err)?;
+        let rows: Vec<KindCountRow> = response.take(0).map_err(map_err)?;
+        let by_kind: HashMap<ResourceKind, u64> = rows
+            .into_iter()
+            .map(|row| (row.kind, row.total as u64))
+            .collect();
+        #[derive(Debug, SurrealValue)]
+        struct FavoriteCountRow {
+            total: i64,
+        }
+        let favorite_rows: Vec<FavoriteCountRow> = response.take(1).map_err(map_err)?;
+        let favorites = favorite_rows
+            .first()
+            .map(|row| row.total as u64)
+            .unwrap_or(0);
+        Ok(ResourceCounts {
+            all_items: by_kind.values().sum(),
+            favorites,
+            by_kind,
+        })
     }
 
     async fn list_resources_page(
@@ -977,6 +1043,9 @@ impl Store for SurrealStore {
         if let Some(kind) = query.filter.kind {
             statement = statement.bind(("kind", kind.as_str()));
         }
+        if let Some(favorite) = query.filter.favorite {
+            statement = statement.bind(("favorite", favorite));
+        }
         if let Some(range) = query.filter.published {
             if let Some(from) = range.from {
                 statement = statement.bind(("published_from", from.as_unix_ms()));
@@ -1035,6 +1104,10 @@ fn filter_where(filter: &ResourceFilter) -> String {
     // The kind clause compares against the wrapped enum's stored slug.
     if filter.kind.is_some() {
         clauses.push("kind = $kind");
+    }
+    // Missing favorite on legacy rows is false, matching from_stored.
+    if filter.favorite.is_some() {
+        clauses.push("(favorite ?? false) = $favorite");
     }
     // The creator predicate lives in `filter_from`: membership rides the
     // `created` relation, and the source-position traversal is what keeps
@@ -1361,6 +1434,45 @@ mod tests {
         let page = store.list_resources_page(None, 3).await.unwrap();
         assert!(page.rows.is_empty());
         assert!(page.next_before.is_none());
+    }
+
+    #[tokio::test]
+    async fn resource_counts_include_rows_beyond_the_first_page() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        assert_eq!(store.resource_counts().await.unwrap().all_items, 0);
+        for (kind, title) in [
+            (ResourceKind::Book, "One"),
+            (ResourceKind::Report, "Two"),
+            (ResourceKind::Book, "Three"),
+        ] {
+            store
+                .create_resource(NewResource {
+                    kind,
+                    title: NonEmptyStr::try_new(title).unwrap(),
+                    creators: vec![],
+                    publisher: None,
+                    published: None,
+                    accessed: None,
+                    parent_id: None,
+                    series_id: None,
+                    series_number: None,
+                })
+                .await
+                .unwrap();
+        }
+        assert!(
+            store
+                .list_resources_page(None, 1)
+                .await
+                .unwrap()
+                .next_before
+                .is_some()
+        );
+        let counts = store.resource_counts().await.unwrap();
+        assert_eq!(counts.all_items, 3);
+        assert_eq!(counts.by_kind.get(&ResourceKind::Book), Some(&2));
+        assert_eq!(counts.by_kind.get(&ResourceKind::Report), Some(&1));
+        assert_eq!(counts.by_kind.get(&ResourceKind::Thesis), None);
     }
 
     #[tokio::test]
@@ -2033,6 +2145,7 @@ mod tests {
                 creator: None,
                 published: None,
                 kind: None,
+                favorite: None,
             },
         }
     }
@@ -2133,6 +2246,7 @@ mod tests {
                 creator: None,
                 published: None,
                 kind: None,
+                favorite: None,
             },
         };
         let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
@@ -2153,6 +2267,7 @@ mod tests {
                 creator: Some(person),
                 published: None,
                 kind: None,
+                favorite: None,
             },
         }
     }
@@ -2244,6 +2359,7 @@ mod tests {
                 creator: Some(ada.id),
                 published: None,
                 kind: None,
+                favorite: None,
             },
         };
         let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
@@ -2316,6 +2432,7 @@ mod tests {
                     to: to.map(oeuvre_core::UtcMillis::from_unix_ms),
                 }),
                 kind: None,
+                favorite: None,
             },
         }
     }
@@ -2442,6 +2559,7 @@ mod tests {
                     to: Some(oeuvre_core::UtcMillis::from_unix_ms(3_500)),
                 }),
                 kind: None,
+                favorite: None,
             },
         };
         let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
@@ -2513,6 +2631,7 @@ mod tests {
                     to: Some(oeuvre_core::UtcMillis::from_unix_ms(3_500)),
                 }),
                 kind: None,
+                favorite: None,
             },
         };
         let page = store
