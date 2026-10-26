@@ -999,6 +999,24 @@ impl Store for SurrealStore {
         }
     }
 
+    async fn rename_collection(
+        &self,
+        id: CollectionId,
+        name: NonEmptyStr,
+    ) -> Result<Collection, StoreError> {
+        let _ = self.get_collection(id).await?;
+        let updated: Option<CollectionDoc> = self
+            .db
+            .update(Self::collection_key(id))
+            .content(CollectionDoc { name: name.clone() })
+            .await
+            .map_err(map_err)?;
+        match updated {
+            Some(doc) => Ok(Collection { id, name: doc.name }),
+            None => Err(StoreError::not_found(format!("collection {id}"))),
+        }
+    }
+
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {
         let (collections, edges) = self.load_collection_graph().await?;
         Ok(build_collection_forest(collections, edges))

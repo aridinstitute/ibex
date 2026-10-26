@@ -19,6 +19,12 @@ pub struct AddCollectionParent {
 }
 
 #[derive(Debug, Clone)]
+pub struct RenameCollection {
+    pub id: CollectionId,
+    pub name: NonEmptyStr,
+}
+
+#[derive(Debug, Clone)]
 pub struct DeleteCollection {
     pub id: CollectionId,
 }
@@ -29,6 +35,7 @@ pub struct DeletedCollection {
 }
 
 pub(crate) struct Created(pub Collection);
+pub(crate) struct Renamed(pub Collection);
 pub(crate) struct Forest(pub Vec<CollectionTreeNode>);
 pub(crate) struct ParentAdded;
 pub(crate) struct Deleted(pub DeletedCollection);
@@ -36,6 +43,12 @@ pub(crate) struct Deleted(pub DeletedCollection);
 impl From<Created> for Outcome {
     fn from(Created(collection): Created) -> Self {
         Outcome::CreateCollection(collection)
+    }
+}
+
+impl From<Renamed> for Outcome {
+    fn from(Renamed(collection): Renamed) -> Self {
+        Outcome::RenameCollection(collection)
     }
 }
 
@@ -88,6 +101,28 @@ impl Handler for CreateCollection {
         ev.set(event::COLLECTION_ID, collection.id.to_string());
         ev.set(event::COLLECTION_NAME, collection.name.as_str().to_owned());
         Ok(Created(collection))
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for RenameCollection {
+    const NAME: &'static str = "rename_collection";
+    type Output = Renamed;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::COLLECTION_ID, self.id.to_string());
+        ev.set(event::COLLECTION_NAME, self.name.as_str().to_owned());
+    }
+
+    async fn run(self, state: &AppState, ev: &mut Event) -> Result<Renamed, CommandError> {
+        let collection = state
+            .store()
+            .rename_collection(self.id, self.name)
+            .await
+            .map_err(map_create)?;
+        ev.set(event::COLLECTION_ID, collection.id.to_string());
+        ev.set(event::COLLECTION_NAME, collection.name.as_str().to_owned());
+        Ok(Renamed(collection))
     }
 }
 

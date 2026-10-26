@@ -129,6 +129,14 @@ impl Store for HangStore {
         std::future::pending().await
     }
 
+    async fn rename_collection(
+        &self,
+        _id: CollectionId,
+        _name: NonEmptyStr,
+    ) -> Result<Collection, StoreError> {
+        std::future::pending().await
+    }
+
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {
         std::future::pending().await
     }

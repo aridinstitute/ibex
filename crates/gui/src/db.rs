@@ -4,7 +4,7 @@
 use oeuvre_app::command::{
     CountResources, CreateCollection, CreateResource, CreateTag, DeleteCollection, FindTagByText,
     GetResource, GetResourceDetail, ListCollectionForest, ListPersons, ListResourcesPage,
-    ListResourcesQueryPage, ListTags, SetResourceFavorite, UpdateResource,
+    ListResourcesQueryPage, ListTags, RenameCollection, SetResourceFavorite, UpdateResource,
 };
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
@@ -76,6 +76,11 @@ pub enum DbRequest {
     DeleteCollection {
         id: CollectionId,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    RenameCollection {
+        id: CollectionId,
+        name: NonEmptyStr,
+        reply: oneshot::Sender<Result<Collection, String>>,
     },
 }
 
@@ -315,6 +320,22 @@ impl DbWorker {
                                     });
                                 let _ = reply.send(result);
                             }
+                            DbRequest::RenameCollection { id, name, reply } => {
+                                let result = state
+                                    .execute(Command::RenameCollection(RenameCollection {
+                                        id,
+                                        name,
+                                    }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::RenameCollection(collection) => Ok(collection),
+                                        _ => {
+                                            Err("unexpected outcome from rename_collection".into())
+                                        }
+                                    });
+                                let _ = reply.send(result);
+                            }
                         }
                     }
                 });
@@ -438,6 +459,23 @@ impl DbWorker {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DbRequest::DeleteCollection { id, reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    pub async fn rename_collection(
+        &self,
+        id: CollectionId,
+        name: NonEmptyStr,
+    ) -> Result<Collection, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::RenameCollection {
+                id,
+                name,
+                reply: tx,
+            })
             .map_err(|_| "db worker stopped".to_string())?;
         rx.await
             .map_err(|_| "db worker dropped the request".to_string())?

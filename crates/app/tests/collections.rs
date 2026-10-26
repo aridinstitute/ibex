@@ -2,7 +2,7 @@
 
 use oeuvre_app::command::{
     AddCollectionParent, CreateCollection, CreateResource, DeleteCollection, GetResource,
-    ListCollectionForest, ListResourcesQueryPage,
+    ListCollectionForest, ListResourcesQueryPage, RenameCollection,
 };
 use oeuvre_app::testing::MemoryStore;
 use oeuvre_app::{AppState, Command, Outcome, Surface};
@@ -184,6 +184,46 @@ async fn delete_collection_clears_membership_without_deleting_resources() {
     };
     assert_eq!(kept.id, resource.id);
     assert!(kept.collection_ids.is_empty());
+}
+
+#[tokio::test]
+async fn rename_collection_updates_forest_label() {
+    let store = MemoryStore::new();
+    let state = AppState::builder(store).surface(Surface::Test).build();
+
+    let Outcome::CreateCollection(root) = state
+        .execute(Command::CreateCollection(CreateCollection {
+            name: NonEmptyStr::try_new("Draft").unwrap(),
+            parent_id: None,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreateCollection");
+    };
+
+    let Outcome::RenameCollection(renamed) = state
+        .execute(Command::RenameCollection(RenameCollection {
+            id: root.id,
+            name: NonEmptyStr::try_new("Published").unwrap(),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected RenameCollection");
+    };
+    assert_eq!(renamed.id, root.id);
+    assert_eq!(renamed.name.as_str(), "Published");
+
+    let Outcome::ListCollectionForest(forest) = state
+        .execute(Command::ListCollectionForest(ListCollectionForest))
+        .await
+        .unwrap()
+    else {
+        panic!("expected ListCollectionForest");
+    };
+    assert_eq!(forest.len(), 1);
+    assert_eq!(forest[0].collection.name.as_str(), "Published");
 }
 
 #[tokio::test]

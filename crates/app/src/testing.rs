@@ -613,6 +613,19 @@ impl Store for MemoryStore {
             .ok_or_else(|| StoreError::not_found(format!("collection {id}")))
     }
 
+    async fn rename_collection(
+        &self,
+        id: CollectionId,
+        name: NonEmptyStr,
+    ) -> Result<Collection, StoreError> {
+        let mut collections = self.collections.lock().expect("MemoryStore lock");
+        let collection = collections
+            .get_mut(&id)
+            .ok_or_else(|| StoreError::not_found(format!("collection {id}")))?;
+        collection.name = name;
+        Ok(collection.clone())
+    }
+
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {
         let collections: Vec<Collection> = self
             .collections
@@ -1010,6 +1023,14 @@ impl Store for StubStore {
 
     async fn get_collection(&self, _id: CollectionId) -> Result<Collection, StoreError> {
         Err(unsupported("get_collection"))
+    }
+
+    async fn rename_collection(
+        &self,
+        _id: CollectionId,
+        _name: NonEmptyStr,
+    ) -> Result<Collection, StoreError> {
+        Err(unsupported("rename_collection"))
     }
 
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {

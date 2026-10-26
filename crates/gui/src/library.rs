@@ -1330,6 +1330,8 @@ pub struct LibraryApp {
     collection_forest: Vec<CollectionTreeNode>,
     /// Collection ids whose children are shown in the sidebar tree.
     expanded_collections: HashSet<CollectionId>,
+    /// Rename field for the selected sidebar collection; Enter commits.
+    collection_name_input: Entity<InputState>,
     /// Detail-pane autocomplete for attaching a library tag or creating one.
     tag_picker: Entity<ComboboxState<TagDelegate>>,
     /// Detail-pane autocomplete for attaching a library collection.
@@ -1913,6 +1915,25 @@ impl LibraryApp {
         )
         .detach();
 
+        let collection_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Collection name"));
+        cx.subscribe_in(
+            &collection_name_input,
+            window,
+            |this, _input, event: &InputEvent, window, cx| {
+                if matches!(
+                    event,
+                    InputEvent::PressEnter {
+                        secondary: false,
+                        ..
+                    }
+                ) {
+                    this.commit_collection_rename(window, cx);
+                }
+            },
+        )
+        .detach();
+
         Self {
             table,
             settings_dir,
@@ -1926,6 +1947,7 @@ impl LibraryApp {
             tags: Vec::new(),
             collection_forest: Vec::new(),
             expanded_collections: HashSet::new(),
+            collection_name_input,
             tag_picker,
             collection_picker,
             selected: None,
@@ -1989,6 +2011,7 @@ impl LibraryApp {
         self.collection_forest = forest;
         self.expanded_collections = expanded;
         self.sync_collection_picker(window, cx);
+        self.sync_collection_name_input(window, cx);
     }
 
     fn sync_collection_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2043,8 +2066,12 @@ impl LibraryApp {
         cx.notify();
     }
 
-    fn create_sidebar_collection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let parent_id = self.table.read(cx).delegate().filter.collection;
+    fn create_sidebar_collection(
+        &mut self,
+        parent_id: Option<CollectionId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let worker = self.table.read(cx).delegate().worker().clone();
         let name = NonEmptyStr::try_new("New collection").expect("literal");
         cx.spawn_in(window, async move |app, window| {
@@ -2053,6 +2080,45 @@ impl LibraryApp {
                 if let Ok(collection) = result {
                     app.refresh_counts(window, cx);
                     app.select_sidebar_nav(SidebarNav::Collection(collection.id), window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn sync_collection_name_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.table.read(cx).delegate().filter.collection;
+        let name = selected
+            .and_then(|id| {
+                flatten_collections(&self.collection_forest)
+                    .into_iter()
+                    .find(|c| c.id == id)
+                    .map(|c| c.name.as_str().to_owned())
+            })
+            .unwrap_or_default();
+        self.collection_name_input.update(cx, |state, cx| {
+            state.set_value(name, window, cx);
+        });
+    }
+
+    fn commit_collection_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.table.read(cx).delegate().filter.collection else {
+            return;
+        };
+        let raw = self.collection_name_input.read(cx).value().to_string();
+        let Ok(name) = NonEmptyStr::try_new(raw.trim()) else {
+            self.sync_collection_name_input(window, cx);
+            return;
+        };
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let result = worker.rename_collection(id, name).await;
+            _ = app.update_in(window, |app, window, cx| {
+                if result.is_ok() {
+                    app.refresh_counts(window, cx);
+                } else {
+                    app.sync_collection_name_input(window, cx);
                 }
                 cx.notify();
             });
@@ -2249,6 +2315,7 @@ impl LibraryApp {
             delegate.filter.collection = collection;
             delegate.reload_from_top(selected_id, None, window, cx);
         });
+        self.sync_collection_name_input(window, cx);
         cx.notify();
     }
 
@@ -3369,17 +3436,23 @@ impl LibraryApp {
                             .ghost()
                             .xsmall()
                             .icon(Icon::new(IconName::Plus).xsmall())
-                            .tooltip(if selected_collection.is_some() {
-                                "New nested collection"
-                            } else {
-                                "New collection"
-                            })
+                            .tooltip("New root collection")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.create_sidebar_collection(window, cx)
+                                this.create_sidebar_collection(None, window, cx)
                             })),
                     )
-                    .when(selected_collection.is_some(), |row| {
+                    .when_some(selected_collection, |row, parent_id| {
                         row.child(
+                            Button::new("new-nested-collection")
+                                .ghost()
+                                .xsmall()
+                                .label("↳+")
+                                .tooltip("New nested collection")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.create_sidebar_collection(Some(parent_id), window, cx)
+                                })),
+                        )
+                        .child(
                             Button::new("delete-collection")
                                 .ghost()
                                 .xsmall()
@@ -3391,6 +3464,14 @@ impl LibraryApp {
                         )
                     }),
             )
+            .when(selected_collection.is_some(), |panel| {
+                panel.child(
+                    div()
+                        .px_2()
+                        .pb_1()
+                        .child(Input::new(&self.collection_name_input).small().w_full()),
+                )
+            })
             .children(collection_rows.into_iter().enumerate().map(
                 |(index, (collection, depth, has_children))| {
                     let id = collection.id;

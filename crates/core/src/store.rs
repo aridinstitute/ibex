@@ -66,6 +66,13 @@ pub trait Store: Send + Sync + 'static {
     /// Fetch collection by id. Missing → [`StoreError::not_found`].
     async fn get_collection(&self, id: CollectionId) -> Result<Collection, StoreError>;
 
+    /// Replace the display name of `id`. Missing → [`StoreError::not_found`].
+    async fn rename_collection(
+        &self,
+        id: CollectionId,
+        name: NonEmptyStr,
+    ) -> Result<Collection, StoreError>;
+
     /// Sidebar forest: roots have no parents; children follow `child_of`.
     /// The same collection may appear under multiple parents.
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError>;
