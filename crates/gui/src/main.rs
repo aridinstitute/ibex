@@ -25,6 +25,7 @@ use crate::kind::AppAssets;
 use crate::library::{
     BeginInlineEdit, BeginNewRow, CycleColumnSort, FocusColumnFilter, FocusSearch, InlineNextField,
     InlinePrevField, LibraryApp, LibraryDelegate, PAGE_SIZE, ToggleDetailPanel, ToggleEditMode,
+    ToggleLeftPanel,
 };
 use crate::settings::Settings;
 
@@ -81,6 +82,7 @@ fn run() -> Result<()> {
             // Letter keys skip Input so typing in cells/filters is undisturbed.
             cx.bind_keys([
                 KeyBinding::new("]", ToggleDetailPanel, Some("LibraryApp && !Input")),
+                KeyBinding::new("[", ToggleLeftPanel, Some("LibraryApp && !Input")),
                 KeyBinding::new("space", CycleColumnSort, Some("LibraryApp && !Input")),
                 KeyBinding::new("e", BeginInlineEdit, Some("LibraryApp && !Input")),
                 KeyBinding::new("enter", ToggleEditMode, Some("LibraryApp && !Input")),

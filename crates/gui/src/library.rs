@@ -1184,6 +1184,7 @@ fn sort_marker(direction: SortDirection, cx: &App) -> Icon {
 }
 
 gpui_kit::actions!([
+    ToggleLeftPanel,
     ToggleDetailPanel,
     CycleColumnSort,
     ToggleEditMode,
@@ -1273,6 +1274,7 @@ pub struct LibraryApp {
     published_from_input: Entity<InputState>,
     published_to_input: Entity<InputState>,
     detail_open: bool,
+    left_panel_open: bool,
     /// Row selection, tracked here so the panel shows one resource exactly
     /// as long as its row stays selected.
     selected: Option<ResourceId>,
@@ -1759,6 +1761,7 @@ impl LibraryApp {
             published_from_input,
             published_to_input,
             detail_open: false,
+            left_panel_open: true,
             selected: None,
             detail: None,
             detail_cache: DetailCache::new(),
@@ -2047,6 +2050,11 @@ impl LibraryApp {
         // The detail is fetched on selection whether or not the panel shows,
         // so opening it never waits on a fetch.
         self.detail_open = !self.detail_open;
+        cx.notify();
+    }
+
+    fn toggle_left_panel(&mut self, cx: &mut Context<Self>) {
+        self.left_panel_open = !self.left_panel_open;
         cx.notify();
     }
 
@@ -2790,6 +2798,10 @@ fn sidebar_target_width(viewport: Pixels) -> Pixels {
     PANEL_WIDTH.min(viewport.max(px(0.)))
 }
 
+fn left_panel_target_width(open: bool) -> Pixels {
+    if open { px(180.) } else { px(0.) }
+}
+
 const LIGHT_GRADIENT: (u32, u32) = (0xeae8e2, 0xd9dde5);
 const DARK_GRADIENT: (u32, u32) = (0x292722, 0x262c35);
 const ISLAND_RADIUS: Pixels = px(16.);
@@ -2865,6 +2877,8 @@ impl Render for LibraryApp {
         // Always sample the width so the first closed frame anchors at 0
         // and later toggles animate from the live value.
         let motion = cx.theme().motion_tokens();
+        let panel_transition =
+            MotionTransition::new(motion.duration_normal).easing(motion.easing_move.clone());
         let sidebar_target = if self.detail_open {
             sidebar_target_width(window.viewport_size().width)
         } else {
@@ -2873,7 +2887,14 @@ impl Render for LibraryApp {
         let sidebar_width = transition(
             "detail-sidebar-width",
             sidebar_target,
-            MotionTransition::new(motion.duration_normal).easing(motion.easing_move.clone()),
+            panel_transition.clone(),
+            window,
+            cx,
+        );
+        let left_panel_width = transition(
+            "left-panel-width",
+            left_panel_target_width(self.left_panel_open),
+            panel_transition,
             window,
             cx,
         );
@@ -2902,6 +2923,9 @@ impl Render for LibraryApp {
             })
             .on_action(cx.listener(|this, _: &ToggleDetailPanel, _window, cx| {
                 this.toggle_detail_panel(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleLeftPanel, _window, cx| {
+                this.toggle_left_panel(cx);
             }))
             .on_action(cx.listener(|this, _: &CycleColumnSort, window, cx| {
                 this.cycle_column_sort(window, cx);
@@ -2965,6 +2989,24 @@ impl Render for LibraryApp {
                                 } else {
                                     px(12.)
                                 })
+                                .child(
+                                    Button::new("toggle-left-panel")
+                                        .ghost()
+                                        .small()
+                                        .icon(if self.left_panel_open {
+                                            Icon::new(AssetIconName::PanelLeftClose)
+                                        } else {
+                                            Icon::new(AssetIconName::PanelLeftOpen)
+                                        })
+                                        .tooltip(if self.left_panel_open {
+                                            "Hide left panel ([)"
+                                        } else {
+                                            "Show left panel ([)"
+                                        })
+                                        .on_click(cx.listener(|this, _, _window, cx| {
+                                            this.toggle_left_panel(cx)
+                                        })),
+                                )
                                 .child(
                                     Button::new("toggle-filters")
                                         .ghost()
@@ -3043,16 +3085,20 @@ impl Render for LibraryApp {
                     .items_stretch()
                     .gap_2()
                     .p_2()
-                    .child(
-                        div()
-                            .w(px(180.))
-                            .flex_shrink_0()
-                            .h_full()
-                            .rounded(ISLAND_RADIUS)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .bg(cx.theme().background),
-                    )
+                    .when(left_panel_width > px(0.5), |el| {
+                        el.child(
+                            div()
+                                .id("left-panel-clip")
+                                .w(left_panel_width)
+                                .flex_shrink_0()
+                                .h_full()
+                                .overflow_hidden()
+                                .rounded(ISLAND_RADIUS)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().background),
+                        )
+                    })
                     .child(
                         // `h_flex` centers its children on the cross axis
                         // instead of stretching them, so the wrapper must
@@ -3142,6 +3188,12 @@ impl Render for LibraryApp {
 mod panel_width_tests {
     use super::sidebar_target_width;
     use gpui_kit::px;
+
+    #[test]
+    fn left_panel_releases_space_when_closed() {
+        assert_eq!(super::left_panel_target_width(true), px(180.));
+        assert_eq!(super::left_panel_target_width(false), px(0.));
+    }
 
     #[test]
     fn edit_sidebar_fits_narrow_windows() {
