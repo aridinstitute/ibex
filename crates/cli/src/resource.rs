@@ -185,6 +185,7 @@ fn listing_query(args: &ListArgs) -> Result<Option<ResourceQuery>> {
             creator,
             published,
             kind: None,
+            favorite: None,
         },
     }))
 }

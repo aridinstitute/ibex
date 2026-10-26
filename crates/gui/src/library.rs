@@ -1265,6 +1265,14 @@ fn prefetch_window(row_ix: usize, rows_count: usize) -> Range<usize> {
     start..end
 }
 
+/// Left-nav selection: All items, Favorites, or one kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarNav {
+    All,
+    Favorites,
+    Kind(ResourceKind),
+}
+
 pub struct LibraryApp {
     table: Entity<TableState<LibraryDelegate>>,
     /// App data directory holding config.toml, where settings persist.
@@ -1592,9 +1600,12 @@ impl LibraryApp {
                     .selected_row()
                     .and_then(|ix| this.table.read(cx).delegate().row_id(ix));
                 this.table.update(cx, |table, cx| {
-                    table
-                        .delegate_mut()
-                        .request_kind_filter(kind, selected_id, window, cx);
+                    let delegate = table.delegate_mut();
+                    // Header kind filter and Favorites nav are exclusive.
+                    if kind.is_some() {
+                        delegate.filter.favorite = None;
+                    }
+                    delegate.request_kind_filter(kind, selected_id, window, cx);
                 });
                 cx.notify();
             },
@@ -1821,12 +1832,7 @@ impl LibraryApp {
         .detach();
     }
 
-    fn select_sidebar_kind(
-        &mut self,
-        kind: Option<ResourceKind>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_sidebar_nav(&mut self, nav: SidebarNav, window: &mut Window, cx: &mut Context<Self>) {
         let (selected_id, input) = {
             let table = self.table.read(cx);
             let delegate = table.delegate();
@@ -1838,16 +1844,100 @@ impl LibraryApp {
                     .map(|inputs| inputs.kind.clone()),
             )
         };
+        let kind = match nav {
+            SidebarNav::Kind(kind) => Some(kind),
+            SidebarNav::All | SidebarNav::Favorites => None,
+        };
+        let favorite = match nav {
+            SidebarNav::Favorites => Some(true),
+            SidebarNav::All | SidebarNav::Kind(_) => None,
+        };
         if let Some(input) = input {
             input.update(cx, |state, cx| {
                 state.set_selected_values(&kind.into_iter().collect::<Vec<_>>(), window, cx);
             });
         }
         self.table.update(cx, |table, cx| {
-            table
-                .delegate_mut()
-                .request_kind_filter(kind, selected_id, window, cx);
+            let delegate = table.delegate_mut();
+            // Apply both predicates in one reload so All/Favorites never
+            // briefly flash the previous listing.
+            let kind_changed = delegate.filter.kind != kind;
+            let favorite_changed = delegate.filter.favorite != favorite;
+            if !kind_changed && !favorite_changed {
+                return;
+            }
+            delegate.filter.kind = kind;
+            delegate.filter.favorite = favorite;
+            delegate.reload_from_top(selected_id, None, window, cx);
         });
+        cx.notify();
+    }
+
+    /// Flip the selected resource's favorite flag from the detail panel.
+    fn toggle_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected else {
+            return;
+        };
+        let Some(current) = self
+            .detail
+            .as_ref()
+            .and_then(|(loaded, fetch)| (*loaded == id).then_some(fetch))
+            .and_then(|fetch| match fetch {
+                DetailFetch::Loaded(detail) => Some(detail.favorite),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        let next = !current;
+        let worker = self.table.read(cx).delegate().worker().clone();
+        // Bump the generation so an in-flight pre-toggle detail cannot
+        // overwrite the starred state after the toggle lands.
+        let epoch = self.detail_gens.entry(id).or_insert(0);
+        *epoch += 1;
+        let fetch_epoch = *epoch;
+        self.detail_cache.invalidate(&id);
+        cx.spawn_in(window, async move |app, window| {
+            let reply = worker.set_resource_favorite(id, next).await;
+            _ = app.update_in(window, |app, window, cx| {
+                match reply {
+                    Ok(resource) => {
+                        // Refetch detail so names/container stay resolved.
+                        app.detail_inflight.remove(&id);
+                        if *app.detail_gens.get(&id).unwrap_or(&0) != fetch_epoch {
+                            return;
+                        }
+                        // Optimistically patch favorite on a cached/loaded
+                        // detail if present, then refetch for consistency.
+                        if let Some((_, DetailFetch::Loaded(detail))) = app.detail.as_mut() {
+                            if detail.id == id {
+                                detail.favorite = resource.favorite;
+                            }
+                        }
+                        app.fetch_detail(id, window, cx);
+                        app.refresh_counts(window, cx);
+                        // Favorites view drops unstarred rows immediately.
+                        let filtering_favorites =
+                            app.table.read(cx).delegate().filter.favorite == Some(true);
+                        if filtering_favorites {
+                            let selected_id = app.selected;
+                            app.table.update(cx, |table, cx| {
+                                table
+                                    .delegate_mut()
+                                    .reload_from_top(selected_id, None, window, cx);
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        if app.selected == Some(id) {
+                            app.detail = Some((id, DetailFetch::Failed(err)));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -2737,7 +2827,7 @@ impl LibraryApp {
     fn sidebar_row(
         &self,
         index: usize,
-        kind: Option<ResourceKind>,
+        nav: SidebarNav,
         label: String,
         icon: Icon,
         count: Option<u64>,
@@ -2758,7 +2848,7 @@ impl LibraryApp {
             })
             .hover(move |row| row.bg(hover))
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.select_sidebar_kind(kind, window, cx);
+                this.select_sidebar_nav(nav, window, cx);
             }))
             .child(icon.with_size(px(16.)))
             .child(div().flex_1().min_w_0().truncate().child(label))
@@ -2772,13 +2862,17 @@ impl LibraryApp {
     }
 
     fn render_left_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = self.table.read(cx).delegate().filter.kind;
+        let filter = self.table.read(cx).delegate().filter.clone();
+        let selected_kind = filter.kind;
+        let all_selected = filter.kind.is_none() && filter.favorite.is_none();
+        let favorites_selected = filter.favorite == Some(true);
         let kinds = ResourceKind::ALL
             .into_iter()
             .enumerate()
             .filter(|(_, kind)| {
                 self.counts.as_ref().is_none_or(|counts| {
-                    counts.by_kind.get(kind).copied().unwrap_or(0) > 0 || selected == Some(*kind)
+                    counts.by_kind.get(kind).copied().unwrap_or(0) > 0
+                        || selected_kind == Some(*kind)
                 })
             })
             .collect::<Vec<_>>();
@@ -2790,11 +2884,22 @@ impl LibraryApp {
             .text_size(px(12.))
             .child(self.sidebar_row(
                 0,
-                None,
+                SidebarNav::All,
                 "All items".into(),
                 symbol("books.vertical", AssetIconName::Library),
                 self.counts.as_ref().map(|counts| counts.all_items),
-                selected.is_none(),
+                all_selected,
+                cx,
+            ))
+            .child(self.sidebar_row(
+                1,
+                SidebarNav::Favorites,
+                "Favorites".into(),
+                symbol("star", AssetIconName::Star).text_color(favorite_star_color(
+                    cx.theme().is_dark(),
+                )),
+                self.counts.as_ref().map(|counts| counts.favorites),
+                favorites_selected,
                 cx,
             ))
             .child(
@@ -2807,14 +2912,14 @@ impl LibraryApp {
             )
             .children(kinds.into_iter().map(|(index, kind)| {
                 self.sidebar_row(
-                    index + 1,
-                    Some(kind),
+                    index + 2,
+                    SidebarNav::Kind(kind),
                     sidebar_kind_label(kind),
                     kind_symbol(kind).text_color(kind_color(kind, cx.theme().is_dark())),
                     self.counts
                         .as_ref()
                         .map(|counts| counts.by_kind.get(&kind).copied().unwrap_or(0)),
-                    selected == Some(kind),
+                    selected_kind == Some(kind),
                     cx,
                 )
             }))
@@ -2839,16 +2944,47 @@ impl LibraryApp {
             Some(EditFetch::Ready(form)) => self.render_edit_panel(form, cx),
             Some(EditFetch::Loading(_)) => render_panel(DetailView::Loading, None, cx),
             None => {
-                let edit_button = self.selected.is_some().then(|| {
-                    Button::new("edit-resource")
-                        .ghost()
-                        .small()
-                        .icon(symbol("pencil", AssetIconName::PenLine))
-                        .tooltip("Edit resource")
-                        .on_click(cx.listener(|this, _, window, cx| this.request_edit(window, cx)))
-                        .into_any_element()
-                });
-                render_panel(self.detail_view(), edit_button, cx)
+                let favorited = match self.detail_view() {
+                    DetailView::Fields(detail) => Some(detail.favorite),
+                    _ => None,
+                };
+                let actions =
+                    self.selected.is_some().then(|| {
+                        let star = match favorited {
+                            Some(true) => symbol("star.fill", AssetIconName::StarFill),
+                            _ => symbol("star", AssetIconName::Star),
+                        }
+                        .with_size(px(16.))
+                        .text_color(favorite_star_color(cx.theme().is_dark()));
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("toggle-favorite")
+                                    .ghost()
+                                    .icon(star)
+                                    .tooltip(if favorited == Some(true) {
+                                        "Remove from favorites"
+                                    } else {
+                                        "Add to favorites"
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_favorite(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("edit-resource")
+                                    .ghost()
+                                    .icon(
+                                        symbol("pencil", AssetIconName::PenLine).with_size(px(16.)),
+                                    )
+                                    .tooltip("Edit resource")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.request_edit(window, cx)
+                                    })),
+                            )
+                            .into_any_element()
+                    });
+                render_panel(self.detail_view(), actions, cx)
             }
         }
     }
@@ -2980,6 +3116,12 @@ fn left_panel_target_width(open: bool) -> Pixels {
 // Sidebar navigation is neutral; the table keeps its blue active-row tint.
 fn sidebar_selected_background(theme: &ThemeColor) -> Hsla {
     theme.accent
+}
+
+/// Warm gold for favorite stars (outline and fill). Dark mode lifts the
+/// same hue so the glyph stays legible on the darker island surface.
+fn favorite_star_color(dark: bool) -> Hsla {
+    rgb(if dark { 0xf5c542 } else { 0xd4a017 }).into()
 }
 
 fn toggle_theme(cx: &mut App) {
@@ -3736,6 +3878,7 @@ mod detail_prefetch_tests {
             container_title: None,
             series_title: None,
             series_number: None,
+            favorite: false,
             date_added: UtcMillis::from_unix_ms(0),
             date_edited: UtcMillis::from_unix_ms(0),
         }

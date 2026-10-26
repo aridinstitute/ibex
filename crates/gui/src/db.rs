@@ -3,7 +3,7 @@
 
 use oeuvre_app::command::{
     CountResources, CreateResource, GetResource, GetResourceDetail, ListPersons, ListResourcesPage,
-    ListResourcesQueryPage, UpdateResource,
+    ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
 };
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
@@ -38,6 +38,11 @@ pub enum DbRequest {
     UpdateResource {
         id: ResourceId,
         new: NewResource,
+        reply: oneshot::Sender<Result<Resource, String>>,
+    },
+    SetResourceFavorite {
+        id: ResourceId,
+        favorite: bool,
         reply: oneshot::Sender<Result<Resource, String>>,
     },
     CreateResource {
@@ -162,6 +167,27 @@ impl DbWorker {
                                     });
                                 let _ = reply.send(result);
                             }
+                            DbRequest::SetResourceFavorite {
+                                id,
+                                favorite,
+                                reply,
+                            } => {
+                                let result = state
+                                    .execute(Command::SetResourceFavorite(SetResourceFavorite {
+                                        id,
+                                        favorite,
+                                    }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::SetResourceFavorite(resource) => Ok(resource),
+                                        _ => {
+                                            Err("unexpected outcome from set_resource_favorite"
+                                                .into())
+                                        }
+                                    });
+                                let _ = reply.send(result);
+                            }
                             DbRequest::CreateResource { new, reply } => {
                                 let result = state
                                     .execute(Command::CreateResource(CreateResource { new }))
@@ -282,6 +308,24 @@ impl DbWorker {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DbRequest::UpdateResource { id, new, reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    /// Toggle only the favorite flag on `id`.
+    pub async fn set_resource_favorite(
+        &self,
+        id: ResourceId,
+        favorite: bool,
+    ) -> Result<Resource, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::SetResourceFavorite {
+                id,
+                favorite,
+                reply: tx,
+            })
             .map_err(|_| "db worker stopped".to_string())?;
         rx.await
             .map_err(|_| "db worker dropped the request".to_string())?
@@ -461,6 +505,7 @@ mod tests {
                         creator: None,
                         published: None,
                         kind: None,
+                        favorite: None,
                     },
                 },
                 0,
@@ -533,6 +578,7 @@ mod tests {
                         creator: Some(ada.id),
                         published: None,
                         kind: None,
+                        favorite: None,
                     },
                 },
                 0,
@@ -575,6 +621,7 @@ mod tests {
                             to: oeuvre_core::UtcMillis::jan_1_utc(1964),
                         }),
                         kind: None,
+                        favorite: None,
                     },
                 },
                 0,
@@ -624,6 +671,7 @@ mod tests {
                             to: oeuvre_core::UtcMillis::jan_1_utc(1967),
                         }),
                         kind: None,
+                        favorite: None,
                     },
                 },
                 0,

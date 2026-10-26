@@ -124,6 +124,7 @@ fn titled(needle: &str) -> ResourceQuery {
             creator: None,
             published: None,
             kind: None,
+            favorite: None,
         },
     }
 }
@@ -139,6 +140,7 @@ fn by_creator(person: PersonId) -> ResourceQuery {
             creator: Some(person),
             published: None,
             kind: None,
+            favorite: None,
         },
     }
 }
@@ -157,6 +159,7 @@ fn ranged(from: Option<i64>, to: Option<i64>) -> ResourceQuery {
                 to: to.map(UtcMillis::from_unix_ms),
             }),
             kind: None,
+            favorite: None,
         },
     }
 }
@@ -649,6 +652,7 @@ async fn title_filter_keeps_the_sort_order_within_matches() {
             creator: None,
             published: None,
             kind: None,
+            favorite: None,
         },
     };
     let first = store
@@ -748,6 +752,7 @@ async fn creator_filter_keeps_the_sort_order_within_matches() {
             creator: Some(ada),
             published: None,
             kind: None,
+            favorite: None,
         },
     };
     let first = store
@@ -869,6 +874,7 @@ async fn published_range_keeps_sort_order_within_matches() {
                 to: Some(UtcMillis::from_unix_ms(3_500)),
             }),
             kind: None,
+            favorite: None,
         },
     };
     let first = store
@@ -918,6 +924,7 @@ async fn filters_and_together() {
                 to: Some(UtcMillis::from_unix_ms(3_500)),
             }),
             kind: None,
+            favorite: None,
         },
     };
     let page = store
@@ -1161,6 +1168,7 @@ async fn filtered_query_page_command_emits_filter_event() {
                         to: None,
                     }),
                     kind: Some(ResourceKind::Book),
+                    favorite: None,
                 },
             },
             0,

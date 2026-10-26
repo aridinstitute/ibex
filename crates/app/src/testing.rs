@@ -82,6 +82,7 @@ struct ResourceRow {
     parent_id: Option<ResourceId>,
     series_id: Option<SeriesId>,
     series_number: Option<NonEmptyStr>,
+    favorite: bool,
     date_added: UtcMillis,
     date_edited: UtcMillis,
 }
@@ -334,6 +335,11 @@ impl MemoryStore {
                         return false;
                     }
                 }
+                if let Some(favorite) = filter.favorite {
+                    if resource.favorite != favorite {
+                        return false;
+                    }
+                }
                 if let Some(needle) = needle.as_deref() {
                     if !resource.title.as_str().to_lowercase().contains(needle) {
                         return false;
@@ -478,6 +484,7 @@ impl Store for MemoryStore {
             parent_id: resource.parent_id,
             series_id: resource.series_id,
             series_number: resource.series_number.clone(),
+            favorite: resource.favorite,
             date_added: resource.date_added,
             date_edited: resource.date_edited,
         };
@@ -507,11 +514,13 @@ impl Store for MemoryStore {
         let mut resources = self.resources.lock().expect("MemoryStore lock");
         // Existence first, matching the surreal adapter; the row's stamp is
         // the date_added an edit must carry forward.
-        let date_added = match resources.get(&id) {
-            Some(row) => row.date_added,
+        let (date_added, favorite) = match resources.get(&id) {
+            Some(row) => (row.date_added, row.favorite),
             None => return Err(StoreError::not_found(format!("resource {id}"))),
         };
-        let resource = Resource::try_new_updated(id, date_added, new)?;
+        let mut resource = Resource::try_new_updated(id, date_added, new)?;
+        // Bibliographic replace never clears the star.
+        resource.favorite = favorite;
         resources.insert(
             id,
             ResourceRow {
@@ -523,6 +532,7 @@ impl Store for MemoryStore {
                 parent_id: resource.parent_id,
                 series_id: resource.series_id,
                 series_number: resource.series_number.clone(),
+                favorite: resource.favorite,
                 date_added: resource.date_added,
                 date_edited: resource.date_edited,
             },
@@ -545,6 +555,21 @@ impl Store for MemoryStore {
         Ok(resource)
     }
 
+    async fn set_resource_favorite(
+        &self,
+        id: ResourceId,
+        favorite: bool,
+    ) -> Result<Resource, StoreError> {
+        {
+            let mut resources = self.resources.lock().expect("MemoryStore lock");
+            let row = resources
+                .get_mut(&id)
+                .ok_or_else(|| StoreError::not_found(format!("resource {id}")))?;
+            row.favorite = favorite;
+        }
+        self.get_resource(id).await
+    }
+
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError> {
         let row = self
             .resources
@@ -560,6 +585,7 @@ impl Store for MemoryStore {
                 parent_id: r.parent_id,
                 series_id: r.series_id,
                 series_number: r.series_number.clone(),
+                favorite: r.favorite,
                 date_added: r.date_added,
                 date_edited: r.date_edited,
             })
@@ -591,6 +617,7 @@ impl Store for MemoryStore {
             row.parent_id,
             row.series_id,
             row.series_number,
+            row.favorite,
             row.date_added,
             row.date_edited,
         )
@@ -612,6 +639,9 @@ impl Store for MemoryStore {
         };
         for resource in resources.values() {
             *counts.by_kind.entry(resource.kind).or_default() += 1;
+            if resource.favorite {
+                counts.favorites += 1;
+            }
         }
         Ok(counts)
     }
@@ -756,6 +786,14 @@ impl Store for StubStore {
         _new: NewResource,
     ) -> Result<Resource, StoreError> {
         Err(unsupported("update_resource"))
+    }
+
+    async fn set_resource_favorite(
+        &self,
+        _id: ResourceId,
+        _favorite: bool,
+    ) -> Result<Resource, StoreError> {
+        Err(unsupported("set_resource_favorite"))
     }
 
     async fn get_resource(&self, _id: ResourceId) -> Result<Resource, StoreError> {

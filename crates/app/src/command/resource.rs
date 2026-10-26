@@ -24,6 +24,12 @@ pub struct UpdateResource {
 }
 
 #[derive(Debug, Clone)]
+pub struct SetResourceFavorite {
+    pub id: ResourceId,
+    pub favorite: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct GetResource {
     pub id: ResourceId,
 }
@@ -59,6 +65,7 @@ pub struct CountResources;
 
 pub(crate) struct Created(pub Resource);
 pub(crate) struct Updated(pub Resource);
+pub(crate) struct Favorited(pub Resource);
 pub(crate) struct Fetched(pub Resource);
 pub(crate) struct FetchedDetail(pub ResourceDetail);
 pub(crate) struct Listed(pub Vec<ResourceSummary>);
@@ -75,6 +82,12 @@ impl From<Created> for Outcome {
 impl From<Updated> for Outcome {
     fn from(Updated(resource): Updated) -> Self {
         Outcome::UpdateResource(resource)
+    }
+}
+
+impl From<Favorited> for Outcome {
+    fn from(Favorited(resource): Favorited) -> Self {
+        Outcome::SetResourceFavorite(resource)
     }
 }
 
@@ -315,6 +328,29 @@ impl Handler for UpdateResource {
 }
 
 #[async_trait::async_trait]
+impl Handler for SetResourceFavorite {
+    const NAME: &'static str = "set_resource_favorite";
+    type Output = Favorited;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::RESOURCE_ID, self.id.to_string());
+        ev.set(event::RESOURCE_FAVORITE, self.favorite);
+    }
+
+    async fn run(self, state: &AppState, ev: &mut Event) -> Result<Favorited, CommandError> {
+        let resource = state
+            .store()
+            .set_resource_favorite(self.id, self.favorite)
+            .await
+            .map_err(|e| map_resource_lookup(e, self.id))?;
+        ev.set(event::RESOURCE_KIND, resource.kind.as_str());
+        ev.set(event::RESOURCE_TITLE, resource.title.as_str().to_owned());
+        ev.set(event::RESOURCE_FAVORITE, resource.favorite);
+        Ok(Favorited(resource))
+    }
+}
+
+#[async_trait::async_trait]
 impl Handler for GetResource {
     const NAME: &'static str = "get_resource";
     type Output = Fetched;
@@ -413,6 +449,7 @@ impl Handler for GetResourceDetail {
             container_title,
             series_title,
             series_number: resource.series_number,
+            favorite: resource.favorite,
             date_added: resource.date_added,
             date_edited: resource.date_edited,
         }))
@@ -488,6 +525,9 @@ impl Handler for ListResourcesQueryPage {
         }
         if let Some(kind) = self.query.filter.kind {
             ev.set(event::RESOURCE_FILTER_KIND, kind.as_str());
+        }
+        if let Some(favorite) = self.query.filter.favorite {
+            ev.set(event::RESOURCE_FILTER_FAVORITE, favorite);
         }
         if let Some(range) = self.query.filter.published {
             if let Some(from) = range.from {

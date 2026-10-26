@@ -248,6 +248,7 @@ mod tests {
             container_title: Some(NonEmptyStr::try_new("Journal of Citation Studies").unwrap()),
             series_title: None,
             series_number: None,
+            favorite: false,
             date_added: UtcMillis::from_unix_ms(1_609_459_200_000),
             date_edited: UtcMillis::from_unix_ms(1_609_459_200_000),
         }

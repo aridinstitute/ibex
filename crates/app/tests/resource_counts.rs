@@ -42,6 +42,7 @@ async fn counts_report_the_whole_library_and_emit_one_event() {
         panic!("expected counts");
     };
     assert_eq!(counts.all_items, 3);
+    assert_eq!(counts.favorites, 0);
     assert_eq!(counts.by_kind.get(&ResourceKind::Book), Some(&2));
     assert_eq!(counts.by_kind.get(&ResourceKind::Report), Some(&1));
     assert_eq!(counts.by_kind.get(&ResourceKind::Thesis), None);

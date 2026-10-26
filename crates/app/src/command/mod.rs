@@ -10,7 +10,7 @@ pub use person::{
 };
 pub use resource::{
     CountResources, CreateResource, GetResource, GetResourceDetail, ListResources,
-    ListResourcesPage, ListResourcesQueryPage, UpdateResource,
+    ListResourcesPage, ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
 };
 pub use series::CreateSeries;
 
@@ -36,6 +36,7 @@ pub enum Command {
     CreateSeries(CreateSeries),
     CreateResource(CreateResource),
     UpdateResource(UpdateResource),
+    SetResourceFavorite(SetResourceFavorite),
     GetResource(GetResource),
     GetResourceDetail(GetResourceDetail),
     ListResources(ListResources),
@@ -58,6 +59,7 @@ pub enum Outcome {
     CreateSeries(Series),
     CreateResource(Resource),
     UpdateResource(Resource),
+    SetResourceFavorite(Resource),
     GetResource(Resource),
     GetResourceDetail(ResourceDetail),
     ListResources(Vec<ResourceSummary>),
@@ -107,6 +109,7 @@ impl Command {
             Command::CreateSeries(_) => CreateSeries::NAME,
             Command::CreateResource(_) => CreateResource::NAME,
             Command::UpdateResource(_) => UpdateResource::NAME,
+            Command::SetResourceFavorite(_) => SetResourceFavorite::NAME,
             Command::GetResource(_) => GetResource::NAME,
             Command::GetResourceDetail(_) => GetResourceDetail::NAME,
             Command::ListResources(_) => ListResources::NAME,
@@ -146,6 +149,7 @@ pub(crate) async fn dispatch(
         Command::CreateSeries(c) => drive(c, state, ev).await,
         Command::CreateResource(c) => drive(c, state, ev).await,
         Command::UpdateResource(c) => drive(c, state, ev).await,
+        Command::SetResourceFavorite(c) => drive(c, state, ev).await,
         Command::GetResource(c) => drive(c, state, ev).await,
         Command::GetResourceDetail(c) => drive(c, state, ev).await,
         Command::ListResources(c) => drive(c, state, ev).await,

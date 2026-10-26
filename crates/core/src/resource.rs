@@ -292,6 +292,8 @@ pub struct ResourcePage {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct ResourceCounts {
     pub all_items: u64,
+    /// Resources currently marked favorite; independent of kind filters.
+    pub favorites: u64,
     pub by_kind: std::collections::HashMap<ResourceKind, u64>,
 }
 
@@ -402,6 +404,9 @@ pub struct ResourceFilter {
     /// picker's candidates, for instance) narrow at the store instead of
     /// paging the whole library.
     pub kind: Option<ResourceKind>,
+    /// When `Some(true)`, only favorited rows; `Some(false)` only non-favorites.
+    /// `None` does not constrain on favorite.
+    pub favorite: Option<bool>,
 }
 
 impl ResourceFilter {
@@ -413,6 +418,7 @@ impl ResourceFilter {
             creator: None,
             published: None,
             kind: None,
+            favorite: None,
         }
     }
 
@@ -430,6 +436,7 @@ impl ResourceFilter {
             || self.search.is_some()
             || self.creator.is_some()
             || self.kind.is_some()
+            || self.favorite.is_some()
             || self
                 .published
                 .as_ref()
@@ -499,6 +506,8 @@ pub struct ResourceDetail {
     pub container_title: Option<NonEmptyStr>,
     pub series_title: Option<NonEmptyStr>,
     pub series_number: Option<NonEmptyStr>,
+    /// User-starred flag; independent of bibliographic fields.
+    pub favorite: bool,
     /// Record-keeping stamps, always present on a stored record.
     pub date_added: UtcMillis,
     pub date_edited: UtcMillis,
@@ -715,6 +724,9 @@ pub struct Resource {
     pub parent_id: Option<ResourceId>,
     pub series_id: Option<SeriesId>,
     pub series_number: Option<NonEmptyStr>,
+    /// User-starred flag. Create starts false; only the favorite toggle
+    /// changes it. Bibliographic updates preserve the existing value.
+    pub favorite: bool,
     /// When the record joined the library: a record-keeping stamp, never
     /// the bibliographic `published`.
     pub date_added: UtcMillis,
@@ -784,6 +796,7 @@ impl Resource {
             parent_id: new.parent_id,
             series_id: new.series_id,
             series_number: new.series_number,
+            favorite: false,
             date_added: now,
             date_edited: now,
         })
@@ -816,6 +829,7 @@ impl Resource {
         parent_id: Option<ResourceId>,
         series_id: Option<SeriesId>,
         series_number: Option<NonEmptyStr>,
+        favorite: bool,
         date_added: UtcMillis,
         date_edited: UtcMillis,
     ) -> Result<Self, ResourceError> {
@@ -833,6 +847,7 @@ impl Resource {
             parent_id,
             series_id,
             series_number,
+            favorite,
             date_added,
             date_edited,
         })
@@ -965,6 +980,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             added,
             edited,
         )
@@ -1272,6 +1288,7 @@ mod tests {
             None,
             None,
             None,
+            false,
             UtcMillis::from_unix_ms(0),
             UtcMillis::from_unix_ms(0),
         )
