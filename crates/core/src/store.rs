@@ -1,9 +1,9 @@
 //! Storage port. Adapters implement this; commands call it through `AppState`.
 
 use crate::{
-    Name, NewResource, NewSeries, NonEmptyStr, Person, PersonError, PersonId, Resource,
-    ResourceError, ResourceId, ResourcePage, ResourceQuery, ResourceSummary, Series, SeriesId,
-    SortedResourcePage, Tag, TagId,
+    Collection, CollectionId, CollectionTreeNode, Name, NewResource, NewSeries, NonEmptyStr, Person,
+    PersonError, PersonId, Resource, ResourceError, ResourceId, ResourcePage, ResourceQuery,
+    ResourceSummary, Series, SeriesId, SortedResourcePage, Tag, TagId,
 };
 
 /// Storage backend. Grows one method per capability a command needs.
@@ -54,6 +54,21 @@ pub trait Store: Send + Sync + 'static {
 
     /// Every tag, ordered by text ascending. Empty vec when none.
     async fn list_tags(&self) -> Result<Vec<Tag>, StoreError>;
+
+    /// Allocate [`CollectionId`], insert collection row. When `parent` is set,
+    /// also create `child -> child_of -> parent`. Missing parent → not-found.
+    async fn create_collection(
+        &self,
+        name: NonEmptyStr,
+        parent: Option<CollectionId>,
+    ) -> Result<Collection, StoreError>;
+
+    /// Fetch collection by id. Missing → [`StoreError::not_found`].
+    async fn get_collection(&self, id: CollectionId) -> Result<Collection, StoreError>;
+
+    /// Sidebar forest: roots have no parents; children follow `child_of`.
+    /// The same collection may appear under multiple parents.
+    async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError>;
 
     /// Allocate id, [`Resource::try_new`], persist resource row **without** creators,
     /// then create one `created` edge per creator (order = [`Creator::order`](crate::Creator::order)).

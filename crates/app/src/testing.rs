@@ -3,10 +3,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use oeuvre_core::{
-    BibliographicDate, Creator, CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr,
-    Person, PersonId, Resource, ResourceCounts, ResourceFilter, ResourceId, ResourceKind,
-    ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
-    SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId, UtcMillis, creator_label_name,
+    BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole, Name,
+    NameKey, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceCounts,
+    ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort,
+    ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store, StoreError,
+    StoreHealth, Tag, TagId, UtcMillis, build_collection_forest, creator_label_name,
     format_creators_label, primary_creator_sort_key, published_label_from,
 };
 
@@ -133,6 +134,9 @@ pub struct MemoryStore {
     people: Mutex<PeopleState>,
     series: Mutex<HashMap<SeriesId, Series>>,
     tags: Mutex<HashMap<TagId, Tag>>,
+    collections: Mutex<HashMap<CollectionId, Collection>>,
+    /// `(child, parent)` edges for `child_of`.
+    collection_child_of: Mutex<Vec<(CollectionId, CollectionId)>>,
     resources: Mutex<HashMap<ResourceId, ResourceRow>>,
     created: Mutex<Vec<CreatedEdge>>,
 }
@@ -143,6 +147,8 @@ impl MemoryStore {
             people: Mutex::new(PeopleState::new()),
             series: Mutex::new(HashMap::new()),
             tags: Mutex::new(HashMap::new()),
+            collections: Mutex::new(HashMap::new()),
+            collection_child_of: Mutex::new(Vec::new()),
             resources: Mutex::new(HashMap::new()),
             created: Mutex::new(Vec::new()),
         }
@@ -525,6 +531,53 @@ impl Store for MemoryStore {
         Ok(tags)
     }
 
+    async fn create_collection(
+        &self,
+        name: NonEmptyStr,
+        parent: Option<CollectionId>,
+    ) -> Result<Collection, StoreError> {
+        if let Some(parent_id) = parent {
+            let _ = self.get_collection(parent_id).await?;
+        }
+        let collection = Collection::try_new(CollectionId::generate(), name);
+        self.collections
+            .lock()
+            .expect("MemoryStore lock")
+            .insert(collection.id, collection.clone());
+        if let Some(parent_id) = parent {
+            self.collection_child_of
+                .lock()
+                .expect("MemoryStore lock")
+                .push((collection.id, parent_id));
+        }
+        Ok(collection)
+    }
+
+    async fn get_collection(&self, id: CollectionId) -> Result<Collection, StoreError> {
+        self.collections
+            .lock()
+            .expect("MemoryStore lock")
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| StoreError::not_found(format!("collection {id}")))
+    }
+
+    async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {
+        let collections: Vec<Collection> = self
+            .collections
+            .lock()
+            .expect("MemoryStore lock")
+            .values()
+            .cloned()
+            .collect();
+        let edges = self
+            .collection_child_of
+            .lock()
+            .expect("MemoryStore lock")
+            .clone();
+        Ok(build_collection_forest(collections, edges))
+    }
+
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError> {
         let resource = Resource::try_new(ResourceId::generate(), new)?;
         let row = ResourceRow {
@@ -849,6 +902,22 @@ impl Store for StubStore {
 
     async fn list_tags(&self) -> Result<Vec<Tag>, StoreError> {
         Err(unsupported("list_tags"))
+    }
+
+    async fn create_collection(
+        &self,
+        _name: NonEmptyStr,
+        _parent: Option<CollectionId>,
+    ) -> Result<Collection, StoreError> {
+        Err(unsupported("create_collection"))
+    }
+
+    async fn get_collection(&self, _id: CollectionId) -> Result<Collection, StoreError> {
+        Err(unsupported("get_collection"))
+    }
+
+    async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {
+        Err(unsupported("list_collection_forest"))
     }
 
     async fn create_resource(&self, _new: NewResource) -> Result<Resource, StoreError> {

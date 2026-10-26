@@ -3,11 +3,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use oeuvre_core::{
-    BibliographicDate, Creator, CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person,
-    PersonId, Resource, ResourceCounts, ResourceFilter, ResourceId, ResourceKind, ResourcePage,
-    ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
-    SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId, UtcMillis, creator_label_name,
-    format_creators_label, published_label_from,
+    BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole, Name,
+    NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceCounts, ResourceFilter,
+    ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series,
+    SeriesId, SortDirection, SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId,
+    UtcMillis, build_collection_forest, creator_label_name, format_creators_label,
+    published_label_from,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -19,6 +20,8 @@ const DB: &str = "oeuvre";
 const PERSON_TABLE: &str = "person";
 const SERIES_TABLE: &str = "series";
 const TAG_TABLE: &str = "tag";
+const COLLECTION_TABLE: &str = "collection";
+const CHILD_OF_TABLE: &str = "child_of";
 const RESOURCE_TABLE: &str = "resource";
 pub struct SurrealStore {
     db: Surreal<Db>,
@@ -60,9 +63,28 @@ struct TagDoc {
     text: NonEmptyStr,
 }
 
+#[derive(Debug, Clone, SurrealValue)]
+struct CollectionDoc {
+    #[surreal(wrap)]
+    name: NonEmptyStr,
+}
+
 #[derive(Debug, SurrealValue)]
 struct TagIdRow {
     id: RecordId,
+}
+
+#[derive(Debug, SurrealValue)]
+struct CollectionIdRow {
+    id: RecordId,
+}
+
+#[derive(Debug, SurrealValue)]
+struct ChildOfEdgeRow {
+    #[surreal(rename = "in")]
+    child: RecordId,
+    #[surreal(rename = "out")]
+    parent: RecordId,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -282,6 +304,25 @@ impl SurrealStore {
             )
             .await;
 
+        let _ = self
+            .db
+            .query("DEFINE TABLE IF NOT EXISTS collection SCHEMALESS")
+            .await;
+        let _ = self
+            .db
+            .query(
+                "DEFINE TABLE IF NOT EXISTS child_of TYPE RELATION IN collection OUT collection ENFORCED",
+            )
+            .await;
+        let _ = self
+            .db
+            .query("DEFINE INDEX IF NOT EXISTS child_of_in ON TABLE child_of FIELDS in")
+            .await;
+        let _ = self
+            .db
+            .query("DEFINE INDEX IF NOT EXISTS child_of_out ON TABLE child_of FIELDS out")
+            .await;
+
         let _ = self.backfill_record_dates().await;
         self.db
             .query(include_str!("primary_creator_sort.surql"))
@@ -336,6 +377,10 @@ impl SurrealStore {
         RecordId::new(TAG_TABLE, id.to_string())
     }
 
+    fn collection_key(id: CollectionId) -> RecordId {
+        RecordId::new(COLLECTION_TABLE, id.to_string())
+    }
+
     fn resource_key(id: ResourceId) -> RecordId {
         RecordId::new(RESOURCE_TABLE, id.to_string())
     }
@@ -370,6 +415,11 @@ impl SurrealStore {
     fn thing_to_tag_id(thing: &RecordId) -> Result<TagId, StoreError> {
         TagId::parse(&record_key(thing))
             .map_err(|e| StoreError::new(format!("invalid tag id in store: {e}")))
+    }
+
+    fn thing_to_collection_id(thing: &RecordId) -> Result<CollectionId, StoreError> {
+        CollectionId::parse(&record_key(thing))
+            .map_err(|e| StoreError::new(format!("invalid collection id in store: {e}")))
     }
 
     fn resource_doc_from(resource: &Resource) -> ResourceDoc {
@@ -800,6 +850,78 @@ impl Store for SurrealStore {
             tags.push(self.get_tag(id).await?);
         }
         Ok(tags)
+    }
+
+    async fn create_collection(
+        &self,
+        name: NonEmptyStr,
+        parent: Option<CollectionId>,
+    ) -> Result<Collection, StoreError> {
+        if let Some(parent_id) = parent {
+            let _ = self.get_collection(parent_id).await?;
+        }
+        let id = CollectionId::generate();
+        let collection = Collection::try_new(id, name);
+        let created: Option<CollectionDoc> = self
+            .db
+            .create(Self::collection_key(id))
+            .content(CollectionDoc {
+                name: collection.name.clone(),
+            })
+            .await
+            .map_err(map_err)?;
+        if created.is_none() {
+            return Err(StoreError::new(format!(
+                "create_collection returned empty for {id}"
+            )));
+        }
+        if let Some(parent_id) = parent {
+            self.db
+                .query("RELATE $from -> child_of -> $to")
+                .bind(("from", Self::collection_key(id)))
+                .bind(("to", Self::collection_key(parent_id)))
+                .await
+                .map_err(map_err)?;
+        }
+        Ok(collection)
+    }
+
+    async fn get_collection(&self, id: CollectionId) -> Result<Collection, StoreError> {
+        let row: Option<CollectionDoc> = self
+            .db
+            .select(Self::collection_key(id))
+            .await
+            .map_err(map_err)?;
+        match row {
+            Some(doc) => Ok(Collection {
+                id,
+                name: doc.name,
+            }),
+            None => Err(StoreError::not_found(format!("collection {id}"))),
+        }
+    }
+
+    async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {
+        let mut response = self
+            .db
+            .query("SELECT id FROM collection;")
+            .query("SELECT in, out FROM child_of;")
+            .await
+            .map_err(map_err)?;
+        let id_rows: Vec<CollectionIdRow> = response.take(0).map_err(map_err)?;
+        let edge_rows: Vec<ChildOfEdgeRow> = response.take(1).map_err(map_err)?;
+        let mut collections = Vec::with_capacity(id_rows.len());
+        for row in id_rows {
+            let id = Self::thing_to_collection_id(&row.id)?;
+            collections.push(self.get_collection(id).await?);
+        }
+        let mut edges = Vec::with_capacity(edge_rows.len());
+        for row in edge_rows {
+            let child = Self::thing_to_collection_id(&row.child)?;
+            let parent = Self::thing_to_collection_id(&row.parent)?;
+            edges.push((child, parent));
+        }
+        Ok(build_collection_forest(collections, edges))
     }
 
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError> {
