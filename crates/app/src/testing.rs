@@ -664,6 +664,24 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    async fn remove_collection_parent(
+        &self,
+        child: CollectionId,
+        parent: CollectionId,
+    ) -> Result<(), StoreError> {
+        let _ = self.get_collection(child).await?;
+        let _ = self.get_collection(parent).await?;
+        let mut edges = self.collection_child_of.lock().expect("MemoryStore lock");
+        let before = edges.len();
+        edges.retain(|(c, p)| !(*c == child && *p == parent));
+        if edges.len() == before {
+            return Err(StoreError::not_found(format!(
+                "collection parent edge {child} -> {parent}"
+            )));
+        }
+        Ok(())
+    }
+
     async fn delete_collection(&self, id: CollectionId) -> Result<(), StoreError> {
         let _ = self.get_collection(id).await?;
         self.delete_collection_recursive(id);
@@ -1043,6 +1061,14 @@ impl Store for StubStore {
         _parent: CollectionId,
     ) -> Result<(), StoreError> {
         Err(unsupported("add_collection_parent"))
+    }
+
+    async fn remove_collection_parent(
+        &self,
+        _child: CollectionId,
+        _parent: CollectionId,
+    ) -> Result<(), StoreError> {
+        Err(unsupported("remove_collection_parent"))
     }
 
     async fn delete_collection(&self, _id: CollectionId) -> Result<(), StoreError> {

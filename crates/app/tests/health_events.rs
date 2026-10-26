@@ -149,6 +149,14 @@ impl Store for HangStore {
         std::future::pending().await
     }
 
+    async fn remove_collection_parent(
+        &self,
+        _child: CollectionId,
+        _parent: CollectionId,
+    ) -> Result<(), StoreError> {
+        std::future::pending().await
+    }
+
     async fn delete_collection(&self, _id: CollectionId) -> Result<(), StoreError> {
         std::future::pending().await
     }

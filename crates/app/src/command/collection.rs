@@ -19,6 +19,12 @@ pub struct AddCollectionParent {
 }
 
 #[derive(Debug, Clone)]
+pub struct RemoveCollectionParent {
+    pub child_id: CollectionId,
+    pub parent_id: CollectionId,
+}
+
+#[derive(Debug, Clone)]
 pub struct RenameCollection {
     pub id: CollectionId,
     pub name: NonEmptyStr,
@@ -38,6 +44,7 @@ pub(crate) struct Created(pub Collection);
 pub(crate) struct Renamed(pub Collection);
 pub(crate) struct Forest(pub Vec<CollectionTreeNode>);
 pub(crate) struct ParentAdded;
+pub(crate) struct ParentRemoved;
 pub(crate) struct Deleted(pub DeletedCollection);
 
 impl From<Created> for Outcome {
@@ -61,6 +68,12 @@ impl From<Forest> for Outcome {
 impl From<ParentAdded> for Outcome {
     fn from(_: ParentAdded) -> Self {
         Outcome::AddCollectionParent(())
+    }
+}
+
+impl From<ParentRemoved> for Outcome {
+    fn from(_: ParentRemoved) -> Self {
+        Outcome::RemoveCollectionParent(())
     }
 }
 
@@ -155,6 +168,26 @@ impl Handler for AddCollectionParent {
             .await
             .map_err(map_create)?;
         Ok(ParentAdded)
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for RemoveCollectionParent {
+    const NAME: &'static str = "remove_collection_parent";
+    type Output = ParentRemoved;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::COLLECTION_ID, self.child_id.to_string());
+        ev.set(event::COLLECTION_PARENT_ID, self.parent_id.to_string());
+    }
+
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<ParentRemoved, CommandError> {
+        state
+            .store()
+            .remove_collection_parent(self.child_id, self.parent_id)
+            .await
+            .map_err(map_create)?;
+        Ok(ParentRemoved)
     }
 }
 

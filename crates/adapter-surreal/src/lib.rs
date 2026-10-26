@@ -1062,6 +1062,29 @@ impl Store for SurrealStore {
         Ok(())
     }
 
+    async fn remove_collection_parent(
+        &self,
+        child: CollectionId,
+        parent: CollectionId,
+    ) -> Result<(), StoreError> {
+        let _ = self.get_collection(child).await?;
+        let _ = self.get_collection(parent).await?;
+        let mut response = self
+            .db
+            .query("DELETE child_of WHERE in = $child AND out = $parent RETURN BEFORE")
+            .bind(("child", Self::collection_key(child)))
+            .bind(("parent", Self::collection_key(parent)))
+            .await
+            .map_err(map_err)?;
+        let deleted: Vec<ChildOfEdgeRow> = response.take(0).map_err(map_err)?;
+        if deleted.is_empty() {
+            return Err(StoreError::not_found(format!(
+                "collection parent edge {child} -> {parent}"
+            )));
+        }
+        Ok(())
+    }
+
     async fn delete_collection(&self, id: CollectionId) -> Result<(), StoreError> {
         let _ = self.get_collection(id).await?;
         self.delete_collection_recursive(id).await

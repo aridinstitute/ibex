@@ -85,6 +85,14 @@ pub trait Store: Send + Sync + 'static {
         parent: CollectionId,
     ) -> Result<(), StoreError>;
 
+    /// Remove one `child -> child_of -> parent` edge. Missing edge or ids →
+    /// not-found. Does not delete either collection row.
+    async fn remove_collection_parent(
+        &self,
+        child: CollectionId,
+        parent: CollectionId,
+    ) -> Result<(), StoreError>;
+
     /// Delete `id` with smart cascade: exclusive children are deleted
     /// recursively; shared children only lose the edge to `id`. Never
     /// deletes resources (membership refs unset via schema).

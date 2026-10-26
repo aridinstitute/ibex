@@ -7,7 +7,7 @@ mod tag;
 
 pub use collection::{
     AddCollectionParent, CreateCollection, DeleteCollection, DeletedCollection,
-    ListCollectionForest, RenameCollection,
+    ListCollectionForest, RemoveCollectionParent, RenameCollection,
 };
 pub use health::{Health, HealthReport};
 pub use person::{
@@ -49,6 +49,7 @@ pub enum Command {
     RenameCollection(RenameCollection),
     ListCollectionForest(ListCollectionForest),
     AddCollectionParent(AddCollectionParent),
+    RemoveCollectionParent(RemoveCollectionParent),
     DeleteCollection(DeleteCollection),
     CreateResource(CreateResource),
     UpdateResource(UpdateResource),
@@ -81,6 +82,7 @@ pub enum Outcome {
     RenameCollection(Collection),
     ListCollectionForest(Vec<CollectionTreeNode>),
     AddCollectionParent(()),
+    RemoveCollectionParent(()),
     DeleteCollection(DeletedCollection),
     CreateResource(Resource),
     UpdateResource(Resource),
@@ -140,6 +142,7 @@ impl Command {
             Command::RenameCollection(_) => RenameCollection::NAME,
             Command::ListCollectionForest(_) => ListCollectionForest::NAME,
             Command::AddCollectionParent(_) => AddCollectionParent::NAME,
+            Command::RemoveCollectionParent(_) => RemoveCollectionParent::NAME,
             Command::DeleteCollection(_) => DeleteCollection::NAME,
             Command::CreateResource(_) => CreateResource::NAME,
             Command::UpdateResource(_) => UpdateResource::NAME,
@@ -189,6 +192,7 @@ pub(crate) async fn dispatch(
         Command::RenameCollection(c) => drive(c, state, ev).await,
         Command::ListCollectionForest(c) => drive(c, state, ev).await,
         Command::AddCollectionParent(c) => drive(c, state, ev).await,
+        Command::RemoveCollectionParent(c) => drive(c, state, ev).await,
         Command::DeleteCollection(c) => drive(c, state, ev).await,
         Command::CreateResource(c) => drive(c, state, ev).await,
         Command::UpdateResource(c) => drive(c, state, ev).await,

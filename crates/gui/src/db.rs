@@ -2,9 +2,10 @@
 //! page requests over channels, so gpui's executor never runs Surreal I/O.
 
 use oeuvre_app::command::{
-    CountResources, CreateCollection, CreateResource, CreateTag, DeleteCollection, FindTagByText,
-    GetResource, GetResourceDetail, ListCollectionForest, ListPersons, ListResourcesPage,
-    ListResourcesQueryPage, ListTags, RenameCollection, SetResourceFavorite, UpdateResource,
+    AddCollectionParent, CountResources, CreateCollection, CreateResource, CreateTag,
+    DeleteCollection, FindTagByText, GetResource, GetResourceDetail, ListCollectionForest,
+    ListPersons, ListResourcesPage, ListResourcesQueryPage, ListTags, RemoveCollectionParent,
+    RenameCollection, SetResourceFavorite, UpdateResource,
 };
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
@@ -81,6 +82,16 @@ pub enum DbRequest {
         id: CollectionId,
         name: NonEmptyStr,
         reply: oneshot::Sender<Result<Collection, String>>,
+    },
+    AddCollectionParent {
+        child_id: CollectionId,
+        parent_id: CollectionId,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RemoveCollectionParent {
+        child_id: CollectionId,
+        parent_id: CollectionId,
+        reply: oneshot::Sender<Result<(), String>>,
     },
 }
 
@@ -336,6 +347,49 @@ impl DbWorker {
                                     });
                                 let _ = reply.send(result);
                             }
+                            DbRequest::AddCollectionParent {
+                                child_id,
+                                parent_id,
+                                reply,
+                            } => {
+                                let result = state
+                                    .execute(Command::AddCollectionParent(AddCollectionParent {
+                                        child_id,
+                                        parent_id,
+                                    }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::AddCollectionParent(()) => Ok(()),
+                                        _ => Err(
+                                            "unexpected outcome from add_collection_parent".into(),
+                                        ),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::RemoveCollectionParent {
+                                child_id,
+                                parent_id,
+                                reply,
+                            } => {
+                                let result = state
+                                    .execute(Command::RemoveCollectionParent(
+                                        RemoveCollectionParent {
+                                            child_id,
+                                            parent_id,
+                                        },
+                                    ))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::RemoveCollectionParent(()) => Ok(()),
+                                        _ => Err(
+                                            "unexpected outcome from remove_collection_parent"
+                                                .into(),
+                                        ),
+                                    });
+                                let _ = reply.send(result);
+                            }
                         }
                     }
                 });
@@ -474,6 +528,40 @@ impl DbWorker {
             .send(DbRequest::RenameCollection {
                 id,
                 name,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    pub async fn add_collection_parent(
+        &self,
+        child_id: CollectionId,
+        parent_id: CollectionId,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::AddCollectionParent {
+                child_id,
+                parent_id,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    pub async fn remove_collection_parent(
+        &self,
+        child_id: CollectionId,
+        parent_id: CollectionId,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::RemoveCollectionParent {
+                child_id,
+                parent_id,
                 reply: tx,
             })
             .map_err(|_| "db worker stopped".to_string())?;

@@ -12,6 +12,7 @@ use gpui_kit::base::{Transition as MotionTransition, transition};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{Enter, Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
@@ -51,26 +52,34 @@ use crate::tags::{TagChoice, TagDelegate};
 pub const PAGE_SIZE: u32 = 50;
 
 /// Visible sidebar rows from a collection forest, respecting expand state.
+/// The `Option<CollectionId>` is the tree parent that placed this row (`None` for roots).
 fn visible_collection_rows(
     forest: &[CollectionTreeNode],
     expanded: &HashSet<CollectionId>,
-) -> Vec<(Collection, usize, bool)> {
+) -> Vec<(Collection, usize, bool, Option<CollectionId>)> {
     let mut out = Vec::new();
     fn walk(
         nodes: &[CollectionTreeNode],
         expanded: &HashSet<CollectionId>,
         depth: usize,
-        out: &mut Vec<(Collection, usize, bool)>,
+        parent: Option<CollectionId>,
+        out: &mut Vec<(Collection, usize, bool, Option<CollectionId>)>,
     ) {
         for node in nodes {
             let has_children = !node.children.is_empty();
-            out.push((node.collection.clone(), depth, has_children));
+            out.push((node.collection.clone(), depth, has_children, parent));
             if has_children && expanded.contains(&node.collection.id) {
-                walk(&node.children, expanded, depth + 1, out);
+                walk(
+                    &node.children,
+                    expanded,
+                    depth + 1,
+                    Some(node.collection.id),
+                    out,
+                );
             }
         }
     }
-    walk(forest, expanded, 0, &mut out);
+    walk(forest, expanded, 0, None, &mut out);
     out
 }
 
@@ -81,6 +90,38 @@ fn expand_all_parents(forest: &[CollectionTreeNode], expanded: &mut HashSet<Coll
             expand_all_parents(&node.children, expanded);
         }
     }
+}
+
+fn collection_subtree_ids(node: &CollectionTreeNode) -> HashSet<CollectionId> {
+    let mut ids = HashSet::new();
+    ids.insert(node.collection.id);
+    for child in &node.children {
+        ids.extend(collection_subtree_ids(child));
+    }
+    ids
+}
+
+/// Nest targets: every collection except `child` and its descendants.
+fn nest_parent_candidates(
+    forest: &[CollectionTreeNode],
+    child: CollectionId,
+) -> Vec<Collection> {
+    let mut blocked = HashSet::new();
+    blocked.insert(child);
+    fn walk_blocked(nodes: &[CollectionTreeNode], child: CollectionId, blocked: &mut HashSet<CollectionId>) {
+        for node in nodes {
+            if node.collection.id == child {
+                blocked.extend(collection_subtree_ids(node));
+            } else {
+                walk_blocked(&node.children, child, blocked);
+            }
+        }
+    }
+    walk_blocked(forest, child, &mut blocked);
+    flatten_collections(forest)
+        .into_iter()
+        .filter(|c| !blocked.contains(&c.id))
+        .collect()
 }
 
 /// First page of parent candidates the edit form fetches, already narrowed
@@ -1330,7 +1371,11 @@ pub struct LibraryApp {
     collection_forest: Vec<CollectionTreeNode>,
     /// Collection ids whose children are shown in the sidebar tree.
     expanded_collections: HashSet<CollectionId>,
-    /// Rename field for the selected sidebar collection; Enter commits.
+    /// Tree parent of the selected collection row (`None` when the selection is a root).
+    collection_focus_parent: Option<CollectionId>,
+    /// Collection currently showing an inline rename field.
+    renaming_collection: Option<CollectionId>,
+    /// Inline rename field; Enter commits.
     collection_name_input: Entity<InputState>,
     /// Detail-pane autocomplete for attaching a library tag or creating one.
     tag_picker: Entity<ComboboxState<TagDelegate>>,
@@ -1947,6 +1992,8 @@ impl LibraryApp {
             tags: Vec::new(),
             collection_forest: Vec::new(),
             expanded_collections: HashSet::new(),
+            collection_focus_parent: None,
+            renaming_collection: None,
             collection_name_input,
             tag_picker,
             collection_picker,
@@ -2011,7 +2058,6 @@ impl LibraryApp {
         self.collection_forest = forest;
         self.expanded_collections = expanded;
         self.sync_collection_picker(window, cx);
-        self.sync_collection_name_input(window, cx);
     }
 
     fn sync_collection_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2066,20 +2112,28 @@ impl LibraryApp {
         cx.notify();
     }
 
-    fn create_sidebar_collection(
-        &mut self,
-        parent_id: Option<CollectionId>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// New collection at the same tree level as the current selection (sibling),
+    /// or a root when no collection is selected.
+    fn create_sidebar_collection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Sibling of the selected row: same tree parent (None → new root).
+        let parent_id = match self.table.read(cx).delegate().filter.collection {
+            Some(_) => self.collection_focus_parent,
+            None => None,
+        };
+        if let Some(parent) = parent_id {
+            self.expanded_collections.insert(parent);
+        }
+        let focus_parent = parent_id;
         let worker = self.table.read(cx).delegate().worker().clone();
         let name = NonEmptyStr::try_new("New collection").expect("literal");
         cx.spawn_in(window, async move |app, window| {
             let result = worker.create_collection(name, parent_id).await;
             _ = app.update_in(window, |app, window, cx| {
                 if let Ok(collection) = result {
+                    app.collection_focus_parent = focus_parent;
                     app.refresh_counts(window, cx);
                     app.select_sidebar_nav(SidebarNav::Collection(collection.id), window, cx);
+                    app.begin_collection_rename(collection.id, window, cx);
                 }
                 cx.notify();
             });
@@ -2087,38 +2141,46 @@ impl LibraryApp {
         .detach();
     }
 
-    fn sync_collection_name_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selected = self.table.read(cx).delegate().filter.collection;
-        let name = selected
-            .and_then(|id| {
-                flatten_collections(&self.collection_forest)
-                    .into_iter()
-                    .find(|c| c.id == id)
-                    .map(|c| c.name.as_str().to_owned())
-            })
+    fn begin_collection_rename(
+        &mut self,
+        id: CollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = flatten_collections(&self.collection_forest)
+            .into_iter()
+            .find(|c| c.id == id)
+            .map(|c| c.name.as_str().to_owned())
             .unwrap_or_default();
+        self.renaming_collection = Some(id);
         self.collection_name_input.update(cx, |state, cx| {
             state.set_value(name, window, cx);
+            state.focus(window, cx);
         });
+        cx.notify();
+    }
+
+    fn cancel_collection_rename(&mut self, cx: &mut Context<Self>) {
+        self.renaming_collection = None;
+        cx.notify();
     }
 
     fn commit_collection_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.table.read(cx).delegate().filter.collection else {
+        let Some(id) = self.renaming_collection else {
             return;
         };
         let raw = self.collection_name_input.read(cx).value().to_string();
         let Ok(name) = NonEmptyStr::try_new(raw.trim()) else {
-            self.sync_collection_name_input(window, cx);
+            self.cancel_collection_rename(cx);
             return;
         };
         let worker = self.table.read(cx).delegate().worker().clone();
+        self.renaming_collection = None;
         cx.spawn_in(window, async move |app, window| {
             let result = worker.rename_collection(id, name).await;
             _ = app.update_in(window, |app, window, cx| {
                 if result.is_ok() {
                     app.refresh_counts(window, cx);
-                } else {
-                    app.sync_collection_name_input(window, cx);
                 }
                 cx.notify();
             });
@@ -2126,15 +2188,64 @@ impl LibraryApp {
         .detach();
     }
 
-    fn delete_sidebar_collection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.table.read(cx).delegate().filter.collection else {
-            return;
-        };
+    fn nest_collection_under(
+        &mut self,
+        child_id: CollectionId,
+        parent_id: CollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let result = worker.add_collection_parent(child_id, parent_id).await;
+            _ = app.update_in(window, |app, window, cx| {
+                if result.is_ok() {
+                    app.expanded_collections.insert(parent_id);
+                    app.collection_focus_parent = Some(parent_id);
+                    app.refresh_counts(window, cx);
+                    app.select_sidebar_nav(SidebarNav::Collection(child_id), window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn unnest_collection(
+        &mut self,
+        child_id: CollectionId,
+        parent_id: CollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let result = worker.remove_collection_parent(child_id, parent_id).await;
+            _ = app.update_in(window, |app, window, cx| {
+                if result.is_ok() {
+                    app.collection_focus_parent = None;
+                    app.refresh_counts(window, cx);
+                    app.select_sidebar_nav(SidebarNav::Collection(child_id), window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn delete_sidebar_collection(
+        &mut self,
+        id: CollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let worker = self.table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
             let result = worker.delete_collection(id).await;
             _ = app.update_in(window, |app, window, cx| {
                 if result.is_ok() {
+                    app.collection_focus_parent = None;
+                    app.renaming_collection = None;
                     app.select_sidebar_nav(SidebarNav::All, window, cx);
                     app.refresh_counts(window, cx);
                 }
@@ -2149,6 +2260,20 @@ impl LibraryApp {
             self.expanded_collections.insert(id);
         }
         cx.notify();
+    }
+
+    fn select_collection_row(
+        &mut self,
+        id: CollectionId,
+        parent: Option<CollectionId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.renaming_collection.is_some_and(|renaming| renaming != id) {
+            self.renaming_collection = None;
+        }
+        self.collection_focus_parent = parent;
+        self.select_sidebar_nav(SidebarNav::Collection(id), window, cx);
     }
 
     /// Rebuild the edit-form tag Combobox from the library list minus tags
@@ -2315,7 +2440,10 @@ impl LibraryApp {
             delegate.filter.collection = collection;
             delegate.reload_from_top(selected_id, None, window, cx);
         });
-        self.sync_collection_name_input(window, cx);
+        if !matches!(nav, SidebarNav::Collection(_)) {
+            self.collection_focus_parent = None;
+            self.renaming_collection = None;
+        }
         cx.notify();
     }
 
@@ -3436,48 +3564,26 @@ impl LibraryApp {
                             .ghost()
                             .xsmall()
                             .icon(Icon::new(IconName::Plus).xsmall())
-                            .tooltip("New root collection")
+                            .tooltip(if selected_collection.is_some() {
+                                "New collection at this level"
+                            } else {
+                                "New collection"
+                            })
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.create_sidebar_collection(None, window, cx)
+                                this.create_sidebar_collection(window, cx)
                             })),
-                    )
-                    .when_some(selected_collection, |row, parent_id| {
-                        row.child(
-                            Button::new("new-nested-collection")
-                                .ghost()
-                                .xsmall()
-                                .label("↳+")
-                                .tooltip("New nested collection")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.create_sidebar_collection(Some(parent_id), window, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("delete-collection")
-                                .ghost()
-                                .xsmall()
-                                .icon(Icon::new(IconName::Close).xsmall())
-                                .tooltip("Delete collection")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.delete_sidebar_collection(window, cx)
-                                })),
-                        )
-                    }),
+                    ),
             )
-            .when(selected_collection.is_some(), |panel| {
-                panel.child(
-                    div()
-                        .px_2()
-                        .pb_1()
-                        .child(Input::new(&self.collection_name_input).small().w_full()),
-                )
-            })
             .children(collection_rows.into_iter().enumerate().map(
-                |(index, (collection, depth, has_children))| {
+                |(index, (collection, depth, has_children, tree_parent))| {
                     let id = collection.id;
+                    let name = collection.name.as_str().to_owned();
                     let expanded = self.expanded_collections.contains(&id);
                     let selected = selected_collection == Some(id);
+                    let renaming = self.renaming_collection == Some(id);
                     let hover = cx.theme().accent;
+                    let nest_targets = nest_parent_candidates(&self.collection_forest, id);
+                    let app = cx.weak_entity();
                     h_flex()
                         .id(("collection-row", index))
                         .w_full()
@@ -3492,8 +3598,73 @@ impl LibraryApp {
                         })
                         .hover(move |row| row.bg(hover))
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.select_sidebar_nav(SidebarNav::Collection(id), window, cx);
+                            this.select_collection_row(id, tree_parent, window, cx);
                         }))
+                        .context_menu({
+                            let nest_targets = nest_targets.clone();
+                            move |menu, window, menu_cx| {
+                                let app_rename = app.clone();
+                                let app_unnest = app.clone();
+                                let app_delete = app.clone();
+                                let mut menu = menu.item(
+                                    PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+                                        let _ = app_rename.update(cx, |this, cx| {
+                                            this.select_collection_row(id, tree_parent, window, cx);
+                                            this.begin_collection_rename(id, window, cx);
+                                        });
+                                    }),
+                                );
+                                if !nest_targets.is_empty() {
+                                    let app_nest = app.clone();
+                                    menu = menu.submenu("Nest under", window, menu_cx, {
+                                        let nest_targets = nest_targets.clone();
+                                        move |menu, _, _| {
+                                            let mut menu = menu;
+                                            for target in &nest_targets {
+                                                let parent_id = target.id;
+                                                let label = target.name.as_str().to_owned();
+                                                let app_nest = app_nest.clone();
+                                                menu = menu.item(
+                                                    PopupMenuItem::new(label).on_click(
+                                                        move |_, window, cx| {
+                                                            let _ = app_nest.update(
+                                                                cx,
+                                                                |this, cx| {
+                                                                    this.nest_collection_under(
+                                                                        id, parent_id, window, cx,
+                                                                    );
+                                                                },
+                                                            );
+                                                        },
+                                                    ),
+                                                );
+                                            }
+                                            menu
+                                        }
+                                    });
+                                }
+                                if let Some(parent_id) = tree_parent {
+                                    menu = menu.item(
+                                        PopupMenuItem::new("Unnest").on_click(
+                                            move |_, window, cx| {
+                                                let _ = app_unnest.update(cx, |this, cx| {
+                                                    this.unnest_collection(
+                                                        id, parent_id, window, cx,
+                                                    );
+                                                });
+                                            },
+                                        ),
+                                    );
+                                }
+                                menu.item(PopupMenuItem::separator()).item(
+                                    PopupMenuItem::new("Delete").on_click(move |_, window, cx| {
+                                        let _ = app_delete.update(cx, |this, cx| {
+                                            this.delete_sidebar_collection(id, window, cx);
+                                        });
+                                    }),
+                                )
+                            }
+                        })
                         .child(
                             div()
                                 .w(px(14.))
@@ -3515,13 +3686,20 @@ impl LibraryApp {
                                     )
                                 }),
                         )
-                        .child(
+                        .child(if renaming {
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Input::new(&self.collection_name_input).small().w_full())
+                                .into_any_element()
+                        } else {
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .child(collection.name.as_str().to_owned()),
-                        )
+                                .child(name)
+                                .into_any_element()
+                        })
                 },
             ))
             .when_some(self.counts_error.as_ref(), |panel, error| {
