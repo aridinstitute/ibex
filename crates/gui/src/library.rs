@@ -25,7 +25,7 @@ use gpui_kit::{Focusable as _, *};
 use oeuvre_core::{
     NonEmptyStr, ParentRule, Person, PersonId, PublishedRange, Resource, ResourceCounts,
     ResourceDetail, ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery,
-    ResourceSort, ResourceSummary, SortDirection, UtcMillis, format_recorded_date,
+    ResourceSort, ResourceSummary, SortDirection, Tag, TagId, UtcMillis, format_recorded_date,
 };
 
 use crate::db::DbWorker;
@@ -1265,12 +1265,13 @@ fn prefetch_window(row_ix: usize, rows_count: usize) -> Range<usize> {
     start..end
 }
 
-/// Left-nav selection: All items, Favorites, or one kind.
+/// Left-nav selection: All items, Favorites, one kind, or one tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SidebarNav {
     All,
     Favorites,
     Kind(ResourceKind),
+    Tag(TagId),
 }
 
 pub struct LibraryApp {
@@ -1286,6 +1287,10 @@ pub struct LibraryApp {
     counts: Option<ResourceCounts>,
     counts_error: Option<String>,
     counts_gen: u64,
+    /// Library tags for the left-nav section, ordered by text.
+    tags: Vec<Tag>,
+    /// Input for adding a tag on the detail pane.
+    tag_input: Entity<InputState>,
     /// Row selection, tracked here so the panel shows one resource exactly
     /// as long as its row stays selected.
     selected: Option<ResourceId>,
@@ -1777,6 +1782,17 @@ impl LibraryApp {
         })
         .detach();
 
+        let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("Add tag"));
+        let worker_tags = table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let tags = worker_tags.list_tags().await.unwrap_or_default();
+            _ = app.update_in(window, |app, _window, cx| {
+                app.tags = tags;
+                cx.notify();
+            });
+        })
+        .detach();
+
         Self {
             table,
             settings_dir,
@@ -1787,6 +1803,8 @@ impl LibraryApp {
             counts: None,
             counts_error: None,
             counts_gen: 0,
+            tags: Vec::new(),
+            tag_input,
             selected: None,
             detail: None,
             detail_cache: DetailCache::new(),
@@ -1825,7 +1843,9 @@ impl LibraryApp {
         let worker = self.table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
             let result = worker.resource_counts().await;
+            let tags = worker.list_tags().await.unwrap_or_default();
             _ = app.update_in(window, |app, _window, cx| {
+                app.tags = tags;
                 app.set_counts(result, generation, cx)
             });
         })
@@ -1846,11 +1866,15 @@ impl LibraryApp {
         };
         let kind = match nav {
             SidebarNav::Kind(kind) => Some(kind),
-            SidebarNav::All | SidebarNav::Favorites => None,
+            SidebarNav::All | SidebarNav::Favorites | SidebarNav::Tag(_) => None,
         };
         let favorite = match nav {
             SidebarNav::Favorites => Some(true),
-            SidebarNav::All | SidebarNav::Kind(_) => None,
+            SidebarNav::All | SidebarNav::Kind(_) | SidebarNav::Tag(_) => None,
+        };
+        let tag = match nav {
+            SidebarNav::Tag(id) => Some(id),
+            SidebarNav::All | SidebarNav::Favorites | SidebarNav::Kind(_) => None,
         };
         if let Some(input) = input {
             input.update(cx, |state, cx| {
@@ -1859,15 +1883,17 @@ impl LibraryApp {
         }
         self.table.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
-            // Apply both predicates in one reload so All/Favorites never
-            // briefly flash the previous listing.
+            // Apply predicates in one reload so nav never briefly flashes
+            // the previous listing.
             let kind_changed = delegate.filter.kind != kind;
             let favorite_changed = delegate.filter.favorite != favorite;
-            if !kind_changed && !favorite_changed {
+            let tag_changed = delegate.filter.tag != tag;
+            if !kind_changed && !favorite_changed && !tag_changed {
                 return;
             }
             delegate.filter.kind = kind;
             delegate.filter.favorite = favorite;
+            delegate.filter.tag = tag;
             delegate.reload_from_top(selected_id, None, window, cx);
         });
         cx.notify();
@@ -1939,6 +1965,100 @@ impl LibraryApp {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Attach a tag by text to the selected resource: reuse existing tag or create.
+    fn add_tag_to_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected else {
+            return;
+        };
+        let raw = self.tag_input.read(cx).value().to_string();
+        let Ok(text) = NonEmptyStr::try_new(raw.trim()) else {
+            return;
+        };
+        self.tag_input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let ensure = match worker.find_tag_by_text(text.clone()).await {
+                Ok(Some(tag)) => Ok(tag),
+                Ok(None) => worker.create_tag(text).await,
+                Err(err) => Err(err),
+            };
+            let result = async {
+                let tag = ensure?;
+                let resource = worker.resource(id).await?;
+                let mut new = resource.to_new();
+                if !new.tag_ids.contains(&tag.id) {
+                    new.tag_ids.push(tag.id);
+                    worker.update_resource(id, new).await?;
+                }
+                Ok::<_, String>(())
+            }
+            .await;
+            _ = app.update_in(window, |app, window, cx| {
+                if let Err(err) = result {
+                    if app.selected == Some(id) {
+                        app.detail = Some((id, DetailFetch::Failed(err)));
+                    }
+                } else {
+                    app.detail_cache.invalidate(&id);
+                    app.detail_inflight.remove(&id);
+                    app.fetch_detail(id, window, cx);
+                    app.refresh_counts(window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Remove one tag from the selected resource.
+    fn remove_tag_from_selected(
+        &mut self,
+        tag_id: TagId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.selected else {
+            return;
+        };
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let result = async {
+                let resource = worker.resource(id).await?;
+                let mut new = resource.to_new();
+                new.tag_ids.retain(|t| *t != tag_id);
+                worker.update_resource(id, new).await?;
+                Ok::<_, String>(())
+            }
+            .await;
+            _ = app.update_in(window, |app, window, cx| {
+                if let Err(err) = result {
+                    if app.selected == Some(id) {
+                        app.detail = Some((id, DetailFetch::Failed(err)));
+                    }
+                } else {
+                    app.detail_cache.invalidate(&id);
+                    app.detail_inflight.remove(&id);
+                    app.fetch_detail(id, window, cx);
+                    app.refresh_counts(window, cx);
+                    // Tag filter drops untagged rows immediately.
+                    let filtering_tag = app.table.read(cx).delegate().filter.tag;
+                    if filtering_tag == Some(tag_id) {
+                        let selected_id = app.selected;
+                        app.table.update(cx, |table, cx| {
+                            table
+                                .delegate_mut()
+                                .reload_from_top(selected_id, None, window, cx);
+                        });
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Row selection: the panel follows the id immediately, then prefetch
@@ -2864,7 +2984,9 @@ impl LibraryApp {
     fn render_left_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let filter = self.table.read(cx).delegate().filter.clone();
         let selected_kind = filter.kind;
-        let all_selected = filter.kind.is_none() && filter.favorite.is_none();
+        let selected_tag = filter.tag;
+        let all_selected =
+            filter.kind.is_none() && filter.favorite.is_none() && filter.tag.is_none();
         let favorites_selected = filter.favorite == Some(true);
         let kinds = ResourceKind::ALL
             .into_iter()
@@ -2922,6 +3044,33 @@ impl LibraryApp {
                     selected_kind == Some(kind),
                     cx,
                 )
+            }))
+            .child(
+                div()
+                    .pt_4()
+                    .pb_1()
+                    .px_2()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Tags"),
+            )
+            .children(self.tags.iter().enumerate().filter_map(|(index, tag)| {
+                let count = self
+                    .counts
+                    .as_ref()
+                    .map(|counts| counts.by_tag.get(&tag.id).copied().unwrap_or(0))
+                    .unwrap_or(0);
+                if count == 0 && selected_tag != Some(tag.id) {
+                    return None;
+                }
+                Some(self.sidebar_row(
+                    index + 100,
+                    SidebarNav::Tag(tag.id),
+                    tag.text.as_str().to_owned(),
+                    symbol("tag", AssetIconName::Library).with_size(px(16.)),
+                    Some(count),
+                    selected_tag == Some(tag.id),
+                    cx,
+                ))
             }))
             .when_some(self.counts_error.as_ref(), |panel, error| {
                 panel.child(
@@ -2984,7 +3133,58 @@ impl LibraryApp {
                             )
                             .into_any_element()
                     });
-                render_panel(self.detail_view(), actions, cx)
+                let tags = match self.detail_view() {
+                    DetailView::Fields(detail) => detail.tags.clone(),
+                    _ => Vec::new(),
+                };
+                let show_tag_editor = matches!(self.detail_view(), DetailView::Fields(_));
+                let panel = render_panel(self.detail_view(), actions, cx);
+                if !show_tag_editor {
+                    return panel;
+                }
+                panel.child(
+                    v_flex()
+                        .px_3()
+                        .pb_3()
+                        .gap_2()
+                        .child(
+                            h_flex().gap_1().children(tags.into_iter().map(|tag| {
+                                let tag_id = tag.id;
+                                h_flex()
+                                    .id(SharedString::from(format!("detail-tag-{tag_id}")))
+                                    .gap_1()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded(px(6.))
+                                    .bg(cx.theme().secondary)
+                                    .child(tag.text.as_str().to_owned())
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "remove-tag-{tag_id}"
+                                        )))
+                                            .ghost()
+                                            .small()
+                                            .label("×")
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.remove_tag_from_selected(tag_id, window, cx)
+                                            })),
+                                    )
+                            })),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(Input::new(&self.tag_input).small().w_full())
+                                .child(
+                                    Button::new("add-tag")
+                                        .small()
+                                        .label("Add")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.add_tag_to_selected(window, cx)
+                                        })),
+                                ),
+                        ),
+                )
             }
         }
     }
@@ -3879,6 +4079,7 @@ mod detail_prefetch_tests {
             series_title: None,
             series_number: None,
             favorite: false,
+            tags: vec![],
             date_added: UtcMillis::from_unix_ms(0),
             date_edited: UtcMillis::from_unix_ms(0),
         }

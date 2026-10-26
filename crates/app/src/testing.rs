@@ -6,7 +6,7 @@ use oeuvre_core::{
     BibliographicDate, Creator, CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr,
     Person, PersonId, Resource, ResourceCounts, ResourceFilter, ResourceId, ResourceKind,
     ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
-    SortedResourcePage, Store, StoreError, StoreHealth, UtcMillis, creator_label_name,
+    SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId, UtcMillis, creator_label_name,
     format_creators_label, primary_creator_sort_key, published_label_from,
 };
 
@@ -82,6 +82,7 @@ struct ResourceRow {
     parent_id: Option<ResourceId>,
     series_id: Option<SeriesId>,
     series_number: Option<NonEmptyStr>,
+    tag_ids: Vec<TagId>,
     favorite: bool,
     date_added: UtcMillis,
     date_edited: UtcMillis,
@@ -131,6 +132,7 @@ fn cmp_field<T: Ord>(a: Option<T>, b: Option<T>) -> Ordering {
 pub struct MemoryStore {
     people: Mutex<PeopleState>,
     series: Mutex<HashMap<SeriesId, Series>>,
+    tags: Mutex<HashMap<TagId, Tag>>,
     resources: Mutex<HashMap<ResourceId, ResourceRow>>,
     created: Mutex<Vec<CreatedEdge>>,
 }
@@ -140,6 +142,7 @@ impl MemoryStore {
         Self {
             people: Mutex::new(PeopleState::new()),
             series: Mutex::new(HashMap::new()),
+            tags: Mutex::new(HashMap::new()),
             resources: Mutex::new(HashMap::new()),
             created: Mutex::new(Vec::new()),
         }
@@ -340,6 +343,11 @@ impl MemoryStore {
                         return false;
                     }
                 }
+                if let Some(tag) = filter.tag {
+                    if !resource.tag_ids.contains(&tag) {
+                        return false;
+                    }
+                }
                 if let Some(needle) = needle.as_deref() {
                     if !resource.title.as_str().to_lowercase().contains(needle) {
                         return false;
@@ -473,6 +481,50 @@ impl Store for MemoryStore {
             .ok_or_else(|| StoreError::not_found(format!("series {id}")))
     }
 
+    async fn create_tag(&self, text: NonEmptyStr) -> Result<Tag, StoreError> {
+        let mut tags = self.tags.lock().expect("MemoryStore lock");
+        if tags.values().any(|tag| tag.text == text) {
+            return Err(StoreError::invalid(format!(
+                "tag text already exists: {}",
+                text.as_str()
+            )));
+        }
+        let tag = Tag::try_new(TagId::generate(), text);
+        tags.insert(tag.id, tag.clone());
+        Ok(tag)
+    }
+
+    async fn get_tag(&self, id: TagId) -> Result<Tag, StoreError> {
+        self.tags
+            .lock()
+            .expect("MemoryStore lock")
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| StoreError::not_found(format!("tag {id}")))
+    }
+
+    async fn find_tag_by_text(&self, text: &NonEmptyStr) -> Result<Option<Tag>, StoreError> {
+        Ok(self
+            .tags
+            .lock()
+            .expect("MemoryStore lock")
+            .values()
+            .find(|tag| &tag.text == text)
+            .cloned())
+    }
+
+    async fn list_tags(&self) -> Result<Vec<Tag>, StoreError> {
+        let mut tags: Vec<Tag> = self
+            .tags
+            .lock()
+            .expect("MemoryStore lock")
+            .values()
+            .cloned()
+            .collect();
+        tags.sort_by(|a, b| a.text.as_str().cmp(b.text.as_str()));
+        Ok(tags)
+    }
+
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError> {
         let resource = Resource::try_new(ResourceId::generate(), new)?;
         let row = ResourceRow {
@@ -484,6 +536,7 @@ impl Store for MemoryStore {
             parent_id: resource.parent_id,
             series_id: resource.series_id,
             series_number: resource.series_number.clone(),
+            tag_ids: resource.tag_ids.clone(),
             favorite: resource.favorite,
             date_added: resource.date_added,
             date_edited: resource.date_edited,
@@ -532,6 +585,7 @@ impl Store for MemoryStore {
                 parent_id: resource.parent_id,
                 series_id: resource.series_id,
                 series_number: resource.series_number.clone(),
+                tag_ids: resource.tag_ids.clone(),
                 favorite: resource.favorite,
                 date_added: resource.date_added,
                 date_edited: resource.date_edited,
@@ -585,6 +639,7 @@ impl Store for MemoryStore {
                 parent_id: r.parent_id,
                 series_id: r.series_id,
                 series_number: r.series_number.clone(),
+                tag_ids: r.tag_ids.clone(),
                 favorite: r.favorite,
                 date_added: r.date_added,
                 date_edited: r.date_edited,
@@ -617,6 +672,7 @@ impl Store for MemoryStore {
             row.parent_id,
             row.series_id,
             row.series_number,
+            row.tag_ids,
             row.favorite,
             row.date_added,
             row.date_edited,
@@ -641,6 +697,9 @@ impl Store for MemoryStore {
             *counts.by_kind.entry(resource.kind).or_default() += 1;
             if resource.favorite {
                 counts.favorites += 1;
+            }
+            for tag_id in &resource.tag_ids {
+                *counts.by_tag.entry(*tag_id).or_default() += 1;
             }
         }
         Ok(counts)
@@ -774,6 +833,22 @@ impl Store for StubStore {
 
     async fn get_series(&self, _id: SeriesId) -> Result<Series, StoreError> {
         Err(unsupported("get_series"))
+    }
+
+    async fn create_tag(&self, _text: NonEmptyStr) -> Result<Tag, StoreError> {
+        Err(unsupported("create_tag"))
+    }
+
+    async fn get_tag(&self, _id: TagId) -> Result<Tag, StoreError> {
+        Err(unsupported("get_tag"))
+    }
+
+    async fn find_tag_by_text(&self, _text: &NonEmptyStr) -> Result<Option<Tag>, StoreError> {
+        Err(unsupported("find_tag_by_text"))
+    }
+
+    async fn list_tags(&self) -> Result<Vec<Tag>, StoreError> {
+        Err(unsupported("list_tags"))
     }
 
     async fn create_resource(&self, _new: NewResource) -> Result<Resource, StoreError> {

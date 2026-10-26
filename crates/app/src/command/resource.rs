@@ -208,6 +208,9 @@ fn changed_fields(old: &Resource, new: &NewResource) -> Vec<&'static str> {
     if old.series_number != new.series_number {
         changed.push("series_number");
     }
+    if old.tag_ids != new.tag_ids {
+        changed.push("tags");
+    }
     changed
 }
 
@@ -248,6 +251,22 @@ impl Handler for CreateResource {
                 .get_series(series_id)
                 .await
                 .map_err(|e| map_series_lookup(e, series_id))?;
+        }
+
+        for tag_id in &self.new.tag_ids {
+            state
+                .store()
+                .get_tag(*tag_id)
+                .await
+                .map_err(|e| {
+                    if e.is_not_found() {
+                        CommandError::NotFound(tag_id.to_string())
+                    } else if e.is_invalid() {
+                        CommandError::Invalid(e.message.clone())
+                    } else {
+                        CommandError::Store(e)
+                    }
+                })?;
         }
 
         let resource = state
@@ -315,6 +334,22 @@ impl Handler for UpdateResource {
                 .get_series(series_id)
                 .await
                 .map_err(|e| map_series_lookup(e, series_id))?;
+        }
+
+        for tag_id in &self.new.tag_ids {
+            state
+                .store()
+                .get_tag(*tag_id)
+                .await
+                .map_err(|e| {
+                    if e.is_not_found() {
+                        CommandError::NotFound(tag_id.to_string())
+                    } else if e.is_invalid() {
+                        CommandError::Invalid(e.message.clone())
+                    } else {
+                        CommandError::Store(e)
+                    }
+                })?;
         }
 
         let resource = state
@@ -431,6 +466,24 @@ impl Handler for GetResourceDetail {
             None => None,
         };
 
+        let mut tags = Vec::with_capacity(resource.tag_ids.len());
+        for tag_id in &resource.tag_ids {
+            let tag = state
+                .store()
+                .get_tag(*tag_id)
+                .await
+                .map_err(|e| {
+                    if e.is_not_found() {
+                        CommandError::NotFound(tag_id.to_string())
+                    } else if e.is_invalid() {
+                        CommandError::Invalid(e.message.clone())
+                    } else {
+                        CommandError::Store(e)
+                    }
+                })?;
+            tags.push(tag);
+        }
+
         Ok(FetchedDetail(ResourceDetail {
             id: resource.id,
             kind: resource.kind,
@@ -450,6 +503,7 @@ impl Handler for GetResourceDetail {
             series_title,
             series_number: resource.series_number,
             favorite: resource.favorite,
+            tags,
             date_added: resource.date_added,
             date_edited: resource.date_edited,
         }))
@@ -528,6 +582,9 @@ impl Handler for ListResourcesQueryPage {
         }
         if let Some(favorite) = self.query.filter.favorite {
             ev.set(event::RESOURCE_FILTER_FAVORITE, favorite);
+        }
+        if let Some(tag) = self.query.filter.tag {
+            ev.set(event::RESOURCE_FILTER_TAG, tag.to_string());
         }
         if let Some(range) = self.query.filter.published {
             if let Some(from) = range.from {

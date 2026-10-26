@@ -44,6 +44,9 @@ pub(crate) const RESOURCE_SORT_FIELD: Key = Key::new("resource.sort_field");
 pub(crate) const RESOURCE_SORT_DIRECTION: Key = Key::new("resource.sort_direction");
 pub(crate) const SERIES_ID: Key = Key::new("series.id");
 pub(crate) const SERIES_TITLE: Key = Key::new("series.title");
+pub(crate) const TAG_ID: Key = Key::new("tag.id");
+pub(crate) const TAG_TEXT: Key = Key::new("tag.text");
+pub(crate) const RESOURCE_FILTER_TAG: Key = Key::new("resource.filter_tag");
 
 #[cfg(test)]
 mod tests {
@@ -81,6 +84,9 @@ mod tests {
         RESOURCE_SORT_DIRECTION,
         SERIES_ID,
         SERIES_TITLE,
+        TAG_ID,
+        TAG_TEXT,
+        RESOURCE_FILTER_TAG,
     ];
 
     #[test]

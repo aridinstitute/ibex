@@ -98,8 +98,8 @@ pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
             vec![number.as_str().to_owned()],
         ));
     }
-    // Record-keeping stamps close the panel: they describe the library
-    // record, not the work, and are always present on a stored record.
+    // Record-keeping stamps close the bibliographic block; tags sit just
+    // below them so add/edit chips stay at the foot of the panel.
     rows.push((
         "Added".to_string(),
         vec![format_recorded_date(detail.date_added)],
@@ -108,6 +108,16 @@ pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
         "Edited".to_string(),
         vec![format_recorded_date(detail.date_edited)],
     ));
+    if !detail.tags.is_empty() {
+        rows.push((
+            "Tags".to_string(),
+            detail
+                .tags
+                .iter()
+                .map(|tag| tag.text.as_str().to_owned())
+                .collect(),
+        ));
+    }
     rows
 }
 
@@ -249,6 +259,7 @@ mod tests {
             series_title: None,
             series_number: None,
             favorite: false,
+            tags: vec![],
             date_added: UtcMillis::from_unix_ms(1_609_459_200_000),
             date_edited: UtcMillis::from_unix_ms(1_609_459_200_000),
         }
@@ -265,6 +276,22 @@ mod tests {
         assert_eq!(rows[1].1, vec!["Journal of Citation Studies"]);
         assert_eq!(rows[2].1, vec!["Jan 1, 2021"]);
         assert_eq!(rows[3].1, vec!["Jan 1, 2021"]);
+        // Tags only appear when present, just below the record stamps.
+        let mut with_tags = journal_article();
+        with_tags.tags = vec![
+            oeuvre_core::Tag::try_new(
+                oeuvre_core::TagId::generate(),
+                NonEmptyStr::try_new("epistemology").unwrap(),
+            ),
+            oeuvre_core::Tag::try_new(
+                oeuvre_core::TagId::generate(),
+                NonEmptyStr::try_new("methods").unwrap(),
+            ),
+        ];
+        let tagged = field_rows(&with_tags);
+        let last = tagged.last().expect("tags row present");
+        assert_eq!(last.0, "Tags");
+        assert_eq!(last.1, vec!["epistemology".to_string(), "methods".to_string()]);
         assert_eq!(byline(&detail), Some("Ada Lovelace, G. Hopper".to_string()));
     }
 

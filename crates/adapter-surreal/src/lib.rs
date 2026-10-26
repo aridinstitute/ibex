@@ -6,7 +6,7 @@ use oeuvre_core::{
     BibliographicDate, Creator, CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person,
     PersonId, Resource, ResourceCounts, ResourceFilter, ResourceId, ResourceKind, ResourcePage,
     ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
-    SortedResourcePage, Store, StoreError, StoreHealth, UtcMillis, creator_label_name,
+    SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId, UtcMillis, creator_label_name,
     format_creators_label, published_label_from,
 };
 use surrealdb::Surreal;
@@ -18,6 +18,7 @@ const NS: &str = "oeuvre";
 const DB: &str = "oeuvre";
 const PERSON_TABLE: &str = "person";
 const SERIES_TABLE: &str = "series";
+const TAG_TABLE: &str = "tag";
 const RESOURCE_TABLE: &str = "resource";
 pub struct SurrealStore {
     db: Surreal<Db>,
@@ -54,6 +55,23 @@ struct SeriesDoc {
 }
 
 #[derive(Debug, Clone, SurrealValue)]
+struct TagDoc {
+    #[surreal(wrap)]
+    text: NonEmptyStr,
+}
+
+#[derive(Debug, SurrealValue)]
+struct TagIdRow {
+    id: RecordId,
+}
+
+#[derive(Debug, SurrealValue)]
+struct TagCountRow {
+    id: RecordId,
+    total: i64,
+}
+
+#[derive(Debug, Clone, SurrealValue)]
 struct ResourceDoc {
     #[surreal(wrap)]
     kind: ResourceKind,
@@ -70,6 +88,9 @@ struct ResourceDoc {
     series: Option<RecordId>,
     #[surreal(default)]
     series_number: Option<String>,
+    /// Record links to tag rows; legacy rows omit the field.
+    #[surreal(default)]
+    tags: Option<Vec<RecordId>>,
     /// Legacy rows omit the field; treat missing as not favorited.
     #[surreal(default)]
     favorite: Option<bool>,
@@ -245,6 +266,22 @@ impl SurrealStore {
             )
             .await;
 
+        let _ = self
+            .db
+            .query("DEFINE TABLE IF NOT EXISTS tag SCHEMALESS")
+            .await;
+        let _ = self
+            .db
+            .query("DEFINE INDEX IF NOT EXISTS tag_text_unique ON TABLE tag FIELDS text UNIQUE")
+            .await;
+        // Reverse refs for tag filter: resource.tags is an array of tag record links.
+        let _ = self
+            .db
+            .query(
+                "DEFINE FIELD IF NOT EXISTS tags ON TABLE resource                  TYPE option<array<record<tag>>> DEFAULT []                  REFERENCE ON DELETE UNSET",
+            )
+            .await;
+
         let _ = self.backfill_record_dates().await;
         self.db
             .query(include_str!("primary_creator_sort.surql"))
@@ -295,6 +332,10 @@ impl SurrealStore {
         RecordId::new(SERIES_TABLE, id.to_string())
     }
 
+    fn tag_key(id: TagId) -> RecordId {
+        RecordId::new(TAG_TABLE, id.to_string())
+    }
+
     fn resource_key(id: ResourceId) -> RecordId {
         RecordId::new(RESOURCE_TABLE, id.to_string())
     }
@@ -326,6 +367,11 @@ impl SurrealStore {
             .map_err(|e| StoreError::new(format!("invalid series id in store: {e}")))
     }
 
+    fn thing_to_tag_id(thing: &RecordId) -> Result<TagId, StoreError> {
+        TagId::parse(&record_key(thing))
+            .map_err(|e| StoreError::new(format!("invalid tag id in store: {e}")))
+    }
+
     fn resource_doc_from(resource: &Resource) -> ResourceDoc {
         ResourceDoc {
             kind: resource.kind,
@@ -339,6 +385,7 @@ impl SurrealStore {
                 .series_number
                 .as_ref()
                 .map(|s| s.as_str().to_owned()),
+            tags: Some(resource.tag_ids.iter().copied().map(Self::tag_key).collect()),
             favorite: Some(resource.favorite),
             date_added: Some(resource.date_added.as_unix_ms()),
             date_edited: Some(resource.date_edited.as_unix_ms()),
@@ -681,6 +728,80 @@ impl Store for SurrealStore {
         }
     }
 
+    async fn create_tag(&self, text: NonEmptyStr) -> Result<Tag, StoreError> {
+        let id = TagId::generate();
+        let tag = Tag::try_new(id, text);
+        let created: Result<Option<TagDoc>, _> = self
+            .db
+            .create(Self::tag_key(id))
+            .content(TagDoc {
+                text: tag.text.clone(),
+            })
+            .await;
+        match created {
+            Ok(Some(_)) => Ok(tag),
+            Ok(None) => Err(StoreError::new(format!("create_tag returned empty for {id}"))),
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("unique")
+                    || msg.contains("already contains")
+                    || msg.contains("index")
+                {
+                    Err(StoreError::invalid(format!(
+                        "tag text already exists: {}",
+                        tag.text.as_str()
+                    )))
+                } else {
+                    Err(map_err(err))
+                }
+            }
+        }
+    }
+
+    async fn get_tag(&self, id: TagId) -> Result<Tag, StoreError> {
+        let row: Option<TagDoc> = self
+            .db
+            .select(Self::tag_key(id))
+            .await
+            .map_err(map_err)?;
+        match row {
+            Some(doc) => Ok(Tag { id, text: doc.text }),
+            None => Err(StoreError::not_found(format!("tag {id}"))),
+        }
+    }
+
+    async fn find_tag_by_text(&self, text: &NonEmptyStr) -> Result<Option<Tag>, StoreError> {
+        let mut response = self
+            .db
+            .query("SELECT id FROM tag WHERE text = $text LIMIT 1")
+            .bind(("text", text.as_str().to_owned()))
+            .await
+            .map_err(map_err)?;
+        let rows: Vec<TagIdRow> = response.take(0).map_err(map_err)?;
+        match rows.into_iter().next() {
+            Some(row) => {
+                let id = Self::thing_to_tag_id(&row.id)?;
+                Ok(Some(self.get_tag(id).await?))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn list_tags(&self) -> Result<Vec<Tag>, StoreError> {
+        let mut response = self
+            .db
+            .query("SELECT id FROM tag ORDER BY text ASC")
+            .await
+            .map_err(map_err)?;
+        let rows: Vec<TagIdRow> = response.take(0).map_err(map_err)?;
+        let mut tags = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = Self::thing_to_tag_id(&row.id)?;
+            tags.push(self.get_tag(id).await?);
+        }
+        Ok(tags)
+    }
+
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError> {
         let id = ResourceId::generate();
         let resource = Resource::try_new(id, new)?;
@@ -826,6 +947,13 @@ impl Store for SurrealStore {
             }
             None => None,
         };
+        let tag_ids = match doc.tags {
+            Some(refs) => refs
+                .iter()
+                .map(Self::thing_to_tag_id)
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
         let (date_added, date_edited) = Self::recorded_dates(doc.date_added, doc.date_edited, id);
 
         Resource::from_stored(
@@ -839,6 +967,7 @@ impl Store for SurrealStore {
             parent_id,
             series_id,
             series_number,
+            tag_ids,
             doc.favorite.unwrap_or(false),
             date_added,
             date_edited,
@@ -858,6 +987,9 @@ impl Store for SurrealStore {
             .db
             .query("SELECT kind, count() AS total FROM resource GROUP BY kind")
             .query("SELECT count() AS total FROM resource WHERE favorite = true GROUP ALL")
+            .query(
+                "SELECT id, count(<~(resource FIELD tags)) AS total FROM tag"
+            )
             .await
             .map_err(map_err)?;
         let rows: Vec<KindCountRow> = response.take(0).map_err(map_err)?;
@@ -874,10 +1006,19 @@ impl Store for SurrealStore {
             .first()
             .map(|row| row.total as u64)
             .unwrap_or(0);
+        let tag_rows: Vec<TagCountRow> = response.take(2).map_err(map_err)?;
+        let mut by_tag = HashMap::new();
+        for row in tag_rows {
+            let id = Self::thing_to_tag_id(&row.id)?;
+            if row.total > 0 {
+                by_tag.insert(id, row.total as u64);
+            }
+        }
         Ok(ResourceCounts {
             all_items: by_kind.values().sum(),
             favorites,
             by_kind,
+            by_tag,
         })
     }
 
@@ -1046,6 +1187,9 @@ impl Store for SurrealStore {
         if let Some(favorite) = query.filter.favorite {
             statement = statement.bind(("favorite", favorite));
         }
+        if let Some(tag) = query.filter.tag {
+            statement = statement.bind(("tag_id", Self::tag_key(tag)));
+        }
         if let Some(range) = query.filter.published {
             if let Some(from) = range.from {
                 statement = statement.bind(("published_from", from.as_unix_ms()));
@@ -1083,11 +1227,19 @@ fn dir_literal(direction: SortDirection) -> &'static str {
 ///
 /// Traversal from a record is only fast in the source position; the same
 /// expression inside `WHERE id IN …` still scans every resource.
-fn filter_from(filter: &ResourceFilter) -> &'static str {
+fn filter_from(filter: &ResourceFilter) -> String {
+    // Creator and tag filters narrow at the source instead of scanning every
+    // resource. When both are set the creator traversal stays the FROM source
+    // and the tag predicate ANDS in via `tags CONTAINS`.
     if filter.creator.is_some() {
-        "array::distinct($creator_id->created->resource)"
+        "array::distinct($creator_id->created->resource)".to_owned()
+    } else if filter.tag.is_some() {
+        // Reverse record references: resources whose `tags` array points at
+        // this tag. Syntax is `$tag_id<~resource` (no dot) — same shape as
+        // graph reverse walk, not a field path.
+        "$tag_id<~(resource FIELD tags)".to_owned()
     } else {
-        "resource"
+        "resource".to_owned()
     }
 }
 
@@ -1108,6 +1260,10 @@ fn filter_where(filter: &ResourceFilter) -> String {
     // Missing favorite on legacy rows is false, matching from_stored.
     if filter.favorite.is_some() {
         clauses.push("(favorite ?? false) = $favorite");
+    }
+    // Tag alone rides filter_from reverse refs; with a creator source, test membership.
+    if filter.tag.is_some() && filter.creator.is_some() {
+        clauses.push("tags CONTAINS $tag_id");
     }
     // The creator predicate lives in `filter_from`: membership rides the
     // `created` relation, and the source-position traversal is what keeps
@@ -1136,8 +1292,8 @@ fn filter_where(filter: &ResourceFilter) -> String {
 mod tests {
     use super::*;
     use oeuvre_core::{
-        BibliographicDate, CreatorRole, CreatorSpec, NewResource, NewSeries, ResourceKind,
-        ResourceSort, SortDirection, Store, UtcMillis,
+        BibliographicDate, CreatorRole, CreatorSpec, NewResource, NewSeries, ResourceFilter,
+        ResourceKind, ResourceQuery, ResourceSort, SortDirection, Store, UtcMillis,
     };
 
     #[tokio::test]
@@ -1167,6 +1323,7 @@ mod tests {
                     parent_id: None,
                     series_id: None,
                     series_number: None,
+                    tag_ids: vec![],
                 })
                 .await
                 .unwrap();
@@ -1263,6 +1420,7 @@ mod tests {
                 parent_id: Some(parent),
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap()
@@ -1305,6 +1463,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap();
@@ -1323,6 +1482,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap();
@@ -1369,6 +1529,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap();
@@ -1456,6 +1617,7 @@ mod tests {
                     parent_id: None,
                     series_id: None,
                     series_number: None,
+                    tag_ids: vec![],
                 })
                 .await
                 .unwrap();
@@ -1497,6 +1659,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap();
@@ -1585,6 +1748,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap()
@@ -1602,6 +1766,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap()
@@ -1886,6 +2051,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap()
@@ -2146,6 +2312,7 @@ mod tests {
                 published: None,
                 kind: None,
                 favorite: None,
+                tag: None,
             },
         }
     }
@@ -2247,6 +2414,7 @@ mod tests {
                 published: None,
                 kind: None,
                 favorite: None,
+                tag: None,
             },
         };
         let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
@@ -2268,6 +2436,7 @@ mod tests {
                 published: None,
                 kind: None,
                 favorite: None,
+                tag: None,
             },
         }
     }
@@ -2360,6 +2529,7 @@ mod tests {
                 published: None,
                 kind: None,
                 favorite: None,
+                tag: None,
             },
         };
         let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
@@ -2433,6 +2603,7 @@ mod tests {
                 }),
                 kind: None,
                 favorite: None,
+                tag: None,
             },
         }
     }
@@ -2560,6 +2731,7 @@ mod tests {
                 }),
                 kind: None,
                 favorite: None,
+                tag: None,
             },
         };
         let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
@@ -2632,6 +2804,7 @@ mod tests {
                 }),
                 kind: None,
                 favorite: None,
+                tag: None,
             },
         };
         let page = store
@@ -2833,6 +3006,7 @@ mod tests {
                 parent_id: None,
                 series_id: Some(series.id),
                 series_number: Some(NonEmptyStr::try_new("LCL 26").unwrap()),
+                tag_ids: vec![],
             })
             .await
             .unwrap();
@@ -2898,6 +3072,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap();
@@ -2975,6 +3150,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap();
@@ -3104,6 +3280,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap();
@@ -3236,6 +3413,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap();
@@ -3284,6 +3462,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap();
@@ -3316,6 +3495,7 @@ mod tests {
                 parent_id: Some(journal.id),
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap();
@@ -3341,6 +3521,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap();
@@ -3387,5 +3568,67 @@ mod tests {
         let journal_row = by_id(journal.id);
         assert_eq!(journal_row.creators_label, "");
         assert!(journal_row.container_title.is_none());
+    }
+
+    #[tokio::test]
+    async fn tag_filter_narrows_via_reverse_record_refs() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let tag = store
+            .create_tag(NonEmptyStr::try_new("methods").unwrap())
+            .await
+            .unwrap();
+        let tagged = store
+            .create_resource(NewResource {
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new("Tagged").unwrap(),
+                creators: vec![],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+                tag_ids: vec![tag.id],
+            })
+            .await
+            .unwrap();
+        store
+            .create_resource(NewResource {
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new("Untagged").unwrap(),
+                creators: vec![],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+                tag_ids: vec![],
+            })
+            .await
+            .unwrap();
+
+        let page = store
+            .list_resources_query_page(
+                &ResourceQuery {
+                    sort: None,
+                    filter: ResourceFilter {
+                        tag: Some(tag.id),
+                        ..ResourceFilter::none()
+                    },
+                },
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].id, tagged.id);
+
+        let loaded = store.get_resource(tagged.id).await.unwrap();
+        assert_eq!(loaded.tag_ids, vec![tag.id]);
+
+        let counts = store.resource_counts().await.unwrap();
+        assert_eq!(counts.by_tag.get(&tag.id).copied(), Some(1));
     }
 }

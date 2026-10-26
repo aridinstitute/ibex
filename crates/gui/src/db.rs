@@ -2,13 +2,14 @@
 //! page requests over channels, so gpui's executor never runs Surreal I/O.
 
 use oeuvre_app::command::{
-    CountResources, CreateResource, GetResource, GetResourceDetail, ListPersons, ListResourcesPage,
-    ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
+    CountResources, CreateResource, CreateTag, FindTagByText, GetResource, GetResourceDetail,
+    ListPersons, ListResourcesPage, ListResourcesQueryPage, ListTags, SetResourceFavorite,
+    UpdateResource,
 };
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
-    NewResource, Person, Resource, ResourceCounts, ResourceDetail, ResourceId, ResourcePage,
-    ResourceQuery, SortedResourcePage,
+    NewResource, NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId,
+    ResourcePage, ResourceQuery, SortedResourcePage, Tag,
 };
 use tokio::sync::oneshot;
 
@@ -51,6 +52,17 @@ pub enum DbRequest {
     },
     ListPersons {
         reply: oneshot::Sender<Result<Vec<Person>, String>>,
+    },
+    ListTags {
+        reply: oneshot::Sender<Result<Vec<Tag>, String>>,
+    },
+    CreateTag {
+        text: NonEmptyStr,
+        reply: oneshot::Sender<Result<Tag, String>>,
+    },
+    FindTagByText {
+        text: NonEmptyStr,
+        reply: oneshot::Sender<Result<Option<Tag>, String>>,
     },
 }
 
@@ -210,6 +222,41 @@ impl DbWorker {
                                     });
                                 let _ = reply.send(result);
                             }
+                            DbRequest::ListTags { reply } => {
+                                let result = state
+                                    .execute(Command::ListTags(ListTags))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::ListTags(tags) => Ok(tags),
+                                        _ => Err("unexpected outcome from list_tags".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::CreateTag { text, reply } => {
+                                let result = state
+                                    .execute(Command::CreateTag(CreateTag { text }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::CreateTag(tag) => Ok(tag),
+                                        _ => Err("unexpected outcome from create_tag".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::FindTagByText { text, reply } => {
+                                let result = state
+                                    .execute(Command::FindTagByText(FindTagByText { text }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::FindTagByText(tag) => Ok(tag),
+                                        _ => {
+                                            Err("unexpected outcome from find_tag_by_text".into())
+                                        }
+                                    });
+                                let _ = reply.send(result);
+                            }
                         }
                     }
                 });
@@ -271,6 +318,33 @@ impl DbWorker {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DbRequest::ListPersons { reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    pub async fn list_tags(&self) -> Result<Vec<Tag>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::ListTags { reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    pub async fn create_tag(&self, text: NonEmptyStr) -> Result<Tag, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::CreateTag { text, reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    pub async fn find_tag_by_text(&self, text: NonEmptyStr) -> Result<Option<Tag>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::FindTagByText { text, reply: tx })
             .map_err(|_| "db worker stopped".to_string())?;
         rx.await
             .map_err(|_| "db worker dropped the request".to_string())?
@@ -506,6 +580,7 @@ mod tests {
                         published: None,
                         kind: None,
                         favorite: None,
+                        tag: None,
                     },
                 },
                 0,
@@ -579,6 +654,7 @@ mod tests {
                         published: None,
                         kind: None,
                         favorite: None,
+                        tag: None,
                     },
                 },
                 0,
@@ -622,6 +698,7 @@ mod tests {
                         }),
                         kind: None,
                         favorite: None,
+                        tag: None,
                     },
                 },
                 0,
@@ -672,6 +749,7 @@ mod tests {
                         }),
                         kind: None,
                         favorite: None,
+                        tag: None,
                     },
                 },
                 0,
@@ -745,6 +823,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap();

@@ -39,6 +39,7 @@ async fn search_matches_title_or_publisher_before_paging() {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             })
             .await
             .unwrap();
@@ -125,6 +126,7 @@ fn titled(needle: &str) -> ResourceQuery {
             published: None,
             kind: None,
             favorite: None,
+            tag: None,
         },
     }
 }
@@ -141,6 +143,7 @@ fn by_creator(person: PersonId) -> ResourceQuery {
             published: None,
             kind: None,
             favorite: None,
+            tag: None,
         },
     }
 }
@@ -160,6 +163,7 @@ fn ranged(from: Option<i64>, to: Option<i64>) -> ResourceQuery {
             }),
             kind: None,
             favorite: None,
+            tag: None,
         },
     }
 }
@@ -224,6 +228,7 @@ fn resource(kind: ResourceKind, author: Option<PersonId>, title: &str) -> NewRes
         parent_id: None,
         series_id: None,
         series_number: None,
+        tag_ids: vec![],
     }
 }
 
@@ -653,6 +658,7 @@ async fn title_filter_keeps_the_sort_order_within_matches() {
             published: None,
             kind: None,
             favorite: None,
+            tag: None,
         },
     };
     let first = store
@@ -753,6 +759,7 @@ async fn creator_filter_keeps_the_sort_order_within_matches() {
             published: None,
             kind: None,
             favorite: None,
+            tag: None,
         },
     };
     let first = store
@@ -875,6 +882,7 @@ async fn published_range_keeps_sort_order_within_matches() {
             }),
             kind: None,
             favorite: None,
+            tag: None,
         },
     };
     let first = store
@@ -925,6 +933,7 @@ async fn filters_and_together() {
             }),
             kind: None,
             favorite: None,
+            tag: None,
         },
     };
     let page = store
@@ -1009,6 +1018,7 @@ async fn create_book(state: &AppState, author_id: PersonId, title: &str) {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await
@@ -1169,6 +1179,7 @@ async fn filtered_query_page_command_emits_filter_event() {
                     }),
                     kind: Some(ResourceKind::Book),
                     favorite: None,
+                    tag: None,
                 },
             },
             0,

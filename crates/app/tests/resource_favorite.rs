@@ -20,6 +20,7 @@ fn bare_book(title: &str) -> NewResource {
         parent_id: None,
         series_id: None,
         series_number: None,
+        tag_ids: vec![],
     }
 }
 
@@ -81,6 +82,7 @@ async fn favorite_toggles_filters_and_counts_with_one_event() {
                 sort: None,
                 filter: ResourceFilter {
                     favorite: Some(true),
+                    tag: None,
                     ..ResourceFilter::none()
                 },
             },

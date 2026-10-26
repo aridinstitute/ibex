@@ -46,6 +46,7 @@ fn container_new(kind: ResourceKind, title: &str) -> NewResource {
         parent_id: None,
         series_id: None,
         series_number: None,
+        tag_ids: vec![],
     }
 }
 
@@ -117,6 +118,7 @@ async fn detail_resolves_names_roles_and_linked_titles() {
                 parent_id: Some(journal.id),
                 series_id: Some(series.id),
                 series_number: Some(non_empty("42")),
+                tag_ids: vec![],
             },
         }))
         .await
@@ -212,6 +214,7 @@ async fn detail_emits_exactly_one_ok_event() {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await

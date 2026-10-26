@@ -6,6 +6,7 @@ mod person;
 mod resource;
 mod series;
 mod store;
+mod tag;
 
 pub use person::{Name, NameError, NameKey, NonEmptyStr, Person, PersonError, PersonId};
 pub use resource::{
@@ -18,3 +19,4 @@ pub use resource::{
 };
 pub use series::{NewSeries, Series, SeriesId};
 pub use store::{Store, StoreError, StoreHealth};
+pub use tag::{Tag, TagId};

@@ -2,6 +2,7 @@ mod health;
 mod person;
 mod resource;
 mod series;
+mod tag;
 
 pub use health::{Health, HealthReport};
 pub use person::{
@@ -13,10 +14,11 @@ pub use resource::{
     ListResourcesPage, ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
 };
 pub use series::CreateSeries;
+pub use tag::{CreateTag, FindTagByText, GetTag, ListTags};
 
 use oeuvre_core::{
     Person, Resource, ResourceCounts, ResourceDetail, ResourcePage, ResourceSummary, Series,
-    SortedResourcePage, StoreError,
+    SortedResourcePage, StoreError, Tag,
 };
 
 use crate::AppState;
@@ -34,6 +36,10 @@ pub enum Command {
     FindPersonsByName(FindPersonsByName),
     ListPersons(ListPersons),
     CreateSeries(CreateSeries),
+    CreateTag(CreateTag),
+    GetTag(GetTag),
+    FindTagByText(FindTagByText),
+    ListTags(ListTags),
     CreateResource(CreateResource),
     UpdateResource(UpdateResource),
     SetResourceFavorite(SetResourceFavorite),
@@ -57,6 +63,10 @@ pub enum Outcome {
     FindPersonsByName(Vec<Person>),
     ListPersons(Vec<Person>),
     CreateSeries(Series),
+    CreateTag(Tag),
+    GetTag(Tag),
+    FindTagByText(Option<Tag>),
+    ListTags(Vec<Tag>),
     CreateResource(Resource),
     UpdateResource(Resource),
     SetResourceFavorite(Resource),
@@ -107,6 +117,10 @@ impl Command {
             Command::FindPersonsByName(_) => FindPersonsByName::NAME,
             Command::ListPersons(_) => ListPersons::NAME,
             Command::CreateSeries(_) => CreateSeries::NAME,
+            Command::CreateTag(_) => CreateTag::NAME,
+            Command::GetTag(_) => GetTag::NAME,
+            Command::FindTagByText(_) => FindTagByText::NAME,
+            Command::ListTags(_) => ListTags::NAME,
             Command::CreateResource(_) => CreateResource::NAME,
             Command::UpdateResource(_) => UpdateResource::NAME,
             Command::SetResourceFavorite(_) => SetResourceFavorite::NAME,
@@ -147,6 +161,10 @@ pub(crate) async fn dispatch(
         Command::FindPersonsByName(c) => drive(c, state, ev).await,
         Command::ListPersons(c) => drive(c, state, ev).await,
         Command::CreateSeries(c) => drive(c, state, ev).await,
+        Command::CreateTag(c) => drive(c, state, ev).await,
+        Command::GetTag(c) => drive(c, state, ev).await,
+        Command::FindTagByText(c) => drive(c, state, ev).await,
+        Command::ListTags(c) => drive(c, state, ev).await,
         Command::CreateResource(c) => drive(c, state, ev).await,
         Command::UpdateResource(c) => drive(c, state, ev).await,
         Command::SetResourceFavorite(c) => drive(c, state, ev).await,
