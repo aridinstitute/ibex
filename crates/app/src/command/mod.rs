@@ -9,14 +9,14 @@ pub use person::{
     UpdatePerson,
 };
 pub use resource::{
-    CreateResource, GetResource, GetResourceDetail, ListResources, ListResourcesPage,
-    ListResourcesQueryPage, UpdateResource,
+    CountResources, CreateResource, GetResource, GetResourceDetail, ListResources,
+    ListResourcesPage, ListResourcesQueryPage, UpdateResource,
 };
 pub use series::CreateSeries;
 
 use oeuvre_core::{
-    Person, Resource, ResourceDetail, ResourcePage, ResourceSummary, Series, SortedResourcePage,
-    StoreError,
+    Person, Resource, ResourceCounts, ResourceDetail, ResourcePage, ResourceSummary, Series,
+    SortedResourcePage, StoreError,
 };
 
 use crate::AppState;
@@ -41,6 +41,7 @@ pub enum Command {
     ListResources(ListResources),
     ListResourcesPage(ListResourcesPage),
     ListResourcesQueryPage(ListResourcesQueryPage),
+    CountResources(CountResources),
 }
 
 /// The result of a successful command. One variant per [`Command`] variant.
@@ -62,6 +63,7 @@ pub enum Outcome {
     ListResources(Vec<ResourceSummary>),
     ListResourcesPage(ResourcePage),
     ListResourcesQueryPage(SortedResourcePage),
+    CountResources(ResourceCounts),
 }
 
 /// A command plus per-call transport context.
@@ -110,6 +112,7 @@ impl Command {
             Command::ListResources(_) => ListResources::NAME,
             Command::ListResourcesPage(_) => ListResourcesPage::NAME,
             Command::ListResourcesQueryPage(_) => ListResourcesQueryPage::NAME,
+            Command::CountResources(_) => CountResources::NAME,
         }
     }
 }
@@ -148,6 +151,7 @@ pub(crate) async fn dispatch(
         Command::ListResources(c) => drive(c, state, ev).await,
         Command::ListResourcesPage(c) => drive(c, state, ev).await,
         Command::ListResourcesQueryPage(c) => drive(c, state, ev).await,
+        Command::CountResources(c) => drive(c, state, ev).await,
     }
 }
 

@@ -125,6 +125,13 @@ pub trait Store: Send + Sync + 'static {
             "list_resources_query_page not supported by this store",
         ))
     }
+
+    /// Unfiltered totals across the full library, independent of pagination.
+    async fn resource_counts(&self) -> Result<crate::ResourceCounts, StoreError> {
+        Err(StoreError::new(
+            "resource_counts not supported by this store",
+        ))
+    }
 }
 
 /// Result of [`Store::ping`].

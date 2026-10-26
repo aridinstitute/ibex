@@ -23,9 +23,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Focusable as _, *};
 
 use oeuvre_core::{
-    NonEmptyStr, ParentRule, Person, PersonId, PublishedRange, Resource, ResourceDetail,
-    ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort,
-    ResourceSummary, SortDirection, UtcMillis, format_recorded_date,
+    NonEmptyStr, ParentRule, Person, PersonId, PublishedRange, Resource, ResourceCounts,
+    ResourceDetail, ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery,
+    ResourceSort, ResourceSummary, SortDirection, UtcMillis, format_recorded_date,
 };
 
 use crate::db::DbWorker;
@@ -1275,6 +1275,9 @@ pub struct LibraryApp {
     published_to_input: Entity<InputState>,
     detail_open: bool,
     left_panel_open: bool,
+    counts: Option<ResourceCounts>,
+    counts_error: Option<String>,
+    counts_gen: u64,
     /// Row selection, tracked here so the panel shows one resource exactly
     /// as long as its row stays selected.
     selected: Option<ResourceId>,
@@ -1602,7 +1605,7 @@ impl LibraryApp {
         // included; the listing generation keeps a late reply from
         // clobbering the rows a newer keystroke asked for.
         let title_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search title or publisher… (/)"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search title or publisher"));
         cx.subscribe_in(
             &title_input,
             window,
@@ -1754,6 +1757,14 @@ impl LibraryApp {
             }
         })
         .detach();
+        let worker = table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let counts = worker.resource_counts().await;
+            _ = app.update_in(window, |app, _window, cx| {
+                app.set_counts(counts, 0, cx);
+            });
+        })
+        .detach();
 
         Self {
             table,
@@ -1762,6 +1773,9 @@ impl LibraryApp {
             published_to_input,
             detail_open: false,
             left_panel_open: true,
+            counts: None,
+            counts_error: None,
+            counts_gen: 0,
             selected: None,
             detail: None,
             detail_cache: DetailCache::new(),
@@ -1771,6 +1785,70 @@ impl LibraryApp {
             last_escape_at: None,
             inline_trap: cx.focus_handle(),
         }
+    }
+
+    fn set_counts(
+        &mut self,
+        result: Result<ResourceCounts, String>,
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.counts_gen {
+            return;
+        }
+        match result {
+            Ok(counts) => {
+                self.counts = Some(counts);
+                self.counts_error = None;
+            }
+            Err(err) => {
+                self.counts_error = Some(err);
+            }
+        }
+        cx.notify();
+    }
+
+    fn refresh_counts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.counts_gen += 1;
+        let generation = self.counts_gen;
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let result = worker.resource_counts().await;
+            _ = app.update_in(window, |app, _window, cx| {
+                app.set_counts(result, generation, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn select_sidebar_kind(
+        &mut self,
+        kind: Option<ResourceKind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (selected_id, input) = {
+            let table = self.table.read(cx);
+            let delegate = table.delegate();
+            (
+                self.selected,
+                delegate
+                    .filter_inputs
+                    .as_ref()
+                    .map(|inputs| inputs.kind.clone()),
+            )
+        };
+        if let Some(input) = input {
+            input.update(cx, |state, cx| {
+                state.set_selected_values(&kind.into_iter().collect::<Vec<_>>(), window, cx);
+            });
+        }
+        self.table.update(cx, |table, cx| {
+            table
+                .delegate_mut()
+                .request_kind_filter(kind, selected_id, window, cx);
+        });
+        cx.notify();
     }
 
     /// Row selection: the panel follows the id immediately, then prefetch
@@ -2379,6 +2457,7 @@ impl LibraryApp {
                         app.detail_cache.invalidate(&id);
                         app.detail = Some((id, DetailFetch::Loading));
                         app.fetch_detail(id, window, cx);
+                        app.refresh_counts(window, cx);
                         app.table.update(cx, |table, cx| {
                             table
                                 .delegate_mut()
@@ -2616,6 +2695,7 @@ impl LibraryApp {
                         app.detail_cache.invalidate(&id);
                         app.detail = Some((id, DetailFetch::Loading));
                         app.fetch_detail(id, window, cx);
+                        app.refresh_counts(window, cx);
                         // The row may have moved under the current sort;
                         // the reload re-walks the listing and keeps the
                         // highlight on the edited id.
@@ -2652,6 +2732,101 @@ impl LibraryApp {
             (Some(_), _) => DetailView::Loading,
             (None, _) => DetailView::Empty,
         }
+    }
+
+    fn sidebar_row(
+        &self,
+        index: usize,
+        kind: Option<ResourceKind>,
+        label: String,
+        icon: Icon,
+        count: Option<u64>,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let hover = cx.theme().accent;
+        h_flex()
+            .id(("sidebar-entry", index))
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded(px(8.))
+            .when(selected, |row| {
+                row.bg(sidebar_selected_background(cx.theme()))
+            })
+            .hover(move |row| row.bg(hover))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.select_sidebar_kind(kind, window, cx);
+            }))
+            .child(icon.with_size(px(16.)))
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .when_some(count, |row, count| {
+                row.child(
+                    div()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(count.to_string()),
+                )
+            })
+    }
+
+    fn render_left_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.table.read(cx).delegate().filter.kind;
+        let kinds = ResourceKind::ALL
+            .into_iter()
+            .enumerate()
+            .filter(|(_, kind)| {
+                self.counts.as_ref().is_none_or(|counts| {
+                    counts.by_kind.get(kind).copied().unwrap_or(0) > 0 || selected == Some(*kind)
+                })
+            })
+            .collect::<Vec<_>>();
+        v_flex()
+            .id("library-navigation")
+            .size_full()
+            .p_2()
+            .overflow_y_scroll()
+            .text_size(px(12.))
+            .child(self.sidebar_row(
+                0,
+                None,
+                "All items".into(),
+                symbol("books.vertical", AssetIconName::Library),
+                self.counts.as_ref().map(|counts| counts.all_items),
+                selected.is_none(),
+                cx,
+            ))
+            .child(
+                div()
+                    .pt_4()
+                    .pb_1()
+                    .px_2()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Kinds"),
+            )
+            .children(kinds.into_iter().map(|(index, kind)| {
+                self.sidebar_row(
+                    index + 1,
+                    Some(kind),
+                    sidebar_kind_label(kind),
+                    kind_symbol(kind).text_color(kind_color(kind, cx.theme().is_dark())),
+                    self.counts
+                        .as_ref()
+                        .map(|counts| counts.by_kind.get(&kind).copied().unwrap_or(0)),
+                    selected == Some(kind),
+                    cx,
+                )
+            }))
+            .when_some(self.counts_error.as_ref(), |panel, error| {
+                panel.child(
+                    div()
+                        .px_2()
+                        .pt_2()
+                        .text_color(cx.theme().danger)
+                        .child(format!("Counts unavailable: {error}")),
+                )
+            })
     }
 
     /// The right-side sidebar: the edit form while one is open, the detail
@@ -2800,6 +2975,28 @@ fn sidebar_target_width(viewport: Pixels) -> Pixels {
 
 fn left_panel_target_width(open: bool) -> Pixels {
     if open { px(180.) } else { px(0.) }
+}
+
+// Sidebar navigation is neutral; the table keeps its blue active-row tint.
+fn sidebar_selected_background(theme: &ThemeColor) -> Hsla {
+    theme.accent
+}
+
+fn toggle_theme(cx: &mut App) {
+    let mode = if cx.theme().is_dark() {
+        ThemeMode::Light
+    } else {
+        ThemeMode::Dark
+    };
+    crate::theme::apply(mode, cx);
+}
+
+fn sidebar_kind_label(kind: ResourceKind) -> String {
+    match kind {
+        ResourceKind::JournalArticle => "Articles".into(),
+        ResourceKind::Thesis => "Theses".into(),
+        _ => format!("{}s", kind_label(kind)),
+    }
 }
 
 const LIGHT_GRADIENT: (u32, u32) = (0xeae8e2, 0xd9dde5);
@@ -2971,109 +3168,160 @@ impl Render for LibraryApp {
                 }
             }))
             .child(
-                // The toolbar doubles as the window's title bar: the traffic
-                // lights sit in the bar's built-in 80 px left padding, its
-                // empty stretches drag the window, and it draws its own
-                // bottom hairline.
-                TitleBar::new().pl_0().bg(background).child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(
-                            h_flex()
-                                .flex_1()
-                                .min_w_0()
-                                // Reserve the native traffic lights without shifting search off center.
-                                .pl(if cfg!(target_os = "macos") {
-                                    px(80.)
-                                } else {
-                                    px(12.)
-                                })
-                                .child(
-                                    Button::new("toggle-left-panel")
-                                        .ghost()
-                                        .small()
-                                        .icon(if self.left_panel_open {
-                                            Icon::new(AssetIconName::PanelLeftClose)
-                                        } else {
-                                            Icon::new(AssetIconName::PanelLeftOpen)
-                                        })
-                                        .tooltip(if self.left_panel_open {
-                                            "Hide left panel ([)"
-                                        } else {
-                                            "Show left panel ([)"
-                                        })
-                                        .on_click(cx.listener(|this, _, _window, cx| {
-                                            this.toggle_left_panel(cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new("toggle-filters")
-                                        .ghost()
-                                        .small()
-                                        .icon(symbol(
-                                            "line.3.horizontal.decrease",
-                                            IconName::Settings2,
-                                        ))
-                                        .tooltip("Toggle filters")
-                                        .selected(filters_visible)
-                                        .when(filter_active, |button| {
-                                            button.text_color(cx.theme().primary)
-                                        })
-                                        .on_click(cx.listener(|this, _, _window, cx| {
-                                            this.toggle_filters(cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new("toggle-theme")
-                                        .ghost()
-                                        .small()
-                                        .icon(if cx.theme().is_dark() {
-                                            symbol("sun.max", IconName::Sun)
-                                        } else {
-                                            symbol("moon", IconName::Moon)
-                                        })
-                                        .tooltip(if cx.theme().is_dark() {
-                                            "Switch to light theme"
-                                        } else {
-                                            "Switch to dark theme"
-                                        })
-                                        .on_click(cx.listener(|_, _, _window, cx| {
-                                            let mode = if cx.theme().is_dark() {
-                                                ThemeMode::Light
-                                            } else {
-                                                ThemeMode::Dark
-                                            };
-                                            crate::theme::apply(mode, cx);
-                                        })),
-                                ),
-                        )
-                        .when_some(search_input.as_ref(), |bar, input| {
-                            bar.child(
-                                div()
-                                    .id("toolbar-search")
-                                    .w(px(360.))
-                                    .max_w(relative(0.5))
-                                    // Selecting text must not start dragging the window.
-                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                        cx.stop_propagation()
-                                    })
-                                    .on_click(|_, _, cx| cx.stop_propagation())
+                // The toolbar doubles as the window's title bar; reserve space
+                // for the native traffic lights without adding a bottom rule.
+                TitleBar::new()
+                    .h(px(40.))
+                    .pl_0()
+                    .border_0()
+                    .bg(background)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .h_full()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    // Equal flex side regions keep search centered despite asymmetric controls.
+                                    // Keep edge insets on the controls, not these regions,
+                                    // so padding cannot offset the search from window center.
+                                    .items_center()
                                     .child(
-                                        Input::new(input)
-                                            .small()
-                                            .prefix(Icon::new(IconName::Search).small())
-                                            .cleanable(true)
-                                            .w_full(),
+                                        Button::new("toggle-left-panel")
+                                            .ghost()
+                                            .ml(if cfg!(target_os = "macos") {
+                                                px(80.)
+                                            } else {
+                                                px(12.)
+                                            })
+                                            .icon(if self.left_panel_open {
+                                                Icon::new(AssetIconName::PanelLeftClose)
+                                                    .with_size(px(12.))
+                                            } else {
+                                                Icon::new(AssetIconName::PanelLeftOpen)
+                                                    .with_size(px(12.))
+                                            })
+                                            .tooltip(if self.left_panel_open {
+                                                "Hide left panel ([)"
+                                            } else {
+                                                "Show left panel ([)"
+                                            })
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.toggle_left_panel(cx)
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("toggle-filters")
+                                            .ghost()
+                                            .icon(
+                                                symbol(
+                                                    "line.3.horizontal.decrease",
+                                                    IconName::Settings2,
+                                                )
+                                                .with_size(px(12.)),
+                                            )
+                                            .tooltip("Toggle filters")
+                                            .selected(filters_visible)
+                                            .when(filter_active, |button| {
+                                                button.text_color(cx.theme().primary)
+                                            })
+                                            .on_click(cx.listener(|this, _, _window, cx| {
+                                                this.toggle_filters(cx)
+                                            })),
                                     ),
                             )
-                        })
-                        .child(div().flex_1().min_w_0().pr(if cfg!(target_os = "macos") {
-                            px(80.)
-                        } else {
-                            px(12.)
-                        })),
-                ),
+                            .when_some(search_input.as_ref(), |bar, input| {
+                                bar.child(
+                                    div()
+                                        .id("toolbar-search")
+                                        .w(px(440.))
+                                        .max_w(relative(0.5))
+                                        // Selecting text must not start dragging the window.
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(|_, _, cx| cx.stop_propagation())
+                                        .child(
+                                            Input::new(input)
+                                                // Input::h only affects multiline editors; constrain
+                                                // the single-line frame through its style instead.
+                                                .min_h(px(30.))
+                                                .rounded(px(8.))
+                                                .bg(cx.theme().muted)
+                                                .border_color(cx.theme().border)
+                                                .px(px(10.))
+                                                .text_size(px(12.))
+                                                .prefix(
+                                                    Icon::new(IconName::Search)
+                                                        .with_size(px(13.))
+                                                        .text_color(cx.theme().muted_foreground),
+                                                )
+                                                .suffix(
+                                                    div()
+                                                        .pr_1()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child("/"),
+                                                )
+                                                .cleanable(true)
+                                                .w_full(),
+                                        ),
+                                )
+                            })
+                            .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .items_center()
+                                    .justify_end()
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .mr(px(12.))
+                                            .gap_1()
+                                            .pl_2()
+                                            .rounded(px(8.))
+                                            .border_1()
+                                            .border_color(cx.theme().border)
+                                            .bg(cx.theme().background)
+                                            .id("toolbar-theme")
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation()
+                                            })
+                                            .on_click(
+                                                cx.listener(|_, _, _window, cx| toggle_theme(cx)),
+                                            )
+                                            .child(
+                                                div()
+                                                    .size(px(10.))
+                                                    .rounded_full()
+                                                    .bg(cx.theme().primary),
+                                            )
+                                            .child(
+                                                Button::new("toggle-theme")
+                                                    .ghost()
+                                                    .icon(if cx.theme().is_dark() {
+                                                        symbol("sun.max", IconName::Sun)
+                                                            .with_size(px(12.))
+                                                    } else {
+                                                        symbol("moon", IconName::Moon)
+                                                            .with_size(px(12.))
+                                                    })
+                                                    .tooltip(if cx.theme().is_dark() {
+                                                        "Switch to light theme"
+                                                    } else {
+                                                        "Switch to dark theme"
+                                                    })
+                                                    .on_click(cx.listener(|_, _, _window, cx| {
+                                                        cx.stop_propagation();
+                                                        toggle_theme(cx);
+                                                    })),
+                                            ),
+                                    ),
+                            ),
+                    ),
             )
             .child(
                 // Each pane owns its surface; the row's gutters reveal the
@@ -3096,7 +3344,8 @@ impl Render for LibraryApp {
                                 .rounded(ISLAND_RADIUS)
                                 .border_1()
                                 .border_color(cx.theme().border)
-                                .bg(cx.theme().background),
+                                .bg(cx.theme().background)
+                                .child(self.render_left_panel(cx)),
                         )
                     })
                     .child(
@@ -3200,6 +3449,26 @@ mod panel_width_tests {
         assert_eq!(sidebar_target_width(px(240.)), px(240.));
         assert_eq!(sidebar_target_width(px(320.)), px(320.));
         assert_eq!(sidebar_target_width(px(900.)), px(320.));
+    }
+}
+
+#[cfg(test)]
+mod sidebar_selection_tests {
+    use super::sidebar_selected_background;
+    use gpui_kit::component::ThemeColor;
+    use gpui_kit::{Hsla, rgb};
+
+    #[test]
+    fn selected_navigation_uses_neutral_surface_not_blue_list_selection() {
+        let neutral: Hsla = rgb(0xe7e7e7).into();
+        let blue: Hsla = rgb(0x0064ff).into();
+        let theme = ThemeColor {
+            accent: neutral,
+            list_active: blue,
+            ..ThemeColor::default()
+        };
+        assert_eq!(sidebar_selected_background(&theme), neutral);
+        assert_ne!(sidebar_selected_background(&theme), theme.list_active);
     }
 }
 

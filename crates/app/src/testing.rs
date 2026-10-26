@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use oeuvre_core::{
     BibliographicDate, Creator, CreatorRole, Name, NameKey, NewResource, NewSeries, NonEmptyStr,
-    Person, PersonId, Resource, ResourceFilter, ResourceId, ResourceKind, ResourcePage,
-    ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
+    Person, PersonId, Resource, ResourceCounts, ResourceFilter, ResourceId, ResourceKind,
+    ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
     SortedResourcePage, Store, StoreError, StoreHealth, UtcMillis, creator_label_name,
     format_creators_label, primary_creator_sort_key, published_label_from,
 };
@@ -602,6 +602,18 @@ impl Store for MemoryStore {
         // projection path serves both reads.
         let page = self.list_resources_page(None, u32::MAX).await?;
         Ok(page.rows)
+    }
+
+    async fn resource_counts(&self) -> Result<ResourceCounts, StoreError> {
+        let resources = self.resources.lock().expect("MemoryStore lock");
+        let mut counts = ResourceCounts {
+            all_items: resources.len() as u64,
+            ..ResourceCounts::default()
+        };
+        for resource in resources.values() {
+            *counts.by_kind.entry(resource.kind).or_default() += 1;
+        }
+        Ok(counts)
     }
 
     async fn list_resources_page(

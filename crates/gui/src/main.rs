@@ -116,6 +116,8 @@ fn run() -> Result<()> {
                     })),
                     titlebar: Some(TitlebarOptions {
                         title: Some("Oeuvre".into()),
+                        // Center the 14px native controls in the 40px toolbar.
+                        traffic_light_position: Some(point(px(9.), px(13.))),
                         ..TitleBar::title_bar_options()
                     }),
                     // Required on macOS: otherwise the system also handles

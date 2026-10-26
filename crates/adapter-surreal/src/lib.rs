@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use oeuvre_core::{
     BibliographicDate, Creator, CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person,
-    PersonId, Resource, ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery,
-    ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store,
-    StoreError, StoreHealth, UtcMillis, creator_label_name, format_creators_label,
-    published_label_from,
+    PersonId, Resource, ResourceCounts, ResourceFilter, ResourceId, ResourceKind, ResourcePage,
+    ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
+    SortedResourcePage, Store, StoreError, StoreHealth, UtcMillis, creator_label_name,
+    format_creators_label, published_label_from,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -118,6 +118,13 @@ struct ContainerTitleRow {
     id: RecordId,
     #[surreal(wrap)]
     title: NonEmptyStr,
+}
+
+#[derive(Debug, SurrealValue)]
+struct KindCountRow {
+    #[surreal(wrap)]
+    kind: ResourceKind,
+    total: i64,
 }
 
 impl SurrealStore {
@@ -815,6 +822,23 @@ impl Store for SurrealStore {
         Ok(page.rows)
     }
 
+    async fn resource_counts(&self) -> Result<ResourceCounts, StoreError> {
+        let mut response = self
+            .db
+            .query("SELECT kind, count() AS total FROM resource GROUP BY kind")
+            .await
+            .map_err(map_err)?;
+        let rows: Vec<KindCountRow> = response.take(0).map_err(map_err)?;
+        let by_kind: HashMap<ResourceKind, u64> = rows
+            .into_iter()
+            .map(|row| (row.kind, row.total as u64))
+            .collect();
+        Ok(ResourceCounts {
+            all_items: by_kind.values().sum(),
+            by_kind,
+        })
+    }
+
     async fn list_resources_page(
         &self,
         before: Option<ResourceId>,
@@ -1361,6 +1385,45 @@ mod tests {
         let page = store.list_resources_page(None, 3).await.unwrap();
         assert!(page.rows.is_empty());
         assert!(page.next_before.is_none());
+    }
+
+    #[tokio::test]
+    async fn resource_counts_include_rows_beyond_the_first_page() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        assert_eq!(store.resource_counts().await.unwrap().all_items, 0);
+        for (kind, title) in [
+            (ResourceKind::Book, "One"),
+            (ResourceKind::Report, "Two"),
+            (ResourceKind::Book, "Three"),
+        ] {
+            store
+                .create_resource(NewResource {
+                    kind,
+                    title: NonEmptyStr::try_new(title).unwrap(),
+                    creators: vec![],
+                    publisher: None,
+                    published: None,
+                    accessed: None,
+                    parent_id: None,
+                    series_id: None,
+                    series_number: None,
+                })
+                .await
+                .unwrap();
+        }
+        assert!(
+            store
+                .list_resources_page(None, 1)
+                .await
+                .unwrap()
+                .next_before
+                .is_some()
+        );
+        let counts = store.resource_counts().await.unwrap();
+        assert_eq!(counts.all_items, 3);
+        assert_eq!(counts.by_kind.get(&ResourceKind::Book), Some(&2));
+        assert_eq!(counts.by_kind.get(&ResourceKind::Report), Some(&1));
+        assert_eq!(counts.by_kind.get(&ResourceKind::Thesis), None);
     }
 
     #[tokio::test]

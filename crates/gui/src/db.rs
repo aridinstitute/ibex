@@ -2,13 +2,13 @@
 //! page requests over channels, so gpui's executor never runs Surreal I/O.
 
 use oeuvre_app::command::{
-    CreateResource, GetResource, GetResourceDetail, ListPersons, ListResourcesPage,
+    CountResources, CreateResource, GetResource, GetResourceDetail, ListPersons, ListResourcesPage,
     ListResourcesQueryPage, UpdateResource,
 };
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
-    NewResource, Person, Resource, ResourceDetail, ResourceId, ResourcePage, ResourceQuery,
-    SortedResourcePage,
+    NewResource, Person, Resource, ResourceCounts, ResourceDetail, ResourceId, ResourcePage,
+    ResourceQuery, SortedResourcePage,
 };
 use tokio::sync::oneshot;
 
@@ -23,6 +23,9 @@ pub enum DbRequest {
         offset: u64,
         limit: u32,
         reply: oneshot::Sender<Result<SortedResourcePage, String>>,
+    },
+    CountResources {
+        reply: oneshot::Sender<Result<ResourceCounts, String>>,
     },
     GetDetail {
         id: ResourceId,
@@ -109,6 +112,17 @@ impl DbWorker {
                                             Err("unexpected outcome from list_resources_query_page"
                                                 .into())
                                         }
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::CountResources { reply } => {
+                                let result = state
+                                    .execute(Command::CountResources(CountResources))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::CountResources(counts) => Ok(counts),
+                                        _ => Err("unexpected outcome from count_resources".into()),
                                     });
                                 let _ = reply.send(result);
                             }
@@ -212,6 +226,15 @@ impl DbWorker {
                 limit,
                 reply: tx,
             })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    pub async fn resource_counts(&self) -> Result<ResourceCounts, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::CountResources { reply: tx })
             .map_err(|_| "db worker stopped".to_string())?;
         rx.await
             .map_err(|_| "db worker dropped the request".to_string())?
@@ -327,6 +350,19 @@ mod tests {
         }
         assert_eq!(walked, 8);
         assert!(pages >= 3);
+    }
+
+    #[tokio::test]
+    async fn worker_counts_the_full_library_not_just_the_first_page() {
+        let store = MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 5)
+            .await
+            .unwrap();
+        let worker = DbWorker::spawn(AppState::builder(store).surface(Surface::Test).build());
+        assert_eq!(worker.list_page(None, 3).await.unwrap().rows.len(), 3);
+        let counts = worker.resource_counts().await.unwrap();
+        assert_eq!(counts.all_items, 8);
+        assert_eq!(counts.by_kind.values().sum::<u64>(), 8);
     }
 
     #[tokio::test]

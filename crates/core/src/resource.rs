@@ -288,6 +288,13 @@ pub struct ResourcePage {
     pub next_before: Option<ResourceId>,
 }
 
+/// Library-wide resource totals, independent of the current page or filter.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ResourceCounts {
+    pub all_items: u64,
+    pub by_kind: std::collections::HashMap<ResourceKind, u64>,
+}
+
 /// Field a sorted library listing orders by.
 ///
 /// Order keys, shared by every adapter:

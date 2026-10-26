@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use oeuvre_core::{
-    Creator, NewResource, PersonId, Resource, ResourceDetail, ResourceError, ResourceId,
-    ResourcePage, ResourceQuery, ResourceSummary, SeriesId, SortedResourcePage, StoreError,
-    creator_label_name, detail_creator_groups,
+    Creator, NewResource, PersonId, Resource, ResourceCounts, ResourceDetail, ResourceError,
+    ResourceId, ResourcePage, ResourceQuery, ResourceSummary, SeriesId, SortedResourcePage,
+    StoreError, creator_label_name, detail_creator_groups,
 };
 
 use crate::event::{self, Event};
@@ -54,6 +54,9 @@ pub struct ListResourcesQueryPage {
     pub limit: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct CountResources;
+
 pub(crate) struct Created(pub Resource);
 pub(crate) struct Updated(pub Resource);
 pub(crate) struct Fetched(pub Resource);
@@ -61,6 +64,7 @@ pub(crate) struct FetchedDetail(pub ResourceDetail);
 pub(crate) struct Listed(pub Vec<ResourceSummary>);
 pub(crate) struct ListedPage(pub ResourcePage);
 pub(crate) struct ListedQueryPage(pub SortedResourcePage);
+pub(crate) struct Counted(pub ResourceCounts);
 
 impl From<Created> for Outcome {
     fn from(Created(resource): Created) -> Self {
@@ -101,6 +105,12 @@ impl From<ListedPage> for Outcome {
 impl From<ListedQueryPage> for Outcome {
     fn from(ListedQueryPage(page): ListedQueryPage) -> Self {
         Outcome::ListResourcesQueryPage(page)
+    }
+}
+
+impl From<Counted> for Outcome {
+    fn from(Counted(counts): Counted) -> Self {
+        Outcome::CountResources(counts)
     }
 }
 
@@ -416,6 +426,16 @@ impl Handler for ListResources {
 
     async fn run(self, state: &AppState, _ev: &mut Event) -> Result<Listed, CommandError> {
         Ok(Listed(state.store().list_resources().await?))
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for CountResources {
+    const NAME: &'static str = "count_resources";
+    type Output = Counted;
+
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<Counted, CommandError> {
+        Ok(Counted(state.store().resource_counts().await?))
     }
 }
 
