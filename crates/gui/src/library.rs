@@ -1,6 +1,7 @@
 //! Library grid: resource summary rows, one page at a time.
 
 use std::{
+    any::Any,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     ops::Range,
     path::PathBuf,
@@ -122,6 +123,53 @@ fn nest_parent_candidates(
         .into_iter()
         .filter(|c| !blocked.contains(&c.id))
         .collect()
+}
+
+fn can_nest_under(
+    forest: &[CollectionTreeNode],
+    child: CollectionId,
+    parent: CollectionId,
+) -> bool {
+    nest_parent_candidates(forest, child)
+        .iter()
+        .any(|c| c.id == parent)
+}
+
+/// Sidebar-density menu row (12px type). PopupMenu has no public Small size API.
+fn compact_menu_item(
+    label: impl Into<SharedString>,
+    handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> PopupMenuItem {
+    let label = label.into();
+    PopupMenuItem::element(move |_, _| div().text_size(px(12.)).child(label.clone()))
+        .on_click(handler)
+}
+
+/// Payload for dragging a sidebar collection onto another (or the header to unnest).
+#[derive(Clone)]
+struct CollectionDrag {
+    id: CollectionId,
+    name: SharedString,
+    from_parent: Option<CollectionId>,
+}
+
+struct CollectionDragGhost {
+    name: SharedString,
+}
+
+impl Render for CollectionDragGhost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_0p5()
+            .rounded(px(6.))
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().popover_foreground)
+            .text_size(px(12.))
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(self.name.clone())
+    }
 }
 
 /// First page of parent candidates the edit form fetches, already narrowed
@@ -2211,6 +2259,43 @@ impl LibraryApp {
         .detach();
     }
 
+    /// Drag-drop reparent: drop the edge from `from_parent` (if any), then nest under `to_parent`.
+    fn reparent_collection(
+        &mut self,
+        child_id: CollectionId,
+        from_parent: Option<CollectionId>,
+        to_parent: CollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if from_parent == Some(to_parent) {
+            return;
+        }
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            if let Some(old_parent) = from_parent {
+                if worker
+                    .remove_collection_parent(child_id, old_parent)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let result = worker.add_collection_parent(child_id, to_parent).await;
+            _ = app.update_in(window, |app, window, cx| {
+                if result.is_ok() {
+                    app.expanded_collections.insert(to_parent);
+                    app.collection_focus_parent = Some(to_parent);
+                    app.refresh_counts(window, cx);
+                    app.select_sidebar_nav(SidebarNav::Collection(child_id), window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn unnest_collection(
         &mut self,
         child_id: CollectionId,
@@ -3548,11 +3633,24 @@ impl LibraryApp {
             }))
             .child(
                 h_flex()
+                    .id("collections-header")
                     .pt_4()
                     .pb_1()
                     .px_2()
                     .items_center()
                     .gap_1()
+                    .rounded(px(8.))
+                    .can_drop(|dragged: &dyn Any, _, _| {
+                        dragged
+                            .downcast_ref::<CollectionDrag>()
+                            .is_some_and(|drag| drag.from_parent.is_some())
+                    })
+                    .on_drop(cx.listener(|this, drag: &CollectionDrag, window, cx| {
+                        if let Some(parent_id) = drag.from_parent {
+                            this.unnest_collection(drag.id, parent_id, window, cx);
+                        }
+                    }))
+                    .drag_over::<CollectionDrag>(|style, _, _, cx| style.bg(cx.theme().accent))
                     .child(
                         div()
                             .flex_1()
@@ -3578,11 +3676,13 @@ impl LibraryApp {
                 |(index, (collection, depth, has_children, tree_parent))| {
                     let id = collection.id;
                     let name = collection.name.as_str().to_owned();
+                    let drag_name = SharedString::from(name.as_str());
                     let expanded = self.expanded_collections.contains(&id);
                     let selected = selected_collection == Some(id);
                     let renaming = self.renaming_collection == Some(id);
                     let hover = cx.theme().accent;
                     let nest_targets = nest_parent_candidates(&self.collection_forest, id);
+                    let forest = self.collection_forest.clone();
                     let app = cx.weak_entity();
                     h_flex()
                         .id(("collection-row", index))
@@ -3600,69 +3700,95 @@ impl LibraryApp {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.select_collection_row(id, tree_parent, window, cx);
                         }))
+                        .when(!renaming, |row| {
+                            row.on_drag(
+                                CollectionDrag {
+                                    id,
+                                    name: drag_name,
+                                    from_parent: tree_parent,
+                                },
+                                |drag, _, _, cx| {
+                                    cx.new(|_| CollectionDragGhost {
+                                        name: drag.name.clone(),
+                                    })
+                                },
+                            )
+                        })
+                        .can_drop(move |dragged: &dyn Any, _, _| {
+                            dragged
+                                .downcast_ref::<CollectionDrag>()
+                                .is_some_and(|drag| can_nest_under(&forest, drag.id, id))
+                        })
+                        .on_drop(cx.listener(move |this, drag: &CollectionDrag, window, cx| {
+                            this.reparent_collection(
+                                drag.id,
+                                drag.from_parent,
+                                id,
+                                window,
+                                cx,
+                            );
+                        }))
+                        .drag_over::<CollectionDrag>(|style, _, _, cx| style.bg(cx.theme().accent))
                         .context_menu({
                             let nest_targets = nest_targets.clone();
                             move |menu, window, menu_cx| {
                                 let app_rename = app.clone();
                                 let app_unnest = app.clone();
                                 let app_delete = app.clone();
-                                let mut menu = menu.item(
-                                    PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
+                                let mut menu = menu.min_w(px(0.)).item(compact_menu_item(
+                                    "Rename",
+                                    move |_, window, cx| {
                                         let _ = app_rename.update(cx, |this, cx| {
                                             this.select_collection_row(id, tree_parent, window, cx);
                                             this.begin_collection_rename(id, window, cx);
                                         });
-                                    }),
-                                );
+                                    },
+                                ));
                                 if !nest_targets.is_empty() {
                                     let app_nest = app.clone();
                                     menu = menu.submenu("Nest under", window, menu_cx, {
                                         let nest_targets = nest_targets.clone();
                                         move |menu, _, _| {
-                                            let mut menu = menu;
+                                            let mut menu = menu.min_w(px(0.));
                                             for target in &nest_targets {
                                                 let parent_id = target.id;
                                                 let label = target.name.as_str().to_owned();
                                                 let app_nest = app_nest.clone();
-                                                menu = menu.item(
-                                                    PopupMenuItem::new(label).on_click(
-                                                        move |_, window, cx| {
-                                                            let _ = app_nest.update(
-                                                                cx,
-                                                                |this, cx| {
-                                                                    this.nest_collection_under(
-                                                                        id, parent_id, window, cx,
-                                                                    );
-                                                                },
+                                                menu = menu.item(compact_menu_item(
+                                                    label,
+                                                    move |_, window, cx| {
+                                                        let _ = app_nest.update(cx, |this, cx| {
+                                                            this.nest_collection_under(
+                                                                id, parent_id, window, cx,
                                                             );
-                                                        },
-                                                    ),
-                                                );
+                                                        });
+                                                    },
+                                                ));
                                             }
                                             menu
                                         }
                                     });
                                 }
                                 if let Some(parent_id) = tree_parent {
-                                    menu = menu.item(
-                                        PopupMenuItem::new("Unnest").on_click(
-                                            move |_, window, cx| {
-                                                let _ = app_unnest.update(cx, |this, cx| {
-                                                    this.unnest_collection(
-                                                        id, parent_id, window, cx,
-                                                    );
-                                                });
-                                            },
-                                        ),
-                                    );
+                                    menu = menu.item(compact_menu_item(
+                                        "Unnest",
+                                        move |_, window, cx| {
+                                            let _ = app_unnest.update(cx, |this, cx| {
+                                                this.unnest_collection(
+                                                    id, parent_id, window, cx,
+                                                );
+                                            });
+                                        },
+                                    ));
                                 }
-                                menu.item(PopupMenuItem::separator()).item(
-                                    PopupMenuItem::new("Delete").on_click(move |_, window, cx| {
+                                menu.item(PopupMenuItem::separator()).item(compact_menu_item(
+                                    "Delete",
+                                    move |_, window, cx| {
                                         let _ = app_delete.update(cx, |this, cx| {
                                             this.delete_sidebar_collection(id, window, cx);
                                         });
-                                    }),
-                                )
+                                    },
+                                ))
                             }
                         })
                         .child(
