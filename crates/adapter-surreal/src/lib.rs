@@ -1337,6 +1337,19 @@ impl Store for SurrealStore {
         // without the sort field land at the no-data end for the direction
         // via the boolean pre-key (`sort_missing`).
         let fetch_limit = (u64::from(limit) + 1).min(u64::from(u32::MAX)) as usize;
+        // Collection filter expands to the selected id plus descendants so
+        // nested membership matches without the caller walking the graph.
+        let collection_record_ids = if let Some(cid) = query.filter.collection {
+            Some(
+                self.collection_descendant_ids(cid)
+                    .await?
+                    .into_iter()
+                    .map(Self::collection_key)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
         // Filter predicates AND into one WHERE ahead of the order contract;
         // values are bound parameters, never interpolated text.
         let where_sql = filter_where(&query.filter);
@@ -1448,6 +1461,9 @@ impl Store for SurrealStore {
         if let Some(tag) = query.filter.tag {
             statement = statement.bind(("tag_id", Self::tag_key(tag)));
         }
+        if let Some(ids) = collection_record_ids {
+            statement = statement.bind(("collection_ids", ids));
+        }
         if let Some(range) = query.filter.published {
             if let Some(from) = range.from {
                 statement = statement.bind(("published_from", from.as_unix_ms()));
@@ -1522,6 +1538,12 @@ fn filter_where(filter: &ResourceFilter) -> String {
     // Tag alone rides filter_from reverse refs; with a creator source, test membership.
     if filter.tag.is_some() && filter.creator.is_some() {
         clauses.push("tags CONTAINS $tag_id");
+    }
+    // Selected collection plus descendants (bound as `$collection_ids`).
+    if filter.collection.is_some() {
+        clauses.push(
+            "array::len(array::intersect(collections ?? [], $collection_ids)) > 0",
+        );
     }
     // The creator predicate lives in `filter_from`: membership rides the
     // `created` relation, and the source-position traversal is what keeps

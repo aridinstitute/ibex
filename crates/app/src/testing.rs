@@ -364,6 +364,14 @@ impl MemoryStore {
                     range.to.map(|to| to.as_unix_ms()),
                 )
             });
+        let by_collection: Option<HashSet<CollectionId>> = filter.collection.map(|cid| {
+            let edges = self
+                .collection_child_of
+                .lock()
+                .expect("MemoryStore lock")
+                .clone();
+            collection_descendant_closure(cid, edges).into_iter().collect()
+        });
         let resources = self.resources.lock().expect("MemoryStore lock");
         Ok(ids
             .into_iter()
@@ -383,6 +391,15 @@ impl MemoryStore {
                 }
                 if let Some(tag) = filter.tag {
                     if !resource.tag_ids.contains(&tag) {
+                        return false;
+                    }
+                }
+                if let Some(allowed) = by_collection.as_ref() {
+                    if !resource
+                        .collection_ids
+                        .iter()
+                        .any(|cid| allowed.contains(cid))
+                    {
                         return false;
                     }
                 }

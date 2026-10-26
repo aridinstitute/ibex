@@ -411,6 +411,8 @@ pub struct ResourceFilter {
     pub favorite: Option<bool>,
     /// Resources that reference this tag via their `tags` record-link array.
     pub tag: Option<TagId>,
+    /// Resources in this collection or any descendant (via `child_of`).
+    pub collection: Option<CollectionId>,
 }
 
 impl ResourceFilter {
@@ -424,6 +426,7 @@ impl ResourceFilter {
             kind: None,
             favorite: None,
             tag: None,
+            collection: None,
         }
     }
 
@@ -443,6 +446,7 @@ impl ResourceFilter {
             || self.kind.is_some()
             || self.favorite.is_some()
             || self.tag.is_some()
+            || self.collection.is_some()
             || self
                 .published
                 .as_ref()

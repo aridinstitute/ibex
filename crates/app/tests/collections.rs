@@ -2,11 +2,13 @@
 
 use oeuvre_app::command::{
     AddCollectionParent, CreateCollection, CreateResource, DeleteCollection, GetResource,
-    ListCollectionForest,
+    ListCollectionForest, ListResourcesQueryPage,
 };
 use oeuvre_app::testing::MemoryStore;
 use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{NewResource, NonEmptyStr, ResourceKind, Store};
+use oeuvre_core::{
+    NewResource, NonEmptyStr, ResourceFilter, ResourceKind, ResourceQuery, Store,
+};
 
 #[tokio::test]
 async fn create_root_and_nested_collections_list_as_forest() {
@@ -185,4 +187,67 @@ async fn delete_collection_clears_membership_without_deleting_resources() {
     };
     assert_eq!(kept.id, resource.id);
     assert!(kept.collection_ids.is_empty());
+}
+
+#[tokio::test]
+async fn collection_filter_includes_descendant_membership() {
+    let store = MemoryStore::new();
+    let state = AppState::builder(store).surface(Surface::Test).build();
+
+    let Outcome::CreateCollection(root) = state
+        .execute(Command::CreateCollection(CreateCollection {
+            name: NonEmptyStr::try_new("Root").unwrap(),
+            parent_id: None,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreateCollection");
+    };
+    let Outcome::CreateCollection(child) = state
+        .execute(Command::CreateCollection(CreateCollection {
+            name: NonEmptyStr::try_new("Child").unwrap(),
+            parent_id: Some(root.id),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreateCollection");
+    };
+
+    let mut nested = book("In Child");
+    nested.collection_ids = vec![child.id];
+    let Outcome::CreateResource(in_child) = state
+        .execute(Command::CreateResource(CreateResource { new: nested }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreateResource");
+    };
+    state
+        .execute(Command::CreateResource(CreateResource {
+            new: book("Elsewhere"),
+        }))
+        .await
+        .unwrap();
+
+    let Outcome::ListResourcesQueryPage(page) = state
+        .execute(Command::ListResourcesQueryPage(ListResourcesQueryPage {
+            query: ResourceQuery {
+                sort: None,
+                filter: ResourceFilter {
+                    collection: Some(root.id),
+                    ..ResourceFilter::none()
+                },
+            },
+            offset: 0,
+            limit: 10,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected query page");
+    };
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].id, in_child.id);
 }

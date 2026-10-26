@@ -166,6 +166,8 @@ pub trait Store: Send + Sync + 'static {
     /// - `filter.kind` holds when the row's kind equals it;
     /// - `filter.favorite` holds when the row's favorite flag equals it;
     /// - `filter.tag` holds when the row's `tags` array references that tag;
+    /// - `filter.collection` holds when the row's `collections` array
+    ///   references that collection or any of its `child_of` descendants;
     /// - set predicates AND together: a row must satisfy every one.
     ///
     /// `offset` is a 0-based window into the ordered list; the page returns

@@ -47,6 +47,7 @@ pub(crate) const SERIES_TITLE: Key = Key::new("series.title");
 pub(crate) const TAG_ID: Key = Key::new("tag.id");
 pub(crate) const TAG_TEXT: Key = Key::new("tag.text");
 pub(crate) const RESOURCE_FILTER_TAG: Key = Key::new("resource.filter_tag");
+pub(crate) const RESOURCE_FILTER_COLLECTION: Key = Key::new("resource.filter_collection");
 pub(crate) const COLLECTION_ID: Key = Key::new("collection.id");
 pub(crate) const COLLECTION_NAME: Key = Key::new("collection.name");
 pub(crate) const COLLECTION_PARENT_ID: Key = Key::new("collection.parent_id");
@@ -91,6 +92,7 @@ mod tests {
         TAG_ID,
         TAG_TEXT,
         RESOURCE_FILTER_TAG,
+        RESOURCE_FILTER_COLLECTION,
         COLLECTION_ID,
         COLLECTION_NAME,
         COLLECTION_PARENT_ID,
