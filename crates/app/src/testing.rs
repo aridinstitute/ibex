@@ -370,7 +370,9 @@ impl MemoryStore {
                 .lock()
                 .expect("MemoryStore lock")
                 .clone();
-            collection_descendant_closure(cid, edges).into_iter().collect()
+            collection_descendant_closure(cid, edges)
+                .into_iter()
+                .collect()
         });
         let resources = self.resources.lock().expect("MemoryStore lock");
         Ok(ids
@@ -640,10 +642,7 @@ impl Store for MemoryStore {
         let _ = self.get_collection(child).await?;
         let _ = self.get_collection(parent).await?;
         let mut edges = self.collection_child_of.lock().expect("MemoryStore lock");
-        if edges
-            .iter()
-            .any(|(c, p)| *c == child && *p == parent)
-        {
+        if edges.iter().any(|(c, p)| *c == child && *p == parent) {
             return Err(StoreError::invalid(
                 "collection parent edge already exists".to_owned(),
             ));

@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use oeuvre_core::{
     BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole, Name,
-    NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceCounts, ResourceFilter,
-    ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series,
-    SeriesId, SortDirection, SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId,
-    UtcMillis, build_collection_forest, collection_descendant_closure, creator_label_name,
-    format_creators_label, published_label_from,
+    NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceCounts,
+    ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort,
+    ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store, StoreError,
+    StoreHealth, Tag, TagId, UtcMillis, build_collection_forest, collection_descendant_closure,
+    creator_label_name, format_creators_label, published_label_from,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -313,17 +313,21 @@ impl SurrealStore {
             .await;
         let _ = self
             .db
-            .query(
-                "DEFINE TABLE IF NOT EXISTS child_of TYPE RELATION IN collection OUT collection ENFORCED",
-            )
+            .query(format!(
+                "DEFINE TABLE IF NOT EXISTS {CHILD_OF_TABLE} TYPE RELATION IN collection OUT collection ENFORCED"
+            ))
             .await;
         let _ = self
             .db
-            .query("DEFINE INDEX IF NOT EXISTS child_of_in ON TABLE child_of FIELDS in")
+            .query(format!(
+                "DEFINE INDEX IF NOT EXISTS child_of_in ON TABLE {CHILD_OF_TABLE} FIELDS in"
+            ))
             .await;
         let _ = self
             .db
-            .query("DEFINE INDEX IF NOT EXISTS child_of_out ON TABLE child_of FIELDS out")
+            .query(format!(
+                "DEFINE INDEX IF NOT EXISTS child_of_out ON TABLE {CHILD_OF_TABLE} FIELDS out"
+            ))
             .await;
         let _ = self
             .db
@@ -519,7 +523,14 @@ impl SurrealStore {
                 .series_number
                 .as_ref()
                 .map(|s| s.as_str().to_owned()),
-            tags: Some(resource.tag_ids.iter().copied().map(Self::tag_key).collect()),
+            tags: Some(
+                resource
+                    .tag_ids
+                    .iter()
+                    .copied()
+                    .map(Self::tag_key)
+                    .collect(),
+            ),
             collections: Some(
                 resource
                     .collection_ids
@@ -882,7 +893,9 @@ impl Store for SurrealStore {
             .await;
         match created {
             Ok(Some(_)) => Ok(tag),
-            Ok(None) => Err(StoreError::new(format!("create_tag returned empty for {id}"))),
+            Ok(None) => Err(StoreError::new(format!(
+                "create_tag returned empty for {id}"
+            ))),
             Err(err) => {
                 let msg = err.to_string();
                 if msg.contains("unique")
@@ -901,11 +914,7 @@ impl Store for SurrealStore {
     }
 
     async fn get_tag(&self, id: TagId) -> Result<Tag, StoreError> {
-        let row: Option<TagDoc> = self
-            .db
-            .select(Self::tag_key(id))
-            .await
-            .map_err(map_err)?;
+        let row: Option<TagDoc> = self.db.select(Self::tag_key(id)).await.map_err(map_err)?;
         match row {
             Some(doc) => Ok(Tag { id, text: doc.text }),
             None => Err(StoreError::not_found(format!("tag {id}"))),
@@ -985,10 +994,7 @@ impl Store for SurrealStore {
             .await
             .map_err(map_err)?;
         match row {
-            Some(doc) => Ok(Collection {
-                id,
-                name: doc.name,
-            }),
+            Some(doc) => Ok(Collection { id, name: doc.name }),
             None => Err(StoreError::not_found(format!("collection {id}"))),
         }
     }
@@ -1245,9 +1251,7 @@ impl Store for SurrealStore {
             .db
             .query("SELECT kind, count() AS total FROM resource GROUP BY kind")
             .query("SELECT count() AS total FROM resource WHERE favorite = true GROUP ALL")
-            .query(
-                "SELECT id, count(<~(resource FIELD tags)) AS total FROM tag"
-            )
+            .query("SELECT id, count(<~(resource FIELD tags)) AS total FROM tag")
             .await
             .map_err(map_err)?;
         let rows: Vec<KindCountRow> = response.take(0).map_err(map_err)?;
@@ -1541,9 +1545,7 @@ fn filter_where(filter: &ResourceFilter) -> String {
     }
     // Selected collection plus descendants (bound as `$collection_ids`).
     if filter.collection.is_some() {
-        clauses.push(
-            "array::len(array::intersect(collections ?? [], $collection_ids)) > 0",
-        );
+        clauses.push("array::len(array::intersect(collections ?? [], $collection_ids)) > 0");
     }
     // The creator predicate lives in `filter_from`: membership rides the
     // `created` relation, and the source-position traversal is what keeps
@@ -1604,7 +1606,8 @@ mod tests {
                     series_id: None,
                     series_number: None,
                     tag_ids: vec![],
-                    collection_ids: vec![],                })
+                    collection_ids: vec![],
+                })
                 .await
                 .unwrap();
             if ["Mixed Needle title", "Publisher only", "Needle in both"].contains(&title) {
@@ -1701,7 +1704,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap()
     }
@@ -1744,7 +1748,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
         store
@@ -1763,7 +1768,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
 
@@ -1810,7 +1816,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1898,7 +1905,8 @@ mod tests {
                     series_id: None,
                     series_number: None,
                     tag_ids: vec![],
-                    collection_ids: vec![],                })
+                    collection_ids: vec![],
+                })
                 .await
                 .unwrap();
         }
@@ -1940,7 +1948,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
 
@@ -2029,7 +2038,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap()
     }
@@ -2047,7 +2057,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap()
     }
@@ -2332,7 +2343,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap()
     }
@@ -2593,6 +2605,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         }
     }
@@ -2695,6 +2708,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         };
         let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
@@ -2717,6 +2731,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         }
     }
@@ -2810,6 +2825,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         };
         let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
@@ -2884,6 +2900,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         }
     }
@@ -3012,6 +3029,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         };
         let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
@@ -3085,6 +3103,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         };
         let page = store
@@ -3287,7 +3306,8 @@ mod tests {
                 series_id: Some(series.id),
                 series_number: Some(NonEmptyStr::try_new("LCL 26").unwrap()),
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
 
@@ -3353,7 +3373,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
 
@@ -3431,7 +3452,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
         // Create stamps both record-keeping dates with one instant.
@@ -3561,7 +3583,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
 
@@ -3694,7 +3717,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
 
@@ -3743,7 +3767,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
 
@@ -3776,7 +3801,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
 
@@ -3802,7 +3828,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
 
@@ -3869,7 +3896,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![tag.id],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
         store
@@ -3884,7 +3912,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
 

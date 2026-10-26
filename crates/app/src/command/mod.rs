@@ -6,7 +6,8 @@ mod series;
 mod tag;
 
 pub use collection::{
-    AddCollectionParent, CreateCollection, DeleteCollection, DeletedCollection, ListCollectionForest,
+    AddCollectionParent, CreateCollection, DeleteCollection, DeletedCollection,
+    ListCollectionForest,
 };
 pub use health::{Health, HealthReport};
 pub use person::{

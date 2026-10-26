@@ -2,14 +2,15 @@
 //! page requests over channels, so gpui's executor never runs Surreal I/O.
 
 use oeuvre_app::command::{
-    CountResources, CreateResource, CreateTag, FindTagByText, GetResource, GetResourceDetail,
-    ListPersons, ListResourcesPage, ListResourcesQueryPage, ListTags, SetResourceFavorite,
-    UpdateResource,
+    CountResources, CreateCollection, CreateResource, CreateTag, DeleteCollection, FindTagByText,
+    GetResource, GetResourceDetail, ListCollectionForest, ListPersons, ListResourcesPage,
+    ListResourcesQueryPage, ListTags, SetResourceFavorite, UpdateResource,
 };
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
-    NewResource, NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId,
-    ResourcePage, ResourceQuery, SortedResourcePage, Tag,
+    Collection, CollectionId, CollectionTreeNode, NewResource, NonEmptyStr, Person, Resource,
+    ResourceCounts, ResourceDetail, ResourceId, ResourcePage, ResourceQuery, SortedResourcePage,
+    Tag,
 };
 use tokio::sync::oneshot;
 
@@ -63,6 +64,18 @@ pub enum DbRequest {
     FindTagByText {
         text: NonEmptyStr,
         reply: oneshot::Sender<Result<Option<Tag>, String>>,
+    },
+    ListCollectionForest {
+        reply: oneshot::Sender<Result<Vec<CollectionTreeNode>, String>>,
+    },
+    CreateCollection {
+        name: NonEmptyStr,
+        parent_id: Option<CollectionId>,
+        reply: oneshot::Sender<Result<Collection, String>>,
+    },
+    DeleteCollection {
+        id: CollectionId,
+        reply: oneshot::Sender<Result<(), String>>,
     },
 }
 
@@ -251,8 +264,53 @@ impl DbWorker {
                                     .map_err(|e| e.to_string())
                                     .and_then(|outcome| match outcome {
                                         Outcome::FindTagByText(tag) => Ok(tag),
+                                        _ => Err("unexpected outcome from find_tag_by_text".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::ListCollectionForest { reply } => {
+                                let result = state
+                                    .execute(Command::ListCollectionForest(ListCollectionForest))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::ListCollectionForest(forest) => Ok(forest),
                                         _ => {
-                                            Err("unexpected outcome from find_tag_by_text".into())
+                                            Err("unexpected outcome from list_collection_forest"
+                                                .into())
+                                        }
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::CreateCollection {
+                                name,
+                                parent_id,
+                                reply,
+                            } => {
+                                let result = state
+                                    .execute(Command::CreateCollection(CreateCollection {
+                                        name,
+                                        parent_id,
+                                    }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::CreateCollection(collection) => Ok(collection),
+                                        _ => {
+                                            Err("unexpected outcome from create_collection".into())
+                                        }
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::DeleteCollection { id, reply } => {
+                                let result = state
+                                    .execute(Command::DeleteCollection(DeleteCollection { id }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::DeleteCollection(_) => Ok(()),
+                                        _ => {
+                                            Err("unexpected outcome from delete_collection".into())
                                         }
                                     });
                                 let _ = reply.send(result);
@@ -345,6 +403,41 @@ impl DbWorker {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DbRequest::FindTagByText { text, reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    pub async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::ListCollectionForest { reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    pub async fn create_collection(
+        &self,
+        name: NonEmptyStr,
+        parent_id: Option<CollectionId>,
+    ) -> Result<Collection, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::CreateCollection {
+                name,
+                parent_id,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    pub async fn delete_collection(&self, id: CollectionId) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::DeleteCollection { id, reply: tx })
             .map_err(|_| "db worker stopped".to_string())?;
         rx.await
             .map_err(|_| "db worker dropped the request".to_string())?
@@ -581,6 +674,7 @@ mod tests {
                         kind: None,
                         favorite: None,
                         tag: None,
+                        collection: None,
                     },
                 },
                 0,
@@ -655,6 +749,7 @@ mod tests {
                         kind: None,
                         favorite: None,
                         tag: None,
+                        collection: None,
                     },
                 },
                 0,
@@ -699,6 +794,7 @@ mod tests {
                         kind: None,
                         favorite: None,
                         tag: None,
+                        collection: None,
                     },
                 },
                 0,
@@ -750,6 +846,7 @@ mod tests {
                         kind: None,
                         favorite: None,
                         tag: None,
+                        collection: None,
                     },
                 },
                 0,
@@ -824,7 +921,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            })
+                collection_ids: vec![],
+            })
             .await
             .unwrap();
         assert_eq!(created.title.as_str(), "Inline draft book");

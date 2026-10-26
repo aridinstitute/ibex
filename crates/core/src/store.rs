@@ -1,9 +1,9 @@
 //! Storage port. Adapters implement this; commands call it through `AppState`.
 
 use crate::{
-    Collection, CollectionId, CollectionTreeNode, Name, NewResource, NewSeries, NonEmptyStr, Person,
-    PersonError, PersonId, Resource, ResourceError, ResourceId, ResourcePage, ResourceQuery,
-    ResourceSummary, Series, SeriesId, SortedResourcePage, Tag, TagId,
+    Collection, CollectionId, CollectionTreeNode, Name, NewResource, NewSeries, NonEmptyStr,
+    Person, PersonError, PersonId, Resource, ResourceError, ResourceId, ResourcePage,
+    ResourceQuery, ResourceSummary, Series, SeriesId, SortedResourcePage, Tag, TagId,
 };
 
 /// Storage backend. Grows one method per capability a command needs.

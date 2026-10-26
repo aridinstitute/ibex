@@ -257,19 +257,15 @@ impl Handler for CreateResource {
         }
 
         for tag_id in &self.new.tag_ids {
-            state
-                .store()
-                .get_tag(*tag_id)
-                .await
-                .map_err(|e| {
-                    if e.is_not_found() {
-                        CommandError::NotFound(tag_id.to_string())
-                    } else if e.is_invalid() {
-                        CommandError::Invalid(e.message.clone())
-                    } else {
-                        CommandError::Store(e)
-                    }
-                })?;
+            state.store().get_tag(*tag_id).await.map_err(|e| {
+                if e.is_not_found() {
+                    CommandError::NotFound(tag_id.to_string())
+                } else if e.is_invalid() {
+                    CommandError::Invalid(e.message.clone())
+                } else {
+                    CommandError::Store(e)
+                }
+            })?;
         }
 
         for collection_id in &self.new.collection_ids {
@@ -356,19 +352,15 @@ impl Handler for UpdateResource {
         }
 
         for tag_id in &self.new.tag_ids {
-            state
-                .store()
-                .get_tag(*tag_id)
-                .await
-                .map_err(|e| {
-                    if e.is_not_found() {
-                        CommandError::NotFound(tag_id.to_string())
-                    } else if e.is_invalid() {
-                        CommandError::Invalid(e.message.clone())
-                    } else {
-                        CommandError::Store(e)
-                    }
-                })?;
+            state.store().get_tag(*tag_id).await.map_err(|e| {
+                if e.is_not_found() {
+                    CommandError::NotFound(tag_id.to_string())
+                } else if e.is_invalid() {
+                    CommandError::Invalid(e.message.clone())
+                } else {
+                    CommandError::Store(e)
+                }
+            })?;
         }
 
         for collection_id in &self.new.collection_ids {
@@ -503,19 +495,15 @@ impl Handler for GetResourceDetail {
 
         let mut tags = Vec::with_capacity(resource.tag_ids.len());
         for tag_id in &resource.tag_ids {
-            let tag = state
-                .store()
-                .get_tag(*tag_id)
-                .await
-                .map_err(|e| {
-                    if e.is_not_found() {
-                        CommandError::NotFound(tag_id.to_string())
-                    } else if e.is_invalid() {
-                        CommandError::Invalid(e.message.clone())
-                    } else {
-                        CommandError::Store(e)
-                    }
-                })?;
+            let tag = state.store().get_tag(*tag_id).await.map_err(|e| {
+                if e.is_not_found() {
+                    CommandError::NotFound(tag_id.to_string())
+                } else if e.is_invalid() {
+                    CommandError::Invalid(e.message.clone())
+                } else {
+                    CommandError::Store(e)
+                }
+            })?;
             tags.push(tag);
         }
 

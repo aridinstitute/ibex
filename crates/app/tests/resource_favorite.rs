@@ -21,7 +21,8 @@ fn bare_book(title: &str) -> NewResource {
         series_id: None,
         series_number: None,
         tag_ids: vec![],
-        collection_ids: vec![],    }
+        collection_ids: vec![],
+    }
 }
 
 #[tokio::test]
@@ -83,6 +84,7 @@ async fn favorite_toggles_filters_and_counts_with_one_event() {
                 filter: ResourceFilter {
                     favorite: Some(true),
                     tag: None,
+                    collection: None,
                     ..ResourceFilter::none()
                 },
             },

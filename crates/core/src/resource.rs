@@ -950,7 +950,8 @@ mod tests {
             series_id: None,
             series_number: None,
             tag_ids: vec![],
-            collection_ids: vec![],        }
+            collection_ids: vec![],
+        }
     }
 
     #[test]
@@ -1063,7 +1064,8 @@ mod tests {
                     series_id: None,
                     series_number: None,
                     tag_ids: vec![],
-                    collection_ids: vec![],                },
+                    collection_ids: vec![],
+                },
             )
             .unwrap();
             assert!(resource.creators.is_empty());
@@ -1168,7 +1170,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            },
+                collection_ids: vec![],
+            },
         )
         .unwrap_err();
         assert_eq!(err, ResourceError::ParentRequired);
@@ -1189,7 +1192,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            },
+                collection_ids: vec![],
+            },
         )
         .unwrap();
         assert!(without.parent_id.is_none());
@@ -1208,7 +1212,8 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-                collection_ids: vec![],            },
+                collection_ids: vec![],
+            },
         )
         .unwrap();
         assert_eq!(with.parent_id, Some(parent));
@@ -1229,7 +1234,8 @@ mod tests {
                 series_id: None,
                 series_number: Some(title("LCL 26")),
                 tag_ids: vec![],
-                collection_ids: vec![],            },
+                collection_ids: vec![],
+            },
         )
         .unwrap_err();
         assert_eq!(err, ResourceError::SeriesNumberWithoutSeries);
@@ -1251,7 +1257,8 @@ mod tests {
                 series_id: Some(series_id),
                 series_number: Some(title("LCL 26")),
                 tag_ids: vec![],
-                collection_ids: vec![],            },
+                collection_ids: vec![],
+            },
         )
         .unwrap();
         assert_eq!(
@@ -1367,7 +1374,8 @@ mod tests {
             series_id: Some(SeriesId::generate()),
             series_number: Some(title("3")),
             tag_ids: vec![],
-            collection_ids: vec![],        };
+            collection_ids: vec![],
+        };
         let stored = Resource::try_new(ResourceId::generate(), new.clone()).unwrap();
         assert_eq!(stored.to_new(), new);
     }

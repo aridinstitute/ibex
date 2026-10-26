@@ -6,9 +6,7 @@ use oeuvre_app::command::{
 };
 use oeuvre_app::testing::MemoryStore;
 use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{
-    NewResource, NonEmptyStr, ResourceFilter, ResourceKind, ResourceQuery, Store,
-};
+use oeuvre_core::{NewResource, NonEmptyStr, ResourceFilter, ResourceKind, ResourceQuery, Store};
 
 #[tokio::test]
 async fn create_root_and_nested_collections_list_as_forest() {
@@ -144,9 +142,8 @@ async fn delete_cascades_exclusive_children_but_preserves_shared() {
     assert!(
         !forest
             .iter()
-            .flat_map(|n| std::iter::once(n.collection.id).chain(
-                n.children.iter().map(|c| c.collection.id)
-            ))
+            .flat_map(|n| std::iter::once(n.collection.id)
+                .chain(n.children.iter().map(|c| c.collection.id)))
             .any(|id| id == exclusive.id || id == alpha.id)
     );
 }

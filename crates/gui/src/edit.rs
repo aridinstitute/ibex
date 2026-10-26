@@ -106,7 +106,8 @@ pub fn build_create(draft: &EditDraft) -> Result<NewResource, String> {
         series_id: None,
         series_number: None,
         tag_ids: vec![],
-        collection_ids: vec![],    };
+        collection_ids: vec![],
+    };
     apply_draft_fields(&mut new, draft)?;
     Ok(new)
 }
@@ -267,7 +268,8 @@ mod tests {
                 series_id: Some(SeriesId::generate()),
                 series_number: Some(NonEmptyStr::try_new("LCL 26").expect("number")),
                 tag_ids: vec![],
-                collection_ids: vec![],            },
+                collection_ids: vec![],
+            },
         )
         .expect("record valid")
     }
@@ -284,7 +286,8 @@ mod tests {
             series_number: "".into(),
             creators,
             tag_ids: Vec::new(),
-            collection_ids: vec![],        }
+            collection_ids: vec![],
+        }
     }
 
     #[test]
