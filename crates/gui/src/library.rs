@@ -25,7 +25,7 @@ use gpui_kit::{Focusable as _, *};
 use oeuvre_core::{
     NonEmptyStr, ParentRule, Person, PersonId, PublishedRange, Resource, ResourceCounts,
     ResourceDetail, ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery,
-    ResourceSort, ResourceSummary, SortDirection, UtcMillis, format_recorded_date,
+    ResourceSort, ResourceSummary, SortDirection, Tag, TagId, UtcMillis, format_recorded_date,
 };
 
 use crate::db::DbWorker;
@@ -42,6 +42,7 @@ use crate::inline_edit::{
 };
 use crate::kind::{kind_color, kind_label, kind_symbol};
 use crate::settings::Settings;
+use crate::tags::{TagChoice, TagDelegate};
 
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
 /// enough that the demo library spans several pages.
@@ -1265,12 +1266,13 @@ fn prefetch_window(row_ix: usize, rows_count: usize) -> Range<usize> {
     start..end
 }
 
-/// Left-nav selection: All items, Favorites, or one kind.
+/// Left-nav selection: All items, Favorites, one kind, or one tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SidebarNav {
     All,
     Favorites,
     Kind(ResourceKind),
+    Tag(TagId),
 }
 
 pub struct LibraryApp {
@@ -1286,6 +1288,10 @@ pub struct LibraryApp {
     counts: Option<ResourceCounts>,
     counts_error: Option<String>,
     counts_gen: u64,
+    /// Library tags for the left-nav section, ordered by text.
+    tags: Vec<Tag>,
+    /// Detail-pane autocomplete for attaching a library tag or creating one.
+    tag_picker: Entity<ComboboxState<TagDelegate>>,
     /// Row selection, tracked here so the panel shows one resource exactly
     /// as long as its row stays selected.
     selected: Option<ResourceId>,
@@ -1339,6 +1345,9 @@ struct EditForm {
     accessed_year: Entity<InputState>,
     series: Entity<InputState>,
     series_number: Entity<InputState>,
+    /// Tags staged for save: order matches the form rows; the Combobox
+    /// adds, the row × removes, neither writes until Save.
+    tags: Vec<Tag>,
     /// The form's own line of complaint: a rejected payload or a failed
     /// save, shown until the next attempt.
     error: Option<String>,
@@ -1359,12 +1368,18 @@ impl EditForm {
     /// changes re-key the parent options through `worker`.
     fn new(
         record: Resource,
+        library_tags: &[Tag],
         worker: &DbWorker,
         people: &[Person],
         window: &mut Window,
         cx: &mut Context<LibraryApp>,
     ) -> Self {
         let draft = prefill_draft(&record);
+        let tags: Vec<Tag> = draft
+            .tag_ids
+            .iter()
+            .filter_map(|id| library_tags.iter().find(|tag| tag.id == *id).cloned())
+            .collect();
         let items = kind_items();
         // The box keys rows by position: the kind's row in the alphabetized
         // list is its selection. The list carries every kind, so the lookup
@@ -1455,6 +1470,7 @@ impl EditForm {
             accessed_year: prefill_input(draft.accessed_year, "Year", window, cx),
             series: prefill_input(draft.series, "Series id", window, cx),
             series_number: prefill_input(draft.series_number, "e.g. LCL 26", window, cx),
+            tags,
             record: Box::new(record),
             error: None,
             saving: false,
@@ -1488,6 +1504,7 @@ impl EditForm {
                 &self.creators.read(cx).selected_values(),
                 &self.record.to_new().creators,
             ),
+            tag_ids: self.tags.iter().map(|tag| tag.id).collect(),
         }
     }
 }
@@ -1777,6 +1794,40 @@ impl LibraryApp {
         })
         .detach();
 
+        // Edit-form Combobox: searchable library tags plus a Create row.
+        // Picks stage onto the form; Save writes them with the rest.
+        let tag_picker = cx.new(|cx| {
+            ComboboxState::new(TagDelegate::new(&[], &[]), Vec::new(), window, cx).searchable(true)
+        });
+        cx.subscribe_in(
+            &tag_picker,
+            window,
+            |this, picker, event: &ComboboxEvent<TagDelegate>, window, cx| {
+                let ComboboxEvent::Change(values) = event else {
+                    return;
+                };
+                let Some(choice) = values.first().cloned() else {
+                    return;
+                };
+                picker.update(cx, |state, cx| {
+                    state.set_selected_indices(Vec::new(), window, cx);
+                    state.set_query("", window, cx);
+                });
+                this.stage_tag_on_edit_form(choice, window, cx);
+            },
+        )
+        .detach();
+        let worker_tags = table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let tags = worker_tags.list_tags().await.unwrap_or_default();
+            _ = app.update_in(window, |app, window, cx| {
+                app.tags = tags;
+                app.sync_tag_picker(window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+
         Self {
             table,
             settings_dir,
@@ -1787,6 +1838,8 @@ impl LibraryApp {
             counts: None,
             counts_error: None,
             counts_gen: 0,
+            tags: Vec::new(),
+            tag_picker,
             selected: None,
             detail: None,
             detail_cache: DetailCache::new(),
@@ -1825,11 +1878,118 @@ impl LibraryApp {
         let worker = self.table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
             let result = worker.resource_counts().await;
-            _ = app.update_in(window, |app, _window, cx| {
+            let tags = worker.list_tags().await.unwrap_or_default();
+            _ = app.update_in(window, |app, window, cx| {
+                app.tags = tags;
+                app.sync_tag_picker(window, cx);
                 app.set_counts(result, generation, cx)
             });
         })
         .detach();
+    }
+
+    /// Rebuild the edit-form tag Combobox from the library list minus tags
+    /// already staged on the form, so suggestions stay attachable.
+    fn sync_tag_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let staged = match &self.edit {
+            Some(EditFetch::Ready(form)) => form.tags.clone(),
+            _ => Vec::new(),
+        };
+        let staged_ids: HashSet<TagId> = staged.iter().map(|tag| tag.id).collect();
+        let available: Vec<Tag> = self
+            .tags
+            .iter()
+            .filter(|tag| !staged_ids.contains(&tag.id))
+            .cloned()
+            .collect();
+        let blocked: Vec<String> = staged
+            .iter()
+            .map(|tag| tag.text.as_str().to_lowercase())
+            .collect();
+        self.tag_picker.update(cx, |state, cx| {
+            state.set_items(TagDelegate::new(&available, &blocked), window, cx);
+        });
+    }
+
+    /// Stage a Combobox pick onto the open edit form (create a new library
+    /// tag when the row was Create). Does not write the resource until Save.
+    fn stage_tag_on_edit_form(
+        &mut self,
+        choice: TagChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(self.edit, Some(EditFetch::Ready(_))) {
+            return;
+        }
+        match choice {
+            TagChoice::Existing(tag_id) => {
+                let Some(tag) = self.tags.iter().find(|tag| tag.id == tag_id).cloned() else {
+                    return;
+                };
+                if let Some(EditFetch::Ready(form)) = &mut self.edit {
+                    if !form.tags.iter().any(|t| t.id == tag.id) {
+                        form.tags.push(tag);
+                    }
+                }
+                self.sync_tag_picker(window, cx);
+                cx.notify();
+            }
+            TagChoice::Create(raw) => {
+                let Ok(text) = NonEmptyStr::try_new(raw.trim()) else {
+                    return;
+                };
+                let worker = self.table.read(cx).delegate().worker().clone();
+                cx.spawn_in(window, async move |app, window| {
+                    let result = match worker.find_tag_by_text(text.clone()).await {
+                        Ok(Some(tag)) => Ok(tag),
+                        Ok(None) => worker.create_tag(text).await,
+                        Err(err) => Err(err),
+                    };
+                    _ = app.update_in(window, |app, window, cx| {
+                        match result {
+                            Ok(tag) => {
+                                if !app.tags.iter().any(|t| t.id == tag.id) {
+                                    app.tags.push(tag.clone());
+                                    app.tags.sort_by(|a, b| {
+                                        a.text.as_str().cmp(b.text.as_str())
+                                    });
+                                }
+                                if let Some(EditFetch::Ready(form)) = &mut app.edit {
+                                    if !form.tags.iter().any(|t| t.id == tag.id) {
+                                        form.tags.push(tag);
+                                    }
+                                    form.error = None;
+                                }
+                                app.sync_tag_picker(window, cx);
+                            }
+                            Err(err) => {
+                                if let Some(EditFetch::Ready(form)) = &mut app.edit {
+                                    form.error = Some(err);
+                                }
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    /// Drop one staged tag from the open edit form.
+    fn unstage_tag_on_edit_form(
+        &mut self,
+        tag_id: TagId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        form.tags.retain(|tag| tag.id != tag_id);
+        self.sync_tag_picker(window, cx);
+        cx.notify();
     }
 
     fn select_sidebar_nav(&mut self, nav: SidebarNav, window: &mut Window, cx: &mut Context<Self>) {
@@ -1846,11 +2006,15 @@ impl LibraryApp {
         };
         let kind = match nav {
             SidebarNav::Kind(kind) => Some(kind),
-            SidebarNav::All | SidebarNav::Favorites => None,
+            SidebarNav::All | SidebarNav::Favorites | SidebarNav::Tag(_) => None,
         };
         let favorite = match nav {
             SidebarNav::Favorites => Some(true),
-            SidebarNav::All | SidebarNav::Kind(_) => None,
+            SidebarNav::All | SidebarNav::Kind(_) | SidebarNav::Tag(_) => None,
+        };
+        let tag = match nav {
+            SidebarNav::Tag(id) => Some(id),
+            SidebarNav::All | SidebarNav::Favorites | SidebarNav::Kind(_) => None,
         };
         if let Some(input) = input {
             input.update(cx, |state, cx| {
@@ -1859,15 +2023,17 @@ impl LibraryApp {
         }
         self.table.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
-            // Apply both predicates in one reload so All/Favorites never
-            // briefly flash the previous listing.
+            // Apply predicates in one reload so nav never briefly flashes
+            // the previous listing.
             let kind_changed = delegate.filter.kind != kind;
             let favorite_changed = delegate.filter.favorite != favorite;
-            if !kind_changed && !favorite_changed {
+            let tag_changed = delegate.filter.tag != tag;
+            if !kind_changed && !favorite_changed && !tag_changed {
                 return;
             }
             delegate.filter.kind = kind;
             delegate.filter.favorite = favorite;
+            delegate.filter.tag = tag;
             delegate.reload_from_top(selected_id, None, window, cx);
         });
         cx.notify();
@@ -1987,6 +2153,7 @@ impl LibraryApp {
     fn show_detail(&mut self, id: ResourceId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(detail) = self.detail_cache.get(&id) {
             self.detail = Some((id, DetailFetch::Loaded(Box::new(detail.clone()))));
+            self.sync_tag_picker(window, cx);
             return;
         }
         if self
@@ -2030,7 +2197,7 @@ impl LibraryApp {
         let worker = self.table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
             let reply = worker.resource_detail(id).await;
-            _ = app.update_in(window, |app, _window, cx| {
+            _ = app.update_in(window, |app, window, cx| {
                 app.detail_inflight.remove(&id);
                 // The record this reply describes was edited after the
                 // fetch was issued; it must not enter the cache or the
@@ -2051,6 +2218,7 @@ impl LibraryApp {
                                     app.detail_cache.get(&id).expect("just inserted").clone(),
                                 )),
                             ));
+                            app.sync_tag_picker(window, cx);
                             cx.notify();
                         }
                     }
@@ -2230,7 +2398,7 @@ impl LibraryApp {
     /// and focuses the title field; a second press closes without saving.
     fn toggle_edit_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.edit {
-            Some(EditFetch::Ready(_)) => self.cancel_edit(cx),
+            Some(EditFetch::Ready(_)) => self.cancel_edit(window, cx),
             Some(EditFetch::Loading(_)) => {}
             None => self.request_edit(window, cx),
         }
@@ -2606,7 +2774,8 @@ impl LibraryApp {
                         {
                             let parent_id = record.parent_id;
                             let rule = record.kind.parent_rule();
-                            let form = EditForm::new(record, &worker, &people, window, cx);
+                            let form =
+                                EditForm::new(record, &app.tags, &worker, &people, window, cx);
                             let title = form.title.clone();
                             app.edit = Some(EditFetch::Ready(Box::new(form)));
                             // Land the caret in the title so `e` opens ready
@@ -2614,6 +2783,7 @@ impl LibraryApp {
                             title.update(cx, |state, cx| {
                                 state.focus(window, cx);
                             });
+                            app.sync_tag_picker(window, cx);
                             app.load_parent_options(
                                 worker.clone(),
                                 id,
@@ -2733,8 +2903,9 @@ impl LibraryApp {
     }
 
     /// Close the form without writing; the panel falls back to the detail.
-    fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+    fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.edit = None;
+        self.sync_tag_picker(window, cx);
         cx.notify();
     }
 
@@ -2864,7 +3035,9 @@ impl LibraryApp {
     fn render_left_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let filter = self.table.read(cx).delegate().filter.clone();
         let selected_kind = filter.kind;
-        let all_selected = filter.kind.is_none() && filter.favorite.is_none();
+        let selected_tag = filter.tag;
+        let all_selected =
+            filter.kind.is_none() && filter.favorite.is_none() && filter.tag.is_none();
         let favorites_selected = filter.favorite == Some(true);
         let kinds = ResourceKind::ALL
             .into_iter()
@@ -2923,6 +3096,33 @@ impl LibraryApp {
                     cx,
                 )
             }))
+            .child(
+                div()
+                    .pt_4()
+                    .pb_1()
+                    .px_2()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Tags"),
+            )
+            .children(self.tags.iter().enumerate().filter_map(|(index, tag)| {
+                let count = self
+                    .counts
+                    .as_ref()
+                    .map(|counts| counts.by_tag.get(&tag.id).copied().unwrap_or(0))
+                    .unwrap_or(0);
+                if count == 0 && selected_tag != Some(tag.id) {
+                    return None;
+                }
+                Some(self.sidebar_row(
+                    index + 100,
+                    SidebarNav::Tag(tag.id),
+                    tag.text.as_str().to_owned(),
+                    symbol("tag", AssetIconName::Library).with_size(px(16.)),
+                    Some(count),
+                    selected_tag == Some(tag.id),
+                    cx,
+                ))
+            }))
             .when_some(self.counts_error.as_ref(), |panel, error| {
                 panel.child(
                     div()
@@ -2942,49 +3142,62 @@ impl LibraryApp {
     fn render_side_panel(&self, cx: &mut Context<Self>) -> Div {
         match &self.edit {
             Some(EditFetch::Ready(form)) => self.render_edit_panel(form, cx),
-            Some(EditFetch::Loading(_)) => render_panel(DetailView::Loading, None, cx),
+            Some(EditFetch::Loading(_)) => render_panel(DetailView::Loading, None, None, cx),
             None => {
                 let favorited = match self.detail_view() {
                     DetailView::Fields(detail) => Some(detail.favorite),
                     _ => None,
                 };
-                let actions =
-                    self.selected.is_some().then(|| {
-                        let star = match favorited {
-                            Some(true) => symbol("star.fill", AssetIconName::StarFill),
-                            _ => symbol("star", AssetIconName::Star),
-                        }
-                        .with_size(px(16.))
-                        .text_color(favorite_star_color(cx.theme().is_dark()));
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Button::new("toggle-favorite")
-                                    .ghost()
-                                    .icon(star)
-                                    .tooltip(if favorited == Some(true) {
-                                        "Remove from favorites"
-                                    } else {
-                                        "Add to favorites"
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_favorite(window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("edit-resource")
-                                    .ghost()
-                                    .icon(
-                                        symbol("pencil", AssetIconName::PenLine).with_size(px(16.)),
-                                    )
-                                    .tooltip("Edit resource")
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                let actions = self.selected.is_some().then(|| {
+                    let star = match favorited {
+                        Some(true) => symbol("star.fill", AssetIconName::StarFill),
+                        _ => symbol("star", AssetIconName::Star),
+                    }
+                    .with_size(px(16.))
+                    .text_color(favorite_star_color(cx.theme().is_dark()));
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new("toggle-favorite")
+                                .ghost()
+                                .icon(star)
+                                .tooltip(if favorited == Some(true) {
+                                    "Remove from favorites"
+                                } else {
+                                    "Add to favorites"
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_favorite(window, cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("edit-resource")
+                                .ghost()
+                                .icon(symbol("pencil", AssetIconName::PenLine).with_size(px(16.)))
+                                .tooltip("Edit resource")
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
                                         this.request_edit(window, cx)
-                                    })),
-                            )
-                            .into_any_element()
-                    });
-                render_panel(self.detail_view(), actions, cx)
+                                    }),
+                                ),
+                        )
+                        .into_any_element()
+                });
+                // Read-only hashtags; editing happens on the edit form.
+                let tags_value = match self.detail_view() {
+                    DetailView::Fields(detail) if !detail.tags.is_empty() => Some(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_x_2()
+                            .gap_y_1()
+                            .children(detail.tags.iter().map(|tag| {
+                                div().child(format!("#{}", tag.text.as_str()))
+                            }))
+                            .into_any_element(),
+                    ),
+                    _ => None,
+                };
+                render_panel(self.detail_view(), actions, tags_value, cx)
             }
         }
     }
@@ -3022,7 +3235,9 @@ impl LibraryApp {
                                     .small()
                                     .label("Cancel")
                                     .on_click(
-                                        cx.listener(|this, _, _window, cx| this.cancel_edit(cx)),
+                                        cx.listener(|this, _, window, cx| {
+                                            this.cancel_edit(window, cx)
+                                        }),
                                     ),
                             )
                             .child(
@@ -3039,10 +3254,7 @@ impl LibraryApp {
                     .when_some(error, |el, error| {
                         el.child(div().text_xs().text_color(danger).child(error))
                     })
-                    .child(edit_field(
-                        "Title",
-                        Input::new(&form.title).small().w_full(),
-                    ))
+                    .child(edit_field("Title", padded_input(&form.title).w_full()))
                     .child(edit_field(
                         "Kind",
                         Combobox::new(&form.kind)
@@ -3071,23 +3283,58 @@ impl LibraryApp {
                     ))
                     .child(edit_field(
                         "Publisher",
-                        Input::new(&form.publisher).small().w_full(),
+                        padded_input(&form.publisher).w_full(),
                     ))
                     .child(edit_field(
                         "Published",
-                        Input::new(&form.published_year).small().w_full(),
+                        padded_input(&form.published_year).w_full(),
                     ))
                     .child(edit_field(
                         "Accessed",
-                        Input::new(&form.accessed_year).small().w_full(),
+                        padded_input(&form.accessed_year).w_full(),
                     ))
-                    .child(edit_field(
-                        "Series",
-                        Input::new(&form.series).small().w_full(),
-                    ))
+                    .child(edit_field("Series", padded_input(&form.series).w_full()))
                     .child(edit_field(
                         "Series no.",
-                        Input::new(&form.series_number).small().w_full(),
+                        padded_input(&form.series_number).w_full(),
+                    ))
+                    .child(edit_field(
+                        "Tags",
+                        v_flex()
+                            .gap_1()
+                            .w_full()
+                            .child(
+                                Combobox::new(&self.tag_picker)
+                                    .small()
+                                    .placeholder("Add tag")
+                                    .search_placeholder("Search or create...")
+                                    .w_full(),
+                            )
+                            .children(form.tags.iter().map(|tag| {
+                                let tag_id = tag.id;
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(tag.text.as_str().to_owned()),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "unstage-tag-{tag_id}"
+                                        )))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(Icon::new(IconName::Close).xsmall())
+                                        .tooltip("Remove tag")
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.unstage_tag_on_edit_form(tag_id, window, cx)
+                                        })),
+                                    )
+                            })),
                     )),
             )
     }
@@ -3101,6 +3348,13 @@ fn edit_field(label: &'static str, control: impl IntoElement) -> Div {
         .gap_2()
         .child(div().w(FIELD_LABEL_WIDTH).flex_shrink_0().child(label))
         .child(div().flex_1().min_w_0().child(control))
+}
+
+/// Bordered field input: small kit size, then a little extra padding so the
+/// caret is not hard against the edge. Focus paint is the darker accent
+/// border from the theme (`focus_ring = false`), not an outer halo.
+fn padded_input(state: &Entity<InputState>) -> Input {
+    Input::new(state).small().px(px(10.)).py(px(5.))
 }
 
 /// The inspector can occupy the whole viewport on a narrow window; its
@@ -3394,7 +3648,8 @@ impl Render for LibraryApp {
                                                 .rounded(px(8.))
                                                 .bg(cx.theme().muted)
                                                 .border_color(cx.theme().border)
-                                                .px(px(10.))
+                                                .px(px(12.))
+                                                .py(px(6.))
                                                 .text_size(px(12.))
                                                 .prefix(
                                                     Icon::new(IconName::Search)
@@ -3879,6 +4134,7 @@ mod detail_prefetch_tests {
             series_title: None,
             series_number: None,
             favorite: false,
+            tags: vec![],
             date_added: UtcMillis::from_unix_ms(0),
             date_edited: UtcMillis::from_unix_ms(0),
         }

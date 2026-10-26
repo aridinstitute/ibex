@@ -98,8 +98,8 @@ pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
             vec![number.as_str().to_owned()],
         ));
     }
-    // Record-keeping stamps close the panel: they describe the library
-    // record, not the work, and are always present on a stored record.
+    // Record-keeping stamps close the bibliographic block; tags are not a
+    // text row here — the caller supplies a hashtag value the panel appends.
     rows.push((
         "Added".to_string(),
         vec![format_recorded_date(detail.date_added)],
@@ -127,7 +127,15 @@ fn value_element(lines: &[String]) -> AnyElement {
 /// grid gives way when the window is too narrow to hold both — and scrollable
 /// when the field list outgrows the window.
 /// The loaded resource's identity, actions and metadata share one scroll area.
-pub fn render_panel(view: DetailView<'_>, actions: Option<AnyElement>, cx: &App) -> Div {
+/// `tags_value` is the value cell of the trailing "Tags" field: read-only
+/// `#hashtags` built by the caller. Absent when there are no tags or the
+/// panel is not showing a loaded resource.
+pub fn render_panel(
+    view: DetailView<'_>,
+    actions: Option<AnyElement>,
+    tags_value: Option<AnyElement>,
+    cx: &App,
+) -> Div {
     let muted = cx.theme().muted_foreground;
     let danger = cx.theme().danger;
 
@@ -193,7 +201,10 @@ pub fn render_panel(view: DetailView<'_>, actions: Option<AnyElement>, cx: &App)
                         .label_width(FIELD_LABEL_WIDTH)
                         .children(field_rows(detail).into_iter().map(|(label, lines)| {
                             DescriptionItem::new(label).value(value_element(&lines))
-                        })),
+                        }))
+                        .when_some(tags_value, |list, value| {
+                            list.child(DescriptionItem::new("Tags").value(value))
+                        }),
                 )
                 .into_any_element()
         }
@@ -249,6 +260,7 @@ mod tests {
             series_title: None,
             series_number: None,
             favorite: false,
+            tags: vec![],
             date_added: UtcMillis::from_unix_ms(1_609_459_200_000),
             date_edited: UtcMillis::from_unix_ms(1_609_459_200_000),
         }
@@ -265,6 +277,19 @@ mod tests {
         assert_eq!(rows[1].1, vec!["Journal of Citation Studies"]);
         assert_eq!(rows[2].1, vec!["Jan 1, 2021"]);
         assert_eq!(rows[3].1, vec!["Jan 1, 2021"]);
+        // Tags render as a caller-supplied hashtag value, not a text row.
+        let mut with_tags = journal_article();
+        with_tags.tags = vec![
+            oeuvre_core::Tag::try_new(
+                oeuvre_core::TagId::generate(),
+                NonEmptyStr::try_new("epistemology").unwrap(),
+            ),
+            oeuvre_core::Tag::try_new(
+                oeuvre_core::TagId::generate(),
+                NonEmptyStr::try_new("methods").unwrap(),
+            ),
+        ];
+        assert_eq!(field_rows(&with_tags).len(), rows.len());
         assert_eq!(byline(&detail), Some("Ada Lovelace, G. Hopper".to_string()));
     }
 

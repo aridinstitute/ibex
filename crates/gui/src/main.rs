@@ -6,6 +6,7 @@ mod inline_edit;
 mod kind;
 mod library;
 mod settings;
+mod tags;
 mod theme;
 
 use std::path::PathBuf;

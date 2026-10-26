@@ -40,6 +40,7 @@ fn book_new(author_id: PersonId, title: &str) -> NewResource {
         parent_id: None,
         series_id: None,
         series_number: None,
+        tag_ids: vec![],
     }
 }
 
@@ -101,6 +102,7 @@ async fn get_resource_after_create_round_trip() {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await
@@ -169,6 +171,7 @@ async fn create_resource_empty_creators_is_allowed() {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await
@@ -201,6 +204,7 @@ async fn create_podcast_episode_with_podcast_parent() {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await
@@ -225,6 +229,7 @@ async fn create_podcast_episode_with_podcast_parent() {
                 parent_id: Some(show.id),
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await
@@ -279,6 +284,7 @@ async fn create_podcast_episode_without_parent_is_invalid() {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await
@@ -313,6 +319,7 @@ async fn create_episode_missing_parent_is_not_found() {
                 parent_id: Some(missing_parent),
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await
@@ -342,6 +349,7 @@ async fn create_episode_wrong_parent_kind_is_invalid() {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await
@@ -366,6 +374,7 @@ async fn create_episode_wrong_parent_kind_is_invalid() {
                 parent_id: Some(blog.id),
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await
@@ -399,6 +408,7 @@ async fn create_resource_series_number_without_series_is_invalid() {
                 parent_id: None,
                 series_id: None,
                 series_number: Some(NonEmptyStr::try_new("LCL 26").unwrap()),
+                tag_ids: vec![],
             },
         }))
         .await
@@ -444,6 +454,7 @@ async fn create_resource_with_series() {
                 parent_id: None,
                 series_id: Some(series.id),
                 series_number: Some(NonEmptyStr::try_new("LCL 26").unwrap()),
+                tag_ids: vec![],
             },
         }))
         .await
@@ -559,6 +570,7 @@ async fn list_resources_returns_summaries_ordered_newest_first() {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await
@@ -601,6 +613,7 @@ async fn list_resources_returns_summaries_ordered_newest_first() {
                 parent_id: Some(journal.id),
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await
@@ -631,6 +644,7 @@ async fn list_resources_returns_summaries_ordered_newest_first() {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await

@@ -257,6 +257,11 @@ impl InlineRowEdit {
                 .map(|d| d.series_number.clone())
                 .unwrap_or_default(),
             creators,
+            // Inline row edit does not touch tags; keep the stored set.
+            tag_ids: ridden
+                .as_ref()
+                .map(|d| d.tag_ids.clone())
+                .unwrap_or_default(),
         }
     }
 }

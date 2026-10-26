@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{Name, NonEmptyStr, PersonId, SeriesId};
+use crate::{Name, NonEmptyStr, PersonId, SeriesId, Tag, TagId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ResourceId(ulid::Ulid);
@@ -295,6 +295,8 @@ pub struct ResourceCounts {
     /// Resources currently marked favorite; independent of kind filters.
     pub favorites: u64,
     pub by_kind: std::collections::HashMap<ResourceKind, u64>,
+    /// How many resources reference each tag; independent of other filters.
+    pub by_tag: std::collections::HashMap<TagId, u64>,
 }
 
 /// Field a sorted library listing orders by.
@@ -407,6 +409,8 @@ pub struct ResourceFilter {
     /// When `Some(true)`, only favorited rows; `Some(false)` only non-favorites.
     /// `None` does not constrain on favorite.
     pub favorite: Option<bool>,
+    /// Resources that reference this tag via their `tags` record-link array.
+    pub tag: Option<TagId>,
 }
 
 impl ResourceFilter {
@@ -419,6 +423,7 @@ impl ResourceFilter {
             published: None,
             kind: None,
             favorite: None,
+            tag: None,
         }
     }
 
@@ -437,6 +442,7 @@ impl ResourceFilter {
             || self.creator.is_some()
             || self.kind.is_some()
             || self.favorite.is_some()
+            || self.tag.is_some()
             || self
                 .published
                 .as_ref()
@@ -508,6 +514,8 @@ pub struct ResourceDetail {
     pub series_number: Option<NonEmptyStr>,
     /// User-starred flag; independent of bibliographic fields.
     pub favorite: bool,
+    /// Tags on this resource, bibliography order of `tag_ids`.
+    pub tags: Vec<Tag>,
     /// Record-keeping stamps, always present on a stored record.
     pub date_added: UtcMillis,
     pub date_edited: UtcMillis,
@@ -696,6 +704,8 @@ pub struct NewResource {
     pub parent_id: Option<ResourceId>,
     pub series_id: Option<SeriesId>,
     pub series_number: Option<NonEmptyStr>,
+    /// Tag record ids this resource references; empty by default.
+    pub tag_ids: Vec<TagId>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -724,6 +734,8 @@ pub struct Resource {
     pub parent_id: Option<ResourceId>,
     pub series_id: Option<SeriesId>,
     pub series_number: Option<NonEmptyStr>,
+    /// Tag record ids this resource references (not graph edges).
+    pub tag_ids: Vec<TagId>,
     /// User-starred flag. Create starts false; only the favorite toggle
     /// changes it. Bibliographic updates preserve the existing value.
     pub favorite: bool,
@@ -796,6 +808,7 @@ impl Resource {
             parent_id: new.parent_id,
             series_id: new.series_id,
             series_number: new.series_number,
+            tag_ids: new.tag_ids,
             favorite: false,
             date_added: now,
             date_edited: now,
@@ -829,6 +842,7 @@ impl Resource {
         parent_id: Option<ResourceId>,
         series_id: Option<SeriesId>,
         series_number: Option<NonEmptyStr>,
+        tag_ids: Vec<TagId>,
         favorite: bool,
         date_added: UtcMillis,
         date_edited: UtcMillis,
@@ -847,6 +861,7 @@ impl Resource {
             parent_id,
             series_id,
             series_number,
+            tag_ids,
             favorite,
             date_added,
             date_edited,
@@ -869,6 +884,7 @@ impl Resource {
             parent_id: self.parent_id,
             series_id: self.series_id,
             series_number: self.series_number.clone(),
+            tag_ids: self.tag_ids.clone(),
         }
     }
 }
@@ -921,6 +937,7 @@ mod tests {
             parent_id,
             series_id: None,
             series_number: None,
+            tag_ids: vec![],
         }
     }
 
@@ -980,6 +997,7 @@ mod tests {
             None,
             None,
             None,
+            vec![],
             false,
             added,
             edited,
@@ -1031,6 +1049,7 @@ mod tests {
                     parent_id: None,
                     series_id: None,
                     series_number: None,
+                    tag_ids: vec![],
                 },
             )
             .unwrap();
@@ -1135,6 +1154,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         )
         .unwrap_err();
@@ -1155,6 +1175,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         )
         .unwrap();
@@ -1173,6 +1194,7 @@ mod tests {
                 parent_id: Some(parent),
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         )
         .unwrap();
@@ -1193,6 +1215,7 @@ mod tests {
                 parent_id: None,
                 series_id: None,
                 series_number: Some(title("LCL 26")),
+                tag_ids: vec![],
             },
         )
         .unwrap_err();
@@ -1214,6 +1237,7 @@ mod tests {
                 parent_id: None,
                 series_id: Some(series_id),
                 series_number: Some(title("LCL 26")),
+                tag_ids: vec![],
             },
         )
         .unwrap();
@@ -1288,6 +1312,7 @@ mod tests {
             None,
             None,
             None,
+            vec![],
             false,
             UtcMillis::from_unix_ms(0),
             UtcMillis::from_unix_ms(0),
@@ -1327,6 +1352,7 @@ mod tests {
             parent_id: Some(ResourceId::generate()),
             series_id: Some(SeriesId::generate()),
             series_number: Some(title("3")),
+            tag_ids: vec![],
         };
         let stored = Resource::try_new(ResourceId::generate(), new.clone()).unwrap();
         assert_eq!(stored.to_new(), new);

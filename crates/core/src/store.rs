@@ -1,8 +1,9 @@
 //! Storage port. Adapters implement this; commands call it through `AppState`.
 
 use crate::{
-    Name, NewResource, NewSeries, Person, PersonError, PersonId, Resource, ResourceError,
-    ResourceId, ResourcePage, ResourceQuery, ResourceSummary, Series, SeriesId, SortedResourcePage,
+    Name, NewResource, NewSeries, NonEmptyStr, Person, PersonError, PersonId, Resource,
+    ResourceError, ResourceId, ResourcePage, ResourceQuery, ResourceSummary, Series, SeriesId,
+    SortedResourcePage, Tag, TagId,
 };
 
 /// Storage backend. Grows one method per capability a command needs.
@@ -40,6 +41,19 @@ pub trait Store: Send + Sync + 'static {
 
     /// Fetch series by id. Missing → [`StoreError::not_found`].
     async fn get_series(&self, id: SeriesId) -> Result<Series, StoreError>;
+
+    /// Allocate [`TagId`], insert tag row. Text must be unique (exact string).
+    /// Duplicate text → [`StoreError::invalid`].
+    async fn create_tag(&self, text: NonEmptyStr) -> Result<Tag, StoreError>;
+
+    /// Fetch tag by id. Missing → [`StoreError::not_found`].
+    async fn get_tag(&self, id: TagId) -> Result<Tag, StoreError>;
+
+    /// Lookup by exact stored text. `None` when no row matches.
+    async fn find_tag_by_text(&self, text: &NonEmptyStr) -> Result<Option<Tag>, StoreError>;
+
+    /// Every tag, ordered by text ascending. Empty vec when none.
+    async fn list_tags(&self) -> Result<Vec<Tag>, StoreError>;
 
     /// Allocate id, [`Resource::try_new`], persist resource row **without** creators,
     /// then create one `created` edge per creator (order = [`Creator::order`](crate::Creator::order)).
@@ -117,6 +131,7 @@ pub trait Store: Send + Sync + 'static {
     ///   comparing case-insensitively; missing publishers never match;
     /// - `filter.kind` holds when the row's kind equals it;
     /// - `filter.favorite` holds when the row's favorite flag equals it;
+    /// - `filter.tag` holds when the row's `tags` array references that tag;
     /// - set predicates AND together: a row must satisfy every one.
     ///
     /// `offset` is a 0-based window into the ordered list; the page returns

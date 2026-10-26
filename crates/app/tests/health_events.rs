@@ -11,7 +11,8 @@ use oeuvre_app::{
     AppState, Command, CommandError, FieldValue, Outcome, Status, Store, StoreError, StoreHealth,
 };
 use oeuvre_core::{
-    Name, NewResource, NewSeries, Person, PersonId, Resource, ResourceId, Series, SeriesId,
+    Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceId, Series,
+    SeriesId, Tag, TagId,
 };
 
 #[tokio::test]
@@ -97,6 +98,22 @@ impl Store for HangStore {
     }
 
     async fn get_series(&self, _id: SeriesId) -> Result<Series, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn create_tag(&self, _text: NonEmptyStr) -> Result<Tag, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn get_tag(&self, _id: TagId) -> Result<Tag, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn find_tag_by_text(&self, _text: &NonEmptyStr) -> Result<Option<Tag>, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn list_tags(&self) -> Result<Vec<Tag>, StoreError> {
         std::future::pending().await
     }
 

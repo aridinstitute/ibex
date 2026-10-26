@@ -37,6 +37,7 @@ fn book_new(author_id: PersonId, title: &str) -> NewResource {
         parent_id: None,
         series_id: None,
         series_number: None,
+        tag_ids: vec![],
     }
 }
 

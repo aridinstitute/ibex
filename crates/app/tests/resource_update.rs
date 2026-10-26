@@ -37,6 +37,7 @@ fn book_new(author_id: PersonId, title: &str) -> NewResource {
         parent_id: None,
         series_id: None,
         series_number: None,
+        tag_ids: vec![],
     }
 }
 
@@ -335,6 +336,7 @@ async fn update_retype_with_parent_rechecks_parent_kind() {
                 parent_id: None,
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await
@@ -359,6 +361,7 @@ async fn update_retype_with_parent_rechecks_parent_kind() {
                 parent_id: Some(journal.id),
                 series_id: None,
                 series_number: None,
+                tag_ids: vec![],
             },
         }))
         .await
