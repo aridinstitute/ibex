@@ -70,6 +70,25 @@ pub trait Store: Send + Sync + 'static {
     /// The same collection may appear under multiple parents.
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError>;
 
+    /// Add `child -> child_of -> parent`. Self-parent, missing ids, or a
+    /// duplicate edge → [`StoreError::invalid`] / not-found.
+    async fn add_collection_parent(
+        &self,
+        child: CollectionId,
+        parent: CollectionId,
+    ) -> Result<(), StoreError>;
+
+    /// Delete `id` with smart cascade: exclusive children are deleted
+    /// recursively; shared children only lose the edge to `id`. Never
+    /// deletes resources (membership refs unset via schema).
+    async fn delete_collection(&self, id: CollectionId) -> Result<(), StoreError>;
+
+    /// `id` plus every transitive child via `child_of` (for listing filters).
+    async fn collection_descendant_ids(
+        &self,
+        id: CollectionId,
+    ) -> Result<Vec<CollectionId>, StoreError>;
+
     /// Allocate id, [`Resource::try_new`], persist resource row **without** creators,
     /// then create one `created` edge per creator (order = [`Creator::order`](crate::Creator::order)).
     ///

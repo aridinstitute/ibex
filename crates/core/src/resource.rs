@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{Name, NonEmptyStr, PersonId, SeriesId, Tag, TagId};
+use crate::{CollectionId, Name, NonEmptyStr, PersonId, SeriesId, Tag, TagId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ResourceId(ulid::Ulid);
@@ -706,6 +706,8 @@ pub struct NewResource {
     pub series_number: Option<NonEmptyStr>,
     /// Tag record ids this resource references; empty by default.
     pub tag_ids: Vec<TagId>,
+    /// Collection record ids this resource belongs to; empty by default.
+    pub collection_ids: Vec<CollectionId>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -736,6 +738,8 @@ pub struct Resource {
     pub series_number: Option<NonEmptyStr>,
     /// Tag record ids this resource references (not graph edges).
     pub tag_ids: Vec<TagId>,
+    /// Collection record ids this resource belongs to (not graph edges).
+    pub collection_ids: Vec<CollectionId>,
     /// User-starred flag. Create starts false; only the favorite toggle
     /// changes it. Bibliographic updates preserve the existing value.
     pub favorite: bool,
@@ -809,6 +813,7 @@ impl Resource {
             series_id: new.series_id,
             series_number: new.series_number,
             tag_ids: new.tag_ids,
+            collection_ids: new.collection_ids,
             favorite: false,
             date_added: now,
             date_edited: now,
@@ -843,6 +848,7 @@ impl Resource {
         series_id: Option<SeriesId>,
         series_number: Option<NonEmptyStr>,
         tag_ids: Vec<TagId>,
+        collection_ids: Vec<CollectionId>,
         favorite: bool,
         date_added: UtcMillis,
         date_edited: UtcMillis,
@@ -862,6 +868,7 @@ impl Resource {
             series_id,
             series_number,
             tag_ids,
+            collection_ids,
             favorite,
             date_added,
             date_edited,
@@ -885,6 +892,7 @@ impl Resource {
             series_id: self.series_id,
             series_number: self.series_number.clone(),
             tag_ids: self.tag_ids.clone(),
+            collection_ids: self.collection_ids.clone(),
         }
     }
 }
@@ -938,7 +946,7 @@ mod tests {
             series_id: None,
             series_number: None,
             tag_ids: vec![],
-        }
+            collection_ids: vec![],        }
     }
 
     #[test]
@@ -998,6 +1006,7 @@ mod tests {
             None,
             None,
             vec![],
+            vec![],
             false,
             added,
             edited,
@@ -1050,7 +1059,7 @@ mod tests {
                     series_id: None,
                     series_number: None,
                     tag_ids: vec![],
-                },
+                    collection_ids: vec![],                },
             )
             .unwrap();
             assert!(resource.creators.is_empty());
@@ -1155,7 +1164,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
         )
         .unwrap_err();
         assert_eq!(err, ResourceError::ParentRequired);
@@ -1176,7 +1185,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
         )
         .unwrap();
         assert!(without.parent_id.is_none());
@@ -1195,7 +1204,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
         )
         .unwrap();
         assert_eq!(with.parent_id, Some(parent));
@@ -1216,7 +1225,7 @@ mod tests {
                 series_id: None,
                 series_number: Some(title("LCL 26")),
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
         )
         .unwrap_err();
         assert_eq!(err, ResourceError::SeriesNumberWithoutSeries);
@@ -1238,7 +1247,7 @@ mod tests {
                 series_id: Some(series_id),
                 series_number: Some(title("LCL 26")),
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
         )
         .unwrap();
         assert_eq!(
@@ -1313,6 +1322,7 @@ mod tests {
             None,
             None,
             vec![],
+            vec![],
             false,
             UtcMillis::from_unix_ms(0),
             UtcMillis::from_unix_ms(0),
@@ -1353,7 +1363,7 @@ mod tests {
             series_id: Some(SeriesId::generate()),
             series_number: Some(title("3")),
             tag_ids: vec![],
-        };
+            collection_ids: vec![],        };
         let stored = Resource::try_new(ResourceId::generate(), new.clone()).unwrap();
         assert_eq!(stored.to_new(), new);
     }

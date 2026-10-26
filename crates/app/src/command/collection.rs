@@ -12,8 +12,26 @@ pub struct CreateCollection {
 #[derive(Debug, Clone)]
 pub struct ListCollectionForest;
 
+#[derive(Debug, Clone)]
+pub struct AddCollectionParent {
+    pub child_id: CollectionId,
+    pub parent_id: CollectionId,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteCollection {
+    pub id: CollectionId,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeletedCollection {
+    pub id: CollectionId,
+}
+
 pub(crate) struct Created(pub Collection);
 pub(crate) struct Forest(pub Vec<CollectionTreeNode>);
+pub(crate) struct ParentAdded;
+pub(crate) struct Deleted(pub DeletedCollection);
 
 impl From<Created> for Outcome {
     fn from(Created(collection): Created) -> Self {
@@ -24,6 +42,18 @@ impl From<Created> for Outcome {
 impl From<Forest> for Outcome {
     fn from(Forest(nodes): Forest) -> Self {
         Outcome::ListCollectionForest(nodes)
+    }
+}
+
+impl From<ParentAdded> for Outcome {
+    fn from(_: ParentAdded) -> Self {
+        Outcome::AddCollectionParent(())
+    }
+}
+
+impl From<Deleted> for Outcome {
+    fn from(Deleted(deleted): Deleted) -> Self {
+        Outcome::DeleteCollection(deleted)
     }
 }
 
@@ -70,5 +100,44 @@ impl Handler for ListCollectionForest {
         let forest = state.store().list_collection_forest().await?;
         ev.set(event::COLLECTION_FOREST_ROOTS, forest.len() as i64);
         Ok(Forest(forest))
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for AddCollectionParent {
+    const NAME: &'static str = "add_collection_parent";
+    type Output = ParentAdded;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::COLLECTION_ID, self.child_id.to_string());
+        ev.set(event::COLLECTION_PARENT_ID, self.parent_id.to_string());
+    }
+
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<ParentAdded, CommandError> {
+        state
+            .store()
+            .add_collection_parent(self.child_id, self.parent_id)
+            .await
+            .map_err(map_create)?;
+        Ok(ParentAdded)
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for DeleteCollection {
+    const NAME: &'static str = "delete_collection";
+    type Output = Deleted;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::COLLECTION_ID, self.id.to_string());
+    }
+
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<Deleted, CommandError> {
+        state
+            .store()
+            .delete_collection(self.id)
+            .await
+            .map_err(map_create)?;
+        Ok(Deleted(DeletedCollection { id: self.id }))
     }
 }

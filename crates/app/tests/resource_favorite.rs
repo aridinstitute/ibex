@@ -21,7 +21,7 @@ fn bare_book(title: &str) -> NewResource {
         series_id: None,
         series_number: None,
         tag_ids: vec![],
-    }
+        collection_ids: vec![],    }
 }
 
 #[tokio::test]

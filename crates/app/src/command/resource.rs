@@ -211,6 +211,9 @@ fn changed_fields(old: &Resource, new: &NewResource) -> Vec<&'static str> {
     if old.tag_ids != new.tag_ids {
         changed.push("tags");
     }
+    if old.collection_ids != new.collection_ids {
+        changed.push("collections");
+    }
     changed
 }
 
@@ -261,6 +264,22 @@ impl Handler for CreateResource {
                 .map_err(|e| {
                     if e.is_not_found() {
                         CommandError::NotFound(tag_id.to_string())
+                    } else if e.is_invalid() {
+                        CommandError::Invalid(e.message.clone())
+                    } else {
+                        CommandError::Store(e)
+                    }
+                })?;
+        }
+
+        for collection_id in &self.new.collection_ids {
+            state
+                .store()
+                .get_collection(*collection_id)
+                .await
+                .map_err(|e| {
+                    if e.is_not_found() {
+                        CommandError::NotFound(collection_id.to_string())
                     } else if e.is_invalid() {
                         CommandError::Invalid(e.message.clone())
                     } else {
@@ -344,6 +363,22 @@ impl Handler for UpdateResource {
                 .map_err(|e| {
                     if e.is_not_found() {
                         CommandError::NotFound(tag_id.to_string())
+                    } else if e.is_invalid() {
+                        CommandError::Invalid(e.message.clone())
+                    } else {
+                        CommandError::Store(e)
+                    }
+                })?;
+        }
+
+        for collection_id in &self.new.collection_ids {
+            state
+                .store()
+                .get_collection(*collection_id)
+                .await
+                .map_err(|e| {
+                    if e.is_not_found() {
+                        CommandError::NotFound(collection_id.to_string())
                     } else if e.is_invalid() {
                         CommandError::Invalid(e.message.clone())
                     } else {

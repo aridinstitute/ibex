@@ -1505,6 +1505,8 @@ impl EditForm {
                 &self.record.to_new().creators,
             ),
             tag_ids: self.tags.iter().map(|tag| tag.id).collect(),
+            // Collection picker lands in the sidebar slice; preserve stored.
+            collection_ids: self.record.collection_ids.clone(),
         }
     }
 }

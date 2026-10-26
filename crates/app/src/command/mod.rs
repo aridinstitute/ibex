@@ -5,7 +5,9 @@ mod resource;
 mod series;
 mod tag;
 
-pub use collection::{CreateCollection, ListCollectionForest};
+pub use collection::{
+    AddCollectionParent, CreateCollection, DeleteCollection, DeletedCollection, ListCollectionForest,
+};
 pub use health::{Health, HealthReport};
 pub use person::{
     CreatePerson, DeletePerson, DeletedPerson, FindPersonsByName, GetPerson, ListPersons,
@@ -44,6 +46,8 @@ pub enum Command {
     ListTags(ListTags),
     CreateCollection(CreateCollection),
     ListCollectionForest(ListCollectionForest),
+    AddCollectionParent(AddCollectionParent),
+    DeleteCollection(DeleteCollection),
     CreateResource(CreateResource),
     UpdateResource(UpdateResource),
     SetResourceFavorite(SetResourceFavorite),
@@ -73,6 +77,8 @@ pub enum Outcome {
     ListTags(Vec<Tag>),
     CreateCollection(Collection),
     ListCollectionForest(Vec<CollectionTreeNode>),
+    AddCollectionParent(()),
+    DeleteCollection(DeletedCollection),
     CreateResource(Resource),
     UpdateResource(Resource),
     SetResourceFavorite(Resource),
@@ -129,6 +135,8 @@ impl Command {
             Command::ListTags(_) => ListTags::NAME,
             Command::CreateCollection(_) => CreateCollection::NAME,
             Command::ListCollectionForest(_) => ListCollectionForest::NAME,
+            Command::AddCollectionParent(_) => AddCollectionParent::NAME,
+            Command::DeleteCollection(_) => DeleteCollection::NAME,
             Command::CreateResource(_) => CreateResource::NAME,
             Command::UpdateResource(_) => UpdateResource::NAME,
             Command::SetResourceFavorite(_) => SetResourceFavorite::NAME,
@@ -175,6 +183,8 @@ pub(crate) async fn dispatch(
         Command::ListTags(c) => drive(c, state, ev).await,
         Command::CreateCollection(c) => drive(c, state, ev).await,
         Command::ListCollectionForest(c) => drive(c, state, ev).await,
+        Command::AddCollectionParent(c) => drive(c, state, ev).await,
+        Command::DeleteCollection(c) => drive(c, state, ev).await,
         Command::CreateResource(c) => drive(c, state, ev).await,
         Command::UpdateResource(c) => drive(c, state, ev).await,
         Command::SetResourceFavorite(c) => drive(c, state, ev).await,

@@ -117,6 +117,30 @@ pub fn build_collection_forest(
         .collect()
 }
 
+/// `root` plus every transitive child reachable via `(child, parent)` edges.
+pub fn collection_descendant_closure(
+    root: CollectionId,
+    child_parent_edges: impl IntoIterator<Item = (CollectionId, CollectionId)>,
+) -> Vec<CollectionId> {
+    let mut children_of: HashMap<CollectionId, Vec<CollectionId>> = HashMap::new();
+    for (child, parent) in child_parent_edges {
+        children_of.entry(parent).or_default().push(child);
+    }
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        out.push(id);
+        if let Some(kids) = children_of.get(&id) {
+            stack.extend(kids.iter().copied());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

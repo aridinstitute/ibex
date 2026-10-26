@@ -38,7 +38,7 @@ fn book_new(author_id: PersonId, title: &str) -> NewResource {
         series_id: None,
         series_number: None,
         tag_ids: vec![],
-    }
+        collection_ids: vec![],    }
 }
 
 #[tokio::test]
@@ -337,7 +337,7 @@ async fn update_retype_with_parent_rechecks_parent_kind() {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
         }))
         .await
         .unwrap()
@@ -362,7 +362,7 @@ async fn update_retype_with_parent_rechecks_parent_kind() {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
         }))
         .await
         .unwrap()

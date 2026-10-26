@@ -604,7 +604,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
         )
         .expect("book valid")
     }

@@ -40,7 +40,7 @@ async fn search_matches_title_or_publisher_before_paging() {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            })
+                collection_ids: vec![],            })
             .await
             .unwrap();
         if ["Mixed Needle title", "Publisher only", "Needle in both"].contains(&title) {
@@ -229,7 +229,7 @@ fn resource(kind: ResourceKind, author: Option<PersonId>, title: &str) -> NewRes
         series_id: None,
         series_number: None,
         tag_ids: vec![],
-    }
+        collection_ids: vec![],    }
 }
 
 fn titles(page: &oeuvre_core::SortedResourcePage) -> Vec<String> {
@@ -1019,7 +1019,7 @@ async fn create_book(state: &AppState, author_id: PersonId, title: &str) {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
         }))
         .await
         .unwrap()

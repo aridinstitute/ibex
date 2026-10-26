@@ -824,7 +824,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            })
+                collection_ids: vec![],            })
             .await
             .unwrap();
         assert_eq!(created.title.as_str(), "Inline draft book");

@@ -47,7 +47,7 @@ fn container_new(kind: ResourceKind, title: &str) -> NewResource {
         series_id: None,
         series_number: None,
         tag_ids: vec![],
-    }
+        collection_ids: vec![],    }
 }
 
 #[tokio::test]
@@ -119,7 +119,7 @@ async fn detail_resolves_names_roles_and_linked_titles() {
                 series_id: Some(series.id),
                 series_number: Some(non_empty("42")),
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
         }))
         .await
         .unwrap()
@@ -215,7 +215,7 @@ async fn detail_emits_exactly_one_ok_event() {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
         }))
         .await
         .unwrap()

@@ -11,6 +11,7 @@ mod tag;
 
 pub use collection::{
     Collection, CollectionId, CollectionTreeNode, build_collection_forest,
+    collection_descendant_closure,
 };
 pub use person::{Name, NameError, NameKey, NonEmptyStr, Person, PersonError, PersonId};
 pub use resource::{

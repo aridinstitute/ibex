@@ -69,7 +69,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
             series_id: None,
             series_number: None,
             tag_ids: vec![],
-        })
+            collection_ids: vec![],        })
         .await?
         .id;
 
@@ -93,7 +93,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                     series_id: None,
                     series_number: None,
                     tag_ids: vec![],
-                }
+                    collection_ids: vec![],                }
             }
             1 => NewResource {
                 kind: ResourceKind::Book,
@@ -106,7 +106,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
             2 => NewResource {
                 kind: ResourceKind::BookSection,
                 title: non_empty(&format!("Reference Patterns {n:03}")),
@@ -118,7 +118,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
             3 => NewResource {
                 kind: ResourceKind::Preprint,
                 title: non_empty(&format!("Preprint Findings {n:03}")),
@@ -130,7 +130,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
             4 => NewResource {
                 kind: ResourceKind::PodcastEpisode,
                 title: non_empty(&format!("Interview with a Cataloger {n:03}")),
@@ -146,7 +146,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
             5 => NewResource {
                 kind: ResourceKind::Report,
                 title: non_empty(&format!("Field Report {n:03}")),
@@ -158,7 +158,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
             6 => NewResource {
                 kind: ResourceKind::Dataset,
                 title: non_empty(&format!("Open Shelf Records {n:03}")),
@@ -170,7 +170,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
             _ => NewResource {
                 kind: ResourceKind::Webpage,
                 title: non_empty(&format!("Margin Notes {n:03}")),
@@ -182,7 +182,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
-            },
+                collection_ids: vec![],            },
         };
         store.create_resource(new).await?;
     }
@@ -201,7 +201,7 @@ fn container(kind: ResourceKind, title: &str) -> NewResource {
         series_id: None,
         series_number: None,
         tag_ids: vec![],
-    }
+        collection_ids: vec![],    }
 }
 
 fn authors_for(n: usize, people: &[PersonId]) -> Vec<CreatorSpec> {
