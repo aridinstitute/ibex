@@ -11,6 +11,10 @@ pub fn apply(mode: ThemeMode, cx: &mut App) {
         // Root sets the window rem size from this, so every rem-based size
         // in the kit shrinks with it.
         theme.font_size = px(11.);
+        // No outer halo on focused controls: the input border itself picks up
+        // the accent ring color (see palette), which reads cleaner in dense
+        // filter rows and the detail pane.
+        theme.focus_ring = false;
     });
 }
 
@@ -22,6 +26,9 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     let dark = mode.is_dark();
     let pick = |light: u32, dark_value: u32| if dark { dark_value } else { light };
     let blue = rgb(pick(0x0064ff, 0x0a84ff)).into();
+    // Focused borders use a step darker than the fill accent so the edge
+    // reads against light surfaces without a glow ring.
+    let focus_border = rgb(pick(0x0047bd, 0x0071db)).into();
     // Selections tint neutral surfaces while retaining the normal text color;
     // the table uses a lighter wash and a hairline in the accent hue.
     let tint = rgba(pick(0x0064ff47, 0x0a84ff4d)).into();
@@ -29,13 +36,13 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
 
     colors.primary = blue;
     colors.primary_hover = rgb(pick(0x0055e0, 0x3b9cff)).into();
-    colors.primary_active = rgb(pick(0x0047bd, 0x0071db)).into();
+    colors.primary_active = focus_border;
     colors.primary_foreground = rgb(0xffffff).into();
     colors.button_primary = colors.primary;
     colors.button_primary_hover = colors.primary_hover;
     colors.button_primary_active = colors.primary_active;
     colors.button_primary_foreground = colors.primary_foreground;
-    colors.ring = blue;
+    colors.ring = focus_border;
     colors.caret = blue;
     colors.link = blue;
     colors.link_hover = colors.primary_hover;
@@ -77,12 +84,17 @@ mod tests {
 
     #[test]
     fn accent_is_system_blue_and_surfaces_stay_neutral() {
-        for (mode, blue) in [(ThemeMode::Light, 0x0064ff), (ThemeMode::Dark, 0x0a84ff)] {
+        for (mode, blue, focus) in [
+            (ThemeMode::Light, 0x0064ff, 0x0047bd),
+            (ThemeMode::Dark, 0x0a84ff, 0x0071db),
+        ] {
             let base = neutral_base();
             let colors = palette(mode, base);
             let blue: Hsla = rgb(blue).into();
+            let focus: Hsla = rgb(focus).into();
             assert_eq!(colors.primary, blue);
-            assert_eq!(colors.ring, blue);
+            // Focused borders use the darker accent step, not the fill blue.
+            assert_eq!(colors.ring, focus);
             assert_eq!(colors.table_active_border, blue);
             assert!(colors.primary.s > 0.95, "accent must be fully saturated");
             assert_eq!(colors.table_active.h, blue.h);

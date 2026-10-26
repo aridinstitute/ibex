@@ -9,7 +9,7 @@ use gpui_kit::component::searchable_list::SearchableListItem;
 
 use oeuvre_core::{
     BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId, Resource,
-    ResourceId, ResourceKind, SeriesId, UtcMillis, utc_year_from_millis,
+    ResourceId, ResourceKind, SeriesId, TagId, UtcMillis, utc_year_from_millis,
 };
 
 use crate::kind::kind_label;
@@ -31,6 +31,8 @@ pub struct EditDraft {
     pub series: String,
     pub series_number: String,
     pub creators: Vec<CreatorSpec>,
+    /// Tags attached on save, in the order shown on the form.
+    pub tag_ids: Vec<TagId>,
 }
 
 /// The value each input opens with: the stored record's own values,
@@ -53,6 +55,7 @@ pub fn prefill_draft(record: &Resource) -> EditDraft {
             .map(|number| number.as_str().to_owned())
             .unwrap_or_default(),
         creators: record.to_new().creators,
+        tag_ids: record.tag_ids.clone(),
     }
 }
 
@@ -69,6 +72,7 @@ pub fn empty_create_draft() -> EditDraft {
         series: String::new(),
         series_number: String::new(),
         creators: Vec::new(),
+        tag_ids: Vec::new(),
     }
 }
 
@@ -111,6 +115,7 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), S
     edit.kind = draft.kind;
     edit.parent_id = draft.parent;
     edit.creators = draft.creators.clone();
+    edit.tag_ids = draft.tag_ids.clone();
 
     let publisher = draft.publisher.trim();
     edit.publisher = (!publisher.is_empty()).then(|| publisher.to_owned());
@@ -273,6 +278,7 @@ mod tests {
             series: "".into(),
             series_number: "".into(),
             creators,
+            tag_ids: Vec::new(),
         }
     }
 
