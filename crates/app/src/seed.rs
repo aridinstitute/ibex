@@ -70,6 +70,32 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
             series_number: None,
             tag_ids: vec![],
             collection_ids: vec![],
+            subtitle: Some(non_empty("A guide to research provenance")),
+            title_addon: Some(non_empty("Revised edition")),
+            short_title: Some(non_empty("Provenance")),
+            place: Some("London".into()),
+            volume: None,
+            issue: None,
+            pages: None,
+            total_pages: Some("xii+250".into()),
+            article_number: None,
+            edition: Some("Second".into()),
+            doi: None,
+            url: None,
+            eprint: None,
+            isbns: vec!["978-0-306-40615-7".into()],
+            issns: vec![],
+            isrns: vec![],
+            original_date: published(1960),
+            event_date: None,
+            language: Some("en".into()),
+            document_type: None,
+            publication_method: None,
+            institution: None,
+            organization: None,
+            school: None,
+            abstract_text: None,
+            keywords: vec!["provenance".into(), "research methods".into()],
         })
         .await?
         .id;
@@ -124,6 +150,34 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                     series_number: None,
                     tag_ids: vec![],
                     collection_ids: vec![],
+                    subtitle: None,
+                    title_addon: None,
+                    short_title: None,
+                    place: None,
+                    volume: Some((1 + n / 8).to_string()),
+                    issue: Some((1 + n % 4).to_string()),
+                    pages: Some("1–12".into()),
+                    total_pages: None,
+                    article_number: Some(format!("e{n:04}")),
+                    edition: None,
+                    doi: Some(format!("10.5555/demo.citations.{n}")),
+                    url: Some(format!("https://example.org/demo/articles/{n}")),
+                    eprint: None,
+                    isbns: vec![],
+                    issns: vec!["1234-5678".into()],
+                    isrns: vec![],
+                    original_date: None,
+                    event_date: published(year),
+                    language: Some("en".into()),
+                    document_type: None,
+                    publication_method: None,
+                    institution: None,
+                    organization: None,
+                    school: None,
+                    abstract_text: Some(
+                        "A synthetic study of citation networks and research provenance.".into(),
+                    ),
+                    keywords: vec!["citation networks".into(), "bibliometrics".into()],
                 }
             }
             1 => NewResource {
@@ -138,6 +192,32 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                subtitle: Some(non_empty("A guide to research provenance")),
+                title_addon: Some(non_empty("Revised edition")),
+                short_title: Some(non_empty("Provenance")),
+                place: Some("London".into()),
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: Some("xii+250".into()),
+                article_number: None,
+                edition: Some("Second".into()),
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec!["978-0-306-40615-7".into()],
+                issns: vec![],
+                isrns: vec![],
+                original_date: published(1960),
+                event_date: None,
+                language: Some("en".into()),
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec!["provenance".into(), "research methods".into()],
             },
             2 => NewResource {
                 kind: ResourceKind::BookSection,
@@ -151,6 +231,32 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: Some("25–42".into()),
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: Some("en".into()),
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             },
             3 => NewResource {
                 kind: ResourceKind::Preprint,
@@ -164,6 +270,32 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: Some(format!("https://example.org/demo/preprints/{n}")),
+                eprint: Some(format!("demo-preprint-{n:04}")),
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: Some("Preprint repository".into()),
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec!["open research".into()],
             },
             4 => NewResource {
                 kind: ResourceKind::PodcastEpisode,
@@ -181,6 +313,32 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             },
             5 => NewResource {
                 kind: ResourceKind::Report,
@@ -194,6 +352,32 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![format!("DEMO-REPORT-{n:04}")],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: Some("Technical report".into()),
+                publication_method: None,
+                institution: Some("Institute for Citation Studies".into()),
+                organization: Some("Citation Standards Committee".into()),
+                school: Some("School of Information Science".into()),
+                abstract_text: None,
+                keywords: vec![],
             },
             6 => NewResource {
                 kind: ResourceKind::Dataset,
@@ -207,6 +391,32 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             },
             _ => NewResource {
                 kind: ResourceKind::Webpage,
@@ -220,6 +430,32 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: Some(format!("https://example.org/demo/margin-notes/{n}")),
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: Some("en".into()),
+                document_type: None,
+                publication_method: Some("Online".into()),
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             },
         };
         // Keep some rows unassigned to exercise empty membership and tag filters.
@@ -248,6 +484,32 @@ fn container(kind: ResourceKind, title: &str) -> NewResource {
         series_number: None,
         tag_ids: vec![],
         collection_ids: vec![],
+        subtitle: None,
+        title_addon: None,
+        short_title: None,
+        place: None,
+        volume: None,
+        issue: None,
+        pages: None,
+        total_pages: None,
+        article_number: None,
+        edition: None,
+        doi: None,
+        url: None,
+        eprint: None,
+        isbns: vec![],
+        issns: vec![],
+        isrns: vec![],
+        original_date: None,
+        event_date: None,
+        language: None,
+        document_type: None,
+        publication_method: None,
+        institution: None,
+        organization: None,
+        school: None,
+        abstract_text: None,
+        keywords: vec![],
     }
 }
 
@@ -283,6 +545,56 @@ mod tests {
     use super::*;
     use crate::testing::MemoryStore;
     use oeuvre_core::{NonEmptyStr, ResourceKind};
+
+    #[tokio::test]
+    async fn demo_library_includes_bibliographic_metadata() {
+        let store = MemoryStore::new();
+        seed_demo_library(&store, 8).await.unwrap();
+        let rows = store.list_resources().await.unwrap();
+        let article = rows
+            .iter()
+            .find(|r| r.title.as_str() == "Citation Networks 000")
+            .unwrap();
+        let article = store.get_resource(article.id).await.unwrap();
+        assert_eq!(article.doi.as_deref(), Some("10.5555/demo.citations.0"));
+        assert_eq!(article.volume.as_deref(), Some("1"));
+        assert_eq!(article.issue.as_deref(), Some("1"));
+        assert_eq!(article.pages.as_deref(), Some("1–12"));
+        assert_eq!(article.keywords, ["citation networks", "bibliometrics"]);
+        assert!(!article.tag_ids.is_empty());
+        assert!(article.abstract_text.is_some());
+        let book = rows
+            .iter()
+            .find(|r| r.title.as_str() == "Provenance Studies 001")
+            .unwrap();
+        let book = store.get_resource(book.id).await.unwrap();
+        assert_eq!(book.isbns, ["978-0-306-40615-7"]);
+        assert_eq!(book.edition.as_deref(), Some("Second"));
+        assert_eq!(book.place.as_deref(), Some("London"));
+        assert!(book.original_date.is_some());
+        let preprint = rows
+            .iter()
+            .find(|r| r.kind == ResourceKind::Preprint)
+            .unwrap();
+        let preprint = store.get_resource(preprint.id).await.unwrap();
+        assert_eq!(preprint.eprint.as_deref(), Some("demo-preprint-0003"));
+        let report = rows
+            .iter()
+            .find(|r| r.kind == ResourceKind::Report)
+            .unwrap();
+        let report = store.get_resource(report.id).await.unwrap();
+        assert_eq!(report.document_type.as_deref(), Some("Technical report"));
+        assert_eq!(report.isrns, ["DEMO-REPORT-0005"]);
+        let webpage = rows
+            .iter()
+            .find(|r| r.kind == ResourceKind::Webpage)
+            .unwrap();
+        let webpage = store.get_resource(webpage.id).await.unwrap();
+        assert_eq!(
+            webpage.url.as_deref(),
+            Some("https://example.org/demo/margin-notes/7")
+        );
+    }
 
     #[tokio::test]
     async fn demo_library_has_nested_collections_and_tagged_resources() {

@@ -75,6 +75,32 @@ impl PeopleState {
 }
 
 struct ResourceRow {
+    subtitle: Option<NonEmptyStr>,
+    title_addon: Option<NonEmptyStr>,
+    short_title: Option<NonEmptyStr>,
+    place: Option<String>,
+    volume: Option<String>,
+    issue: Option<String>,
+    pages: Option<String>,
+    total_pages: Option<String>,
+    article_number: Option<String>,
+    edition: Option<String>,
+    doi: Option<String>,
+    url: Option<String>,
+    eprint: Option<String>,
+    isbns: Vec<String>,
+    issns: Vec<String>,
+    isrns: Vec<String>,
+    original_date: Option<BibliographicDate>,
+    event_date: Option<BibliographicDate>,
+    language: Option<String>,
+    document_type: Option<String>,
+    publication_method: Option<String>,
+    institution: Option<String>,
+    organization: Option<String>,
+    school: Option<String>,
+    abstract_text: Option<String>,
+    keywords: Vec<String>,
     kind: ResourceKind,
     title: NonEmptyStr,
     publisher: Option<String>,
@@ -714,6 +740,32 @@ impl Store for MemoryStore {
             series_number: resource.series_number.clone(),
             tag_ids: resource.tag_ids.clone(),
             collection_ids: resource.collection_ids.clone(),
+            subtitle: resource.subtitle.clone(),
+            title_addon: resource.title_addon.clone(),
+            short_title: resource.short_title.clone(),
+            place: resource.place.clone(),
+            volume: resource.volume.clone(),
+            issue: resource.issue.clone(),
+            pages: resource.pages.clone(),
+            total_pages: resource.total_pages.clone(),
+            article_number: resource.article_number.clone(),
+            edition: resource.edition.clone(),
+            doi: resource.doi.clone(),
+            url: resource.url.clone(),
+            eprint: resource.eprint.clone(),
+            isbns: resource.isbns.clone(),
+            issns: resource.issns.clone(),
+            isrns: resource.isrns.clone(),
+            original_date: resource.original_date.clone(),
+            event_date: resource.event_date.clone(),
+            language: resource.language.clone(),
+            document_type: resource.document_type.clone(),
+            publication_method: resource.publication_method.clone(),
+            institution: resource.institution.clone(),
+            organization: resource.organization.clone(),
+            school: resource.school.clone(),
+            abstract_text: resource.abstract_text.clone(),
+            keywords: resource.keywords.clone(),
             favorite: resource.favorite,
             date_added: resource.date_added,
             date_edited: resource.date_edited,
@@ -764,6 +816,32 @@ impl Store for MemoryStore {
                 series_number: resource.series_number.clone(),
                 tag_ids: resource.tag_ids.clone(),
                 collection_ids: resource.collection_ids.clone(),
+                subtitle: resource.subtitle.clone(),
+                title_addon: resource.title_addon.clone(),
+                short_title: resource.short_title.clone(),
+                place: resource.place.clone(),
+                volume: resource.volume.clone(),
+                issue: resource.issue.clone(),
+                pages: resource.pages.clone(),
+                total_pages: resource.total_pages.clone(),
+                article_number: resource.article_number.clone(),
+                edition: resource.edition.clone(),
+                doi: resource.doi.clone(),
+                url: resource.url.clone(),
+                eprint: resource.eprint.clone(),
+                isbns: resource.isbns.clone(),
+                issns: resource.issns.clone(),
+                isrns: resource.isrns.clone(),
+                original_date: resource.original_date.clone(),
+                event_date: resource.event_date.clone(),
+                language: resource.language.clone(),
+                document_type: resource.document_type.clone(),
+                publication_method: resource.publication_method.clone(),
+                institution: resource.institution.clone(),
+                organization: resource.organization.clone(),
+                school: resource.school.clone(),
+                abstract_text: resource.abstract_text.clone(),
+                keywords: resource.keywords.clone(),
                 favorite: resource.favorite,
                 date_added: resource.date_added,
                 date_edited: resource.date_edited,
@@ -819,6 +897,32 @@ impl Store for MemoryStore {
                 series_number: r.series_number.clone(),
                 tag_ids: r.tag_ids.clone(),
                 collection_ids: r.collection_ids.clone(),
+                subtitle: r.subtitle.clone(),
+                title_addon: r.title_addon.clone(),
+                short_title: r.short_title.clone(),
+                place: r.place.clone(),
+                volume: r.volume.clone(),
+                issue: r.issue.clone(),
+                pages: r.pages.clone(),
+                total_pages: r.total_pages.clone(),
+                article_number: r.article_number.clone(),
+                edition: r.edition.clone(),
+                doi: r.doi.clone(),
+                url: r.url.clone(),
+                eprint: r.eprint.clone(),
+                isbns: r.isbns.clone(),
+                issns: r.issns.clone(),
+                isrns: r.isrns.clone(),
+                original_date: r.original_date.clone(),
+                event_date: r.event_date.clone(),
+                language: r.language.clone(),
+                document_type: r.document_type.clone(),
+                publication_method: r.publication_method.clone(),
+                institution: r.institution.clone(),
+                organization: r.organization.clone(),
+                school: r.school.clone(),
+                abstract_text: r.abstract_text.clone(),
+                keywords: r.keywords.clone(),
                 favorite: r.favorite,
                 date_added: r.date_added,
                 date_edited: r.date_edited,
@@ -840,7 +944,7 @@ impl Store for MemoryStore {
             .collect();
         creators.sort_by_key(|c| c.order);
 
-        Resource::from_stored(
+        let mut resource = Resource::from_stored(
             id,
             row.kind,
             row.title,
@@ -857,7 +961,34 @@ impl Store for MemoryStore {
             row.date_added,
             row.date_edited,
         )
-        .map_err(StoreError::from)
+        .map_err(StoreError::from)?;
+        resource.subtitle = row.subtitle;
+        resource.title_addon = row.title_addon;
+        resource.short_title = row.short_title;
+        resource.place = row.place;
+        resource.volume = row.volume;
+        resource.issue = row.issue;
+        resource.pages = row.pages;
+        resource.total_pages = row.total_pages;
+        resource.article_number = row.article_number;
+        resource.edition = row.edition;
+        resource.doi = row.doi;
+        resource.url = row.url;
+        resource.eprint = row.eprint;
+        resource.isbns = row.isbns;
+        resource.issns = row.issns;
+        resource.isrns = row.isrns;
+        resource.original_date = row.original_date;
+        resource.event_date = row.event_date;
+        resource.language = row.language;
+        resource.document_type = row.document_type;
+        resource.publication_method = row.publication_method;
+        resource.institution = row.institution;
+        resource.organization = row.organization;
+        resource.school = row.school;
+        resource.abstract_text = row.abstract_text;
+        resource.keywords = row.keywords;
+        Ok(resource)
     }
 
     async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError> {
