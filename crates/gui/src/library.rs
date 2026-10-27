@@ -43,7 +43,8 @@ use crate::edit::{
 };
 use crate::icons::symbol;
 use crate::inline_edit::{
-    InlineField, InlineRowEdit, InlineSession, PersonItem, creators_badge_trigger, person_items,
+    InlineField, InlineRowEdit, InlineSession, PersonChoice, PersonDelegate,
+    creators_badge_trigger, person_items, person_name_from_query, selected_person_ids,
 };
 use crate::kind::{kind_color, kind_label, kind_symbol};
 use crate::settings::Settings;
@@ -836,7 +837,9 @@ impl TableDelegate for LibraryDelegate {
                         .unwrap_or_default(),
                 ),
                 COL_EDITED => {
-                    if let Some(error) = form.error.clone() {
+                    if form.author_creating {
+                        cell.text_color(muted).child("Creating author…")
+                    } else if let Some(error) = form.error.clone() {
                         let danger = cx.theme().danger;
                         cell.text_color(danger)
                             .child(div().min_w_0().truncate().child(error))
@@ -1219,7 +1222,7 @@ fn focus_inline_entities(
     field: InlineField,
     kind: &Entity<ComboboxState<SearchableVec<KindItem>>>,
     title: &Entity<InputState>,
-    creators: &Entity<ComboboxState<SearchableVec<PersonItem>>>,
+    creators: &Entity<ComboboxState<PersonDelegate>>,
     published: &Entity<InputState>,
     publisher: &Entity<InputState>,
     window: &mut Window,
@@ -1492,7 +1495,7 @@ struct EditForm {
     title: Entity<InputState>,
     kind: Entity<ComboboxState<SearchableVec<KindItem>>>,
     parent: Entity<ComboboxState<SearchableVec<ParentItem>>>,
-    creators: Entity<ComboboxState<SearchableVec<PersonItem>>>,
+    creators: Entity<ComboboxState<PersonDelegate>>,
     publisher: Entity<InputState>,
     published_year: Entity<InputState>,
     accessed_year: Entity<InputState>,
@@ -1507,6 +1510,7 @@ struct EditForm {
     /// save, shown until the next attempt.
     error: Option<String>,
     /// While the save is in flight: the Save button busy, no double sends.
+    author_creating: bool,
     saving: bool,
     /// The expected parent kind the box's current options target, `None`
     /// when the kind forbids parents or the options have not landed: a
@@ -1574,12 +1578,12 @@ impl EditForm {
             .filter_map(|spec| {
                 items
                     .iter()
-                    .position(|item| item.value() == &spec.person_id)
+                    .position(|item| item.choice == PersonChoice::Existing(spec.person_id))
                     .map(IndexPath::new)
             })
             .collect();
         let creators = cx.new(|cx| {
-            ComboboxState::new(SearchableVec::new(items), selected, window, cx)
+            ComboboxState::new(PersonDelegate::new(people), selected, window, cx)
                 .multiple(true)
                 .searchable(true)
         });
@@ -1638,6 +1642,7 @@ impl EditForm {
             series_number: prefill_input(draft.series_number, "e.g. LCL 26", window, cx),
             tags,
             collections,
+            author_creating: false,
             record: Box::new(record),
             error: None,
             saving: false,
@@ -1668,7 +1673,7 @@ impl EditForm {
             series: value(&self.series),
             series_number: value(&self.series_number),
             creators: creators_from_person_ids(
-                &self.creators.read(cx).selected_values(),
+                &selected_person_ids(&self.creators.read(cx).selected_values()),
                 &self.record.to_new().creators,
             ),
             tag_ids: self.tags.iter().map(|tag| tag.id).collect(),
@@ -3068,6 +3073,147 @@ impl LibraryApp {
         }
     }
 
+    /// Both author comboboxes create people through the worker, then select the
+    /// saved id on the same still-open form. A late reply cannot edit a new form.
+    fn wire_author_creation(
+        picker: &Entity<ComboboxState<PersonDelegate>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe_in(
+            picker,
+            window,
+            |app, picker, event: &ComboboxEvent<PersonDelegate>, window, cx| {
+                let ComboboxEvent::Change(choices) = event else {
+                    return;
+                };
+                let Some(raw) = choices.iter().find_map(|choice| match choice {
+                    PersonChoice::Create(raw) => Some(raw.clone()),
+                    PersonChoice::Existing(_) => None,
+                }) else {
+                    return;
+                };
+                let existing: Vec<_> = choices
+                    .iter()
+                    .filter(|choice| matches!(choice, PersonChoice::Existing(_)))
+                    .cloned()
+                    .collect();
+                picker.update(cx, |state, cx| {
+                    state.set_selected_values(&existing, window, cx)
+                });
+                let inline = app
+                    .table
+                    .read(cx)
+                    .delegate()
+                    .inline
+                    .as_ref()
+                    .and_then(|session| session.ready_form())
+                    .is_some_and(|form| form.creators == *picker);
+                let sidebar =
+                    matches!(&app.edit, Some(EditFetch::Ready(form)) if form.creators == *picker);
+                if !inline && !sidebar {
+                    return;
+                }
+                let busy = if inline {
+                    app.table
+                        .read(cx)
+                        .delegate()
+                        .inline
+                        .as_ref()
+                        .and_then(|s| s.ready_form())
+                        .is_some_and(|f| f.author_creating)
+                } else {
+                    matches!(&app.edit, Some(EditFetch::Ready(f)) if f.author_creating)
+                };
+                if busy {
+                    return;
+                }
+                let Ok(name) = person_name_from_query(&raw) else {
+                    return;
+                };
+                if inline {
+                    app.table.update(cx, |table, cx| {
+                        if let Some(form) = table
+                            .delegate_mut()
+                            .inline
+                            .as_mut()
+                            .and_then(|s| s.ready_form_mut())
+                        {
+                            form.author_creating = true;
+                            form.error = None;
+                            cx.notify();
+                        }
+                    });
+                } else if let Some(EditFetch::Ready(form)) = &mut app.edit {
+                    form.author_creating = true;
+                    form.error = None;
+                    cx.notify();
+                }
+                let picker = picker.clone();
+                let worker = app.table.read(cx).delegate().worker().clone();
+                cx.spawn_in(window, async move |app, window| {
+                    let result = match worker.create_person(name).await {
+                        Ok(person) => worker.list_persons().await.map(|people| (person, people)),
+                        Err(err) => Err(err),
+                    };
+                    _ = app.update_in(window, |app, window, cx| {
+                        let still_open = if inline {
+                            app.table
+                                .read(cx)
+                                .delegate()
+                                .inline
+                                .as_ref()
+                                .and_then(|s| s.ready_form())
+                                .is_some_and(|f| f.creators == picker)
+                        } else {
+                            matches!(&app.edit, Some(EditFetch::Ready(f)) if f.creators == picker)
+                        };
+                        if !still_open {
+                            return;
+                        }
+                        let error = match result {
+                            Ok((person, people)) => {
+                                let mut values: Vec<_> = picker
+                                    .read(cx)
+                                    .selected_values()
+                                    .into_iter()
+                                    .filter(|choice| matches!(choice, PersonChoice::Existing(_)))
+                                    .collect();
+                                values.push(PersonChoice::Existing(person.id));
+                                picker.update(cx, |state, cx| {
+                                    state.set_items(PersonDelegate::new(&people), window, cx);
+                                    state.set_selected_values(&values, window, cx);
+                                });
+                                None
+                            }
+                            Err(err) => Some(err),
+                        };
+                        if inline {
+                            app.table.update(cx, |table, cx| {
+                                if let Some(form) = table
+                                    .delegate_mut()
+                                    .inline
+                                    .as_mut()
+                                    .and_then(|s| s.ready_form_mut())
+                                {
+                                    form.author_creating = false;
+                                    form.error = error;
+                                    cx.notify();
+                                }
+                            });
+                        } else if let Some(EditFetch::Ready(form)) = &mut app.edit {
+                            form.author_creating = false;
+                            form.error = error;
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            },
+        )
+        .detach();
+    }
+
     /// Focus the inline editor for `col_ix`, keeping the edit row selected.
     fn focus_inline_col(&mut self, col_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let field = InlineField::from_col(col_ix);
@@ -3173,6 +3319,7 @@ impl LibraryApp {
                         // the next paint owns the focused Input entity.
                         let title = form.title.clone();
                         Self::wire_inline_active_tracking(&form, window, cx);
+                        Self::wire_author_creation(&form.creators, window, cx);
                         app.table.update(cx, |table, _| {
                             table.delegate_mut().inline =
                                 Some(InlineSession::Ready(Box::new(form)));
@@ -3216,6 +3363,7 @@ impl LibraryApp {
                 let form = InlineRowEdit::for_create(&people, window, cx);
                 let title = form.title.clone();
                 Self::wire_inline_active_tracking(&form, window, cx);
+                Self::wire_author_creation(&form.creators, window, cx);
                 app.table.update(cx, |table, cx| {
                     table.col_selectable = false;
                     table.delegate_mut().inline = Some(InlineSession::Create(Box::new(form)));
@@ -3245,7 +3393,7 @@ impl LibraryApp {
         else {
             return;
         };
-        if form.saving {
+        if form.saving || form.author_creating {
             return;
         }
         let draft = form.draft(cx);
@@ -3375,6 +3523,7 @@ impl LibraryApp {
                                 cx,
                             );
                             let title = form.title.clone();
+                            Self::wire_author_creation(&form.creators, window, cx);
                             app.edit = Some(EditFetch::Ready(Box::new(form)));
                             // Land the caret in the title so `e` opens ready
                             // to type; parent options load in the background.
@@ -3516,7 +3665,7 @@ impl LibraryApp {
         let Some(EditFetch::Ready(form)) = &self.edit else {
             return;
         };
-        if form.saving {
+        if form.saving || form.author_creating {
             return;
         }
         let record = form.record.clone();
@@ -4030,7 +4179,7 @@ impl LibraryApp {
     /// dropdown of library titles, not an id to type: users pick the
     /// containing work by name.
     fn render_edit_panel(&self, form: &EditForm, cx: &mut Context<Self>) -> Div {
-        let saving = form.saving;
+        let saving = form.saving || form.author_creating;
         let error = form.error.clone();
         let danger = cx.theme().danger;
 

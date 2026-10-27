@@ -2,14 +2,14 @@
 //! page requests over channels, so gpui's executor never runs Surreal I/O.
 
 use oeuvre_app::command::{
-    AddCollectionParent, CountResources, CreateCollection, CreateResource, CreateTag,
+    AddCollectionParent, CountResources, CreateCollection, CreatePerson, CreateResource, CreateTag,
     DeleteCollection, FindTagByText, GetResource, GetResourceDetail, ListCollectionForest,
     ListPersons, ListResourcesPage, ListResourcesQueryPage, ListTags, RemoveCollectionParent,
     RenameCollection, SetResourceFavorite, UpdateResource,
 };
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
-    Collection, CollectionId, CollectionTreeNode, NewResource, NonEmptyStr, Person, Resource,
+    Collection, CollectionId, CollectionTreeNode, Name, NewResource, NonEmptyStr, Person, Resource,
     ResourceCounts, ResourceDetail, ResourceId, ResourcePage, ResourceQuery, SortedResourcePage,
     Tag,
 };
@@ -54,6 +54,10 @@ pub enum DbRequest {
     },
     ListPersons {
         reply: oneshot::Sender<Result<Vec<Person>, String>>,
+    },
+    CreatePerson {
+        name: Name,
+        reply: oneshot::Sender<Result<Person, String>>,
     },
     ListTags {
         reply: oneshot::Sender<Result<Vec<Tag>, String>>,
@@ -248,6 +252,20 @@ impl DbWorker {
                                     .and_then(|outcome| match outcome {
                                         Outcome::ListPersons(people) => Ok(people),
                                         _ => Err("unexpected outcome from list_persons".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::CreatePerson { name, reply } => {
+                                let result = state
+                                    .execute(Command::CreatePerson(CreatePerson {
+                                        name,
+                                        aliases: vec![],
+                                    }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::CreatePerson(person) => Ok(person),
+                                        _ => Err("unexpected outcome from create_person".into()),
                                     });
                                 let _ = reply.send(result);
                             }
@@ -457,6 +475,15 @@ impl DbWorker {
             .map_err(|_| "db worker dropped the request".to_string())?
     }
 
+    pub async fn create_person(&self, name: Name) -> Result<Person, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::CreatePerson { name, reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
     pub async fn list_tags(&self) -> Result<Vec<Tag>, String> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -661,6 +688,25 @@ mod tests {
     use oeuvre_app::Surface;
     use oeuvre_app::testing::MemoryStore;
     use oeuvre_core::published_label_from;
+
+    #[tokio::test]
+    async fn worker_creates_person_available_for_author_selection() {
+        let state = AppState::builder(MemoryStore::new())
+            .surface(Surface::Test)
+            .build();
+        let worker = DbWorker::spawn(state);
+        let name = Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap();
+        let created = worker.create_person(name).await.unwrap();
+        assert_eq!(created.name.display(), "Grace Hopper");
+        assert!(
+            worker
+                .list_persons()
+                .await
+                .unwrap()
+                .iter()
+                .any(|p| p.id == created.id)
+        );
+    }
 
     #[tokio::test]
     async fn worker_walks_pages() {

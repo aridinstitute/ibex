@@ -5,12 +5,16 @@
 
 use gpui_kit::component::combobox::ComboboxState;
 use gpui_kit::component::input::InputState;
-use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
+use gpui_kit::component::searchable_list::{
+    SearchableListDelegate, SearchableListItem, SearchableVec,
+};
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme as _, IndexPath, Sizable as _, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, h_flex};
 use gpui_kit::*;
 
-use oeuvre_core::{CreatorSpec, Person, PersonId, Resource, ResourceId, ResourceKind};
+use oeuvre_core::{
+    CreatorSpec, Name, NameError, Person, PersonId, Resource, ResourceId, ResourceKind,
+};
 
 use crate::edit::{
     EditDraft, KindItem, creators_from_person_ids, empty_create_draft, kind_items, prefill_draft,
@@ -93,7 +97,7 @@ pub struct InlineRowEdit {
     pub publisher: Entity<InputState>,
     pub published_year: Entity<InputState>,
     pub kind: Entity<ComboboxState<SearchableVec<KindItem>>>,
-    pub creators: Entity<ComboboxState<SearchableVec<PersonItem>>>,
+    pub creators: Entity<ComboboxState<PersonDelegate>>,
     /// Creator specs at open time, so person re-picks keep role/credited-as.
     pub previous_creators: Vec<CreatorSpec>,
     /// Which editable column Tab/arrows advance from. Tracked explicitly
@@ -101,25 +105,138 @@ pub struct InlineRowEdit {
     pub active_field: InlineField,
     pub error: Option<String>,
     pub saving: bool,
+    pub author_creating: bool,
 }
 
-/// One person row for the creators multi-select.
+/// A stored person or the typed name to create from the search box.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PersonChoice {
+    Existing(PersonId),
+    Create(String),
+}
+
 #[derive(Clone)]
 pub struct PersonItem {
-    label: SharedString,
-    id: PersonId,
+    pub label: SharedString,
+    pub choice: PersonChoice,
 }
 
 impl SearchableListItem for PersonItem {
-    type Value = PersonId;
+    type Value = PersonChoice;
 
     fn title(&self) -> SharedString {
         self.label.clone()
     }
 
     fn value(&self) -> &Self::Value {
-        &self.id
+        &self.choice
     }
+
+    fn render(&self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        match &self.choice {
+            PersonChoice::Existing(_) => div().child(self.label.clone()).into_any_element(),
+            PersonChoice::Create(_) => h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    Icon::new(IconName::Plus)
+                        .xsmall()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(self.label.clone())
+                .into_any_element(),
+        }
+    }
+}
+
+/// Search the library's people and offer creation only when no display name matches.
+pub struct PersonDelegate {
+    options: Vec<PersonItem>,
+    matched: Vec<usize>,
+    create: Option<PersonItem>,
+}
+
+impl PersonDelegate {
+    pub fn new(people: &[Person]) -> Self {
+        let options = person_items(people);
+        Self {
+            matched: (0..options.len()).collect(),
+            options,
+            create: None,
+        }
+    }
+
+    fn filter(&mut self, query: &str) {
+        let query = query.trim();
+        let needle = query.to_lowercase();
+        self.matched = self
+            .options
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.label.to_lowercase().contains(&needle))
+            .map(|(ix, _)| ix)
+            .collect();
+        let exact = self
+            .options
+            .iter()
+            .any(|item| item.label.to_lowercase() == needle);
+        self.create = (!query.is_empty() && !exact).then(|| PersonItem {
+            label: format!("Create \u{201c}{query}\u{201d}").into(),
+            choice: PersonChoice::Create(query.to_owned()),
+        });
+    }
+
+    fn rows(&self) -> impl Iterator<Item = &PersonItem> {
+        self.matched
+            .iter()
+            .filter_map(|&ix| self.options.get(ix))
+            .chain(self.create.iter())
+    }
+}
+
+impl SearchableListDelegate for PersonDelegate {
+    type Item = PersonItem;
+
+    fn items_count(&self, _: usize) -> usize {
+        self.matched.len() + usize::from(self.create.is_some())
+    }
+
+    fn item(&self, ix: IndexPath) -> Option<&PersonItem> {
+        self.rows().nth(ix.row)
+    }
+
+    fn position<V>(&self, value: &V) -> Option<IndexPath>
+    where
+        PersonItem: SearchableListItem<Value = V>,
+        V: PartialEq,
+    {
+        self.rows()
+            .position(|item| item.value() == value)
+            .map(IndexPath::new)
+    }
+
+    fn perform_search(&mut self, query: &str, _: &mut Window, _: &mut App) -> Task<()> {
+        self.filter(query);
+        Task::ready(())
+    }
+}
+
+/// The last word is the bibliographic surname; a mononym belongs in `last`.
+pub fn person_name_from_query(query: &str) -> Result<Name, NameError> {
+    let words: Vec<_> = query.split_whitespace().collect();
+    let last = words.last().copied();
+    let first = (words.len() > 1).then(|| words[..words.len().saturating_sub(1)].join(" "));
+    Name::try_new(first.as_deref(), last, None::<&str>)
+}
+
+pub fn selected_person_ids(choices: &[PersonChoice]) -> Vec<PersonId> {
+    choices
+        .iter()
+        .filter_map(|choice| match choice {
+            PersonChoice::Existing(id) => Some(*id),
+            PersonChoice::Create(_) => None,
+        })
+        .collect()
 }
 
 impl InlineRowEdit {
@@ -174,19 +291,14 @@ impl InlineRowEdit {
             .filter_map(|spec| {
                 person_items
                     .iter()
-                    .position(|item| item.id == spec.person_id)
+                    .position(|item| item.choice == PersonChoice::Existing(spec.person_id))
                     .map(IndexPath::new)
             })
             .collect();
         let creators = cx.new(|cx| {
-            ComboboxState::new(
-                SearchableVec::new(person_items),
-                selected_indices,
-                window,
-                cx,
-            )
-            .multiple(true)
-            .searchable(true)
+            ComboboxState::new(PersonDelegate::new(people), selected_indices, window, cx)
+                .multiple(true)
+                .searchable(true)
         });
 
         Self {
@@ -201,6 +313,7 @@ impl InlineRowEdit {
             active_field: InlineField::Title,
             error: None,
             saving: false,
+            author_creating: false,
         }
     }
 
@@ -235,7 +348,7 @@ impl InlineRowEdit {
                     .map(|r| r.kind)
                     .unwrap_or(ResourceKind::Book)
             });
-        let person_ids = self.creators.read(cx).selected_values();
+        let person_ids = selected_person_ids(&self.creators.read(cx).selected_values());
         let creators = creators_from_person_ids(&person_ids, &self.previous_creators);
         let ridden = self.record.as_ref().map(prefill_draft);
         EditDraft {
@@ -275,7 +388,7 @@ pub(crate) fn person_items(people: &[Person]) -> Vec<PersonItem> {
         .iter()
         .map(|person| PersonItem {
             label: person.name.display().into(),
-            id: person.id,
+            choice: PersonChoice::Existing(person.id),
         })
         .collect();
     items.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
@@ -314,11 +427,73 @@ pub fn creators_badge_trigger(
         .w_full()
         .min_w_0()
         .overflow_hidden()
-        .children(selection.iter().map(|(_, item)| {
-            Tag::secondary()
-                .small()
-                .child(item.label.clone())
-                .into_any_element()
-        }))
+        .children(
+            selection
+                .iter()
+                .filter(|(_, item)| matches!(item.choice, PersonChoice::Existing(_)))
+                .map(|(_, item)| {
+                    Tag::secondary()
+                        .small()
+                        .child(item.label.clone())
+                        .into_any_element()
+                }),
+        )
         .into_any_element()
+}
+#[cfg(test)]
+mod tests {
+    use super::{PersonChoice, PersonDelegate, person_name_from_query, selected_person_ids};
+    use gpui_kit::component::IndexPath;
+    use gpui_kit::component::searchable_list::{
+        SearchableListDelegate as _, SearchableListItem as _,
+    };
+    use oeuvre_core::{Name, Person, PersonId};
+
+    #[test]
+    fn author_search_offers_create_only_for_a_new_nonblank_name() {
+        let ada = Person::try_new(
+            PersonId::generate(),
+            Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            vec![],
+        )
+        .unwrap();
+        let mut delegate = PersonDelegate::new(&[ada]);
+        delegate.filter(" Grace Hopper ");
+        assert_eq!(delegate.items_count(0), 1);
+        assert_eq!(
+            delegate.item(IndexPath::new(0)).unwrap().value(),
+            &PersonChoice::Create("Grace Hopper".into())
+        );
+        delegate.filter("ADA LOVELACE");
+        assert_eq!(delegate.items_count(0), 1);
+        assert_eq!(
+            delegate.item(IndexPath::new(0)).unwrap().title().as_ref(),
+            "Ada Lovelace"
+        );
+        delegate.filter("   ");
+        assert_eq!(delegate.items_count(0), 1);
+    }
+
+    #[test]
+    fn author_creation_only_enters_draft_after_it_has_a_stored_id() {
+        let ada = PersonId::generate();
+        assert_eq!(
+            selected_person_ids(&[
+                PersonChoice::Existing(ada),
+                PersonChoice::Create("Grace Hopper".into())
+            ]),
+            vec![ada]
+        );
+    }
+
+    #[test]
+    fn author_name_splits_last_word_and_keeps_mononyms_as_last() {
+        let name = person_name_from_query("  Ada  Byron Lovelace  ").unwrap();
+        assert_eq!(name.first(), Some("Ada Byron"));
+        assert_eq!(name.last(), Some("Lovelace"));
+        let name = person_name_from_query("Augustine").unwrap();
+        assert_eq!(name.first(), None);
+        assert_eq!(name.last(), Some("Augustine"));
+        assert!(person_name_from_query("  ").is_err());
+    }
 }
