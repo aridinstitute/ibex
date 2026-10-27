@@ -30,6 +30,7 @@ async fn counts_report_the_whole_library_and_emit_one_event() {
                     series_id: None,
                     series_number: None,
                     tag_ids: vec![],
+                    collection_ids: vec![],
                 },
             }))
             .await

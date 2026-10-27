@@ -1,9 +1,9 @@
 //! Storage port. Adapters implement this; commands call it through `AppState`.
 
 use crate::{
-    Name, NewResource, NewSeries, NonEmptyStr, Person, PersonError, PersonId, Resource,
-    ResourceError, ResourceId, ResourcePage, ResourceQuery, ResourceSummary, Series, SeriesId,
-    SortedResourcePage, Tag, TagId,
+    Collection, CollectionId, CollectionTreeNode, Name, NewResource, NewSeries, NonEmptyStr,
+    Person, PersonError, PersonId, Resource, ResourceError, ResourceId, ResourcePage,
+    ResourceQuery, ResourceSummary, Series, SeriesId, SortedResourcePage, Tag, TagId,
 };
 
 /// Storage backend. Grows one method per capability a command needs.
@@ -54,6 +54,55 @@ pub trait Store: Send + Sync + 'static {
 
     /// Every tag, ordered by text ascending. Empty vec when none.
     async fn list_tags(&self) -> Result<Vec<Tag>, StoreError>;
+
+    /// Allocate [`CollectionId`], insert collection row. When `parent` is set,
+    /// also create `child -> child_of -> parent`. Missing parent → not-found.
+    async fn create_collection(
+        &self,
+        name: NonEmptyStr,
+        parent: Option<CollectionId>,
+    ) -> Result<Collection, StoreError>;
+
+    /// Fetch collection by id. Missing → [`StoreError::not_found`].
+    async fn get_collection(&self, id: CollectionId) -> Result<Collection, StoreError>;
+
+    /// Replace the display name of `id`. Missing → [`StoreError::not_found`].
+    async fn rename_collection(
+        &self,
+        id: CollectionId,
+        name: NonEmptyStr,
+    ) -> Result<Collection, StoreError>;
+
+    /// Sidebar forest: roots have no parents; children follow `child_of`.
+    /// The same collection may appear under multiple parents.
+    async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError>;
+
+    /// Add `child -> child_of -> parent`. Self-parent, missing ids, or a
+    /// duplicate edge → [`StoreError::invalid`] / not-found.
+    async fn add_collection_parent(
+        &self,
+        child: CollectionId,
+        parent: CollectionId,
+    ) -> Result<(), StoreError>;
+
+    /// Remove one `child -> child_of -> parent` edge. Missing edge or ids →
+    /// not-found. Does not delete either collection row.
+    async fn remove_collection_parent(
+        &self,
+        child: CollectionId,
+        parent: CollectionId,
+    ) -> Result<(), StoreError>;
+
+    /// Delete `id` with smart cascade: exclusive children are deleted
+    /// recursively; shared children only lose the edge to `id`. Never
+    /// deletes resources (membership refs unset via schema).
+    async fn delete_collection(&self, id: CollectionId) -> Result<(), StoreError>;
+
+    /// `id` plus every transitive child via `child_of` (for listing filters).
+    async fn collection_descendant_ids(
+        &self,
+        id: CollectionId,
+    ) -> Result<Vec<CollectionId>, StoreError>;
 
     /// Allocate id, [`Resource::try_new`], persist resource row **without** creators,
     /// then create one `created` edge per creator (order = [`Creator::order`](crate::Creator::order)).
@@ -132,6 +181,8 @@ pub trait Store: Send + Sync + 'static {
     /// - `filter.kind` holds when the row's kind equals it;
     /// - `filter.favorite` holds when the row's favorite flag equals it;
     /// - `filter.tag` holds when the row's `tags` array references that tag;
+    /// - `filter.collection` holds when the row's `collections` array
+    ///   references that collection or any of its `child_of` descendants;
     /// - set predicates AND together: a row must satisfy every one.
     ///
     /// `offset` is a 0-based window into the ordered list; the page returns

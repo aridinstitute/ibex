@@ -1,6 +1,7 @@
 //! Library grid: resource summary rows, one page at a time.
 
 use std::{
+    any::Any,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     ops::Range,
     path::PathBuf,
@@ -12,6 +13,8 @@ use gpui_kit::base::{Transition as MotionTransition, transition};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{Enter, Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::resizable::resize_handle;
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
@@ -23,11 +26,13 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Focusable as _, *};
 
 use oeuvre_core::{
-    NonEmptyStr, ParentRule, Person, PersonId, PublishedRange, Resource, ResourceCounts,
-    ResourceDetail, ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery,
-    ResourceSort, ResourceSummary, SortDirection, Tag, TagId, UtcMillis, format_recorded_date,
+    Collection, CollectionId, CollectionTreeNode, NonEmptyStr, ParentRule, Person, PersonId,
+    PublishedRange, Resource, ResourceCounts, ResourceDetail, ResourceFilter, ResourceId,
+    ResourceKind, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, SortDirection, Tag,
+    TagId, UtcMillis, format_recorded_date,
 };
 
+use crate::collections::{CollectionChoice, CollectionDelegate, flatten_collections};
 use crate::db::DbWorker;
 use crate::detail::{
     DetailFetch, DetailView, FIELD_LABEL_WIDTH, FIELD_TEXT_SIZE, PANEL_WIDTH, render_panel,
@@ -38,7 +43,8 @@ use crate::edit::{
 };
 use crate::icons::symbol;
 use crate::inline_edit::{
-    InlineField, InlineRowEdit, InlineSession, PersonItem, creators_badge_trigger, person_items,
+    InlineField, InlineRowEdit, InlineSession, PersonChoice, PersonDelegate,
+    creators_badge_trigger, person_items, person_name_from_query, selected_person_ids,
 };
 use crate::kind::{kind_color, kind_label, kind_symbol};
 use crate::settings::Settings;
@@ -47,6 +53,140 @@ use crate::tags::{TagChoice, TagDelegate};
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
 /// enough that the demo library spans several pages.
 pub const PAGE_SIZE: u32 = 50;
+
+/// Visible sidebar rows from a collection forest, respecting expand state.
+/// The `Option<CollectionId>` is the tree parent that placed this row (`None` for roots).
+fn visible_collection_rows(
+    forest: &[CollectionTreeNode],
+    expanded: &HashSet<CollectionId>,
+) -> Vec<(Collection, usize, bool, Option<CollectionId>)> {
+    let mut out = Vec::new();
+    fn walk(
+        nodes: &[CollectionTreeNode],
+        expanded: &HashSet<CollectionId>,
+        depth: usize,
+        parent: Option<CollectionId>,
+        out: &mut Vec<(Collection, usize, bool, Option<CollectionId>)>,
+    ) {
+        for node in nodes {
+            let has_children = !node.children.is_empty();
+            out.push((node.collection.clone(), depth, has_children, parent));
+            if has_children && expanded.contains(&node.collection.id) {
+                walk(
+                    &node.children,
+                    expanded,
+                    depth + 1,
+                    Some(node.collection.id),
+                    out,
+                );
+            }
+        }
+    }
+    walk(forest, expanded, 0, None, &mut out);
+    out
+}
+
+fn expand_all_parents(forest: &[CollectionTreeNode], expanded: &mut HashSet<CollectionId>) {
+    for node in forest {
+        if !node.children.is_empty() {
+            expanded.insert(node.collection.id);
+            expand_all_parents(&node.children, expanded);
+        }
+    }
+}
+
+fn collection_subtree_ids(node: &CollectionTreeNode) -> HashSet<CollectionId> {
+    let mut ids = HashSet::new();
+    ids.insert(node.collection.id);
+    for child in &node.children {
+        ids.extend(collection_subtree_ids(child));
+    }
+    ids
+}
+
+/// Nest targets: every collection except `child` and its descendants.
+fn nest_parent_candidates(forest: &[CollectionTreeNode], child: CollectionId) -> Vec<Collection> {
+    let mut blocked = HashSet::new();
+    blocked.insert(child);
+    fn walk_blocked(
+        nodes: &[CollectionTreeNode],
+        child: CollectionId,
+        blocked: &mut HashSet<CollectionId>,
+    ) {
+        for node in nodes {
+            if node.collection.id == child {
+                blocked.extend(collection_subtree_ids(node));
+            } else {
+                walk_blocked(&node.children, child, blocked);
+            }
+        }
+    }
+    walk_blocked(forest, child, &mut blocked);
+    flatten_collections(forest)
+        .into_iter()
+        .filter(|c| !blocked.contains(&c.id))
+        .collect()
+}
+
+fn can_nest_under(
+    forest: &[CollectionTreeNode],
+    child: CollectionId,
+    parent: CollectionId,
+) -> bool {
+    nest_parent_candidates(forest, child)
+        .iter()
+        .any(|c| c.id == parent)
+}
+
+/// Sidebar-density menu row (12px type). PopupMenu has no public Small size API.
+fn compact_menu_item(
+    label: impl Into<SharedString>,
+    handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> PopupMenuItem {
+    let label = label.into();
+    PopupMenuItem::element(move |_, _| div().text_size(px(12.)).child(label.clone()))
+        .on_click(handler)
+}
+
+/// Payload for dragging a sidebar collection onto another (or the header to unnest).
+#[derive(Clone)]
+struct CollectionDrag {
+    id: CollectionId,
+    name: SharedString,
+    from_parent: Option<CollectionId>,
+}
+
+struct CollectionDragGhost {
+    name: SharedString,
+}
+
+impl Render for CollectionDragGhost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_0p5()
+            .rounded(px(6.))
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().popover_foreground)
+            .text_size(px(12.))
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(self.name.clone())
+    }
+}
+
+#[derive(Clone)]
+struct SidebarResize {
+    left: bool,
+    width: Pixels,
+    pointer_x: Pixels,
+}
+
+impl Render for SidebarResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
 
 /// First page of parent candidates the edit form fetches, already narrowed
 /// to the edited kind's expected parent kind at the store. A parent beyond
@@ -697,7 +837,9 @@ impl TableDelegate for LibraryDelegate {
                         .unwrap_or_default(),
                 ),
                 COL_EDITED => {
-                    if let Some(error) = form.error.clone() {
+                    if form.author_creating {
+                        cell.text_color(muted).child("Creating author…")
+                    } else if let Some(error) = form.error.clone() {
                         let danger = cx.theme().danger;
                         cell.text_color(danger)
                             .child(div().min_w_0().truncate().child(error))
@@ -1080,7 +1222,7 @@ fn focus_inline_entities(
     field: InlineField,
     kind: &Entity<ComboboxState<SearchableVec<KindItem>>>,
     title: &Entity<InputState>,
-    creators: &Entity<ComboboxState<SearchableVec<PersonItem>>>,
+    creators: &Entity<ComboboxState<PersonDelegate>>,
     published: &Entity<InputState>,
     publisher: &Entity<InputState>,
     window: &mut Window,
@@ -1266,13 +1408,14 @@ fn prefetch_window(row_ix: usize, rows_count: usize) -> Range<usize> {
     start..end
 }
 
-/// Left-nav selection: All items, Favorites, one kind, or one tag.
+/// Left-nav selection: All items, Favorites, one kind, tag, or collection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SidebarNav {
     All,
     Favorites,
     Kind(ResourceKind),
     Tag(TagId),
+    Collection(CollectionId),
 }
 
 pub struct LibraryApp {
@@ -1285,13 +1428,26 @@ pub struct LibraryApp {
     published_to_input: Entity<InputState>,
     detail_open: bool,
     left_panel_open: bool,
+    resizing_sidebar: Option<SidebarResize>,
     counts: Option<ResourceCounts>,
     counts_error: Option<String>,
     counts_gen: u64,
     /// Library tags for the left-nav section, ordered by text.
     tags: Vec<Tag>,
+    /// Nested collections for the left-nav tree.
+    collection_forest: Vec<CollectionTreeNode>,
+    /// Collection ids whose children are shown in the sidebar tree.
+    expanded_collections: HashSet<CollectionId>,
+    /// Tree parent of the selected collection row (`None` when the selection is a root).
+    collection_focus_parent: Option<CollectionId>,
+    /// Collection currently showing an inline rename field.
+    renaming_collection: Option<CollectionId>,
+    /// Inline rename field; Enter commits.
+    collection_name_input: Entity<InputState>,
     /// Detail-pane autocomplete for attaching a library tag or creating one.
     tag_picker: Entity<ComboboxState<TagDelegate>>,
+    /// Detail-pane autocomplete for attaching a library collection.
+    collection_picker: Entity<ComboboxState<CollectionDelegate>>,
     /// Row selection, tracked here so the panel shows one resource exactly
     /// as long as its row stays selected.
     selected: Option<ResourceId>,
@@ -1339,7 +1495,7 @@ struct EditForm {
     title: Entity<InputState>,
     kind: Entity<ComboboxState<SearchableVec<KindItem>>>,
     parent: Entity<ComboboxState<SearchableVec<ParentItem>>>,
-    creators: Entity<ComboboxState<SearchableVec<PersonItem>>>,
+    creators: Entity<ComboboxState<PersonDelegate>>,
     publisher: Entity<InputState>,
     published_year: Entity<InputState>,
     accessed_year: Entity<InputState>,
@@ -1348,10 +1504,13 @@ struct EditForm {
     /// Tags staged for save: order matches the form rows; the Combobox
     /// adds, the row × removes, neither writes until Save.
     tags: Vec<Tag>,
+    /// Collections staged for save (same attach pattern as tags).
+    collections: Vec<Collection>,
     /// The form's own line of complaint: a rejected payload or a failed
     /// save, shown until the next attempt.
     error: Option<String>,
     /// While the save is in flight: the Save button busy, no double sends.
+    author_creating: bool,
     saving: bool,
     /// The expected parent kind the box's current options target, `None`
     /// when the kind forbids parents or the options have not landed: a
@@ -1369,6 +1528,7 @@ impl EditForm {
     fn new(
         record: Resource,
         library_tags: &[Tag],
+        library_collections: &[Collection],
         worker: &DbWorker,
         people: &[Person],
         window: &mut Window,
@@ -1379,6 +1539,16 @@ impl EditForm {
             .tag_ids
             .iter()
             .filter_map(|id| library_tags.iter().find(|tag| tag.id == *id).cloned())
+            .collect();
+        let collections: Vec<Collection> = draft
+            .collection_ids
+            .iter()
+            .filter_map(|id| {
+                library_collections
+                    .iter()
+                    .find(|collection| collection.id == *id)
+                    .cloned()
+            })
             .collect();
         let items = kind_items();
         // The box keys rows by position: the kind's row in the alphabetized
@@ -1408,12 +1578,12 @@ impl EditForm {
             .filter_map(|spec| {
                 items
                     .iter()
-                    .position(|item| item.value() == &spec.person_id)
+                    .position(|item| item.choice == PersonChoice::Existing(spec.person_id))
                     .map(IndexPath::new)
             })
             .collect();
         let creators = cx.new(|cx| {
-            ComboboxState::new(SearchableVec::new(items), selected, window, cx)
+            ComboboxState::new(PersonDelegate::new(people), selected, window, cx)
                 .multiple(true)
                 .searchable(true)
         });
@@ -1471,6 +1641,8 @@ impl EditForm {
             series: prefill_input(draft.series, "Series id", window, cx),
             series_number: prefill_input(draft.series_number, "e.g. LCL 26", window, cx),
             tags,
+            collections,
+            author_creating: false,
             record: Box::new(record),
             error: None,
             saving: false,
@@ -1501,10 +1673,11 @@ impl EditForm {
             series: value(&self.series),
             series_number: value(&self.series_number),
             creators: creators_from_person_ids(
-                &self.creators.read(cx).selected_values(),
+                &selected_person_ids(&self.creators.read(cx).selected_values()),
                 &self.record.to_new().creators,
             ),
             tag_ids: self.tags.iter().map(|tag| tag.id).collect(),
+            collection_ids: self.collections.iter().map(|c| c.id).collect(),
         }
     }
 }
@@ -1523,6 +1696,83 @@ fn prefill_input(
 }
 
 impl LibraryApp {
+    fn sidebar_resize_handle(
+        &self,
+        left: bool,
+        width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let entity = cx.entity().downgrade();
+        resize_handle(
+            if left {
+                "resize-left-sidebar"
+            } else {
+                "resize-right-sidebar"
+            },
+            Axis::Horizontal,
+        )
+        .inside(if left {
+            gpui_kit::component::resizable::HandleEdge::Trailing
+        } else {
+            gpui_kit::component::resizable::HandleEdge::Leading
+        })
+        .on_drag(
+            SidebarResize {
+                left,
+                width,
+                pointer_x: px(0.),
+            },
+            move |drag, _, window, cx| {
+                let mut drag = drag.clone();
+                drag.pointer_x = window.mouse_position().x;
+                let _ = entity.update(cx, |this, cx| {
+                    this.resizing_sidebar = Some(drag.clone());
+                    cx.notify();
+                });
+                cx.new(|_| drag)
+            },
+        )
+    }
+
+    fn resize_sidebar(
+        &mut self,
+        event: &DragMoveEvent<SidebarResize>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.resizing_sidebar.as_ref() else {
+            return;
+        };
+        let delta = event.event.position.x - drag.pointer_x;
+        let width = drag.width + if drag.left { delta } else { -delta };
+        self.table.update(cx, |table, _| {
+            let settings = &mut table.delegate_mut().settings;
+            if drag.left {
+                settings.left_sidebar_width =
+                    Some(f64::from(f32::from(width.clamp(px(140.), px(420.)))));
+            } else {
+                settings.right_sidebar_width =
+                    Some(f64::from(f32::from(width.clamp(px(240.), px(640.)))));
+            }
+        });
+        cx.notify();
+    }
+
+    fn finish_sidebar_resize(&mut self, cx: &mut Context<Self>) {
+        if self.resizing_sidebar.take().is_none() {
+            return;
+        }
+        if let Err(err) = self
+            .table
+            .read(cx)
+            .delegate()
+            .settings
+            .save(&self.settings_dir)
+        {
+            eprintln!("warning: could not save sidebar widths: {err:#}");
+        }
+        cx.notify();
+    }
     /// Persist a finished column resize to config.toml. The table emits
     /// [`TableEvent::ColumnWidthsChanged`] once per completed drag or fit,
     /// so this is one small write per user action; the delegate's copy is
@@ -1820,12 +2070,59 @@ impl LibraryApp {
         let worker_tags = table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
             let tags = worker_tags.list_tags().await.unwrap_or_default();
+            let forest = worker_tags
+                .list_collection_forest()
+                .await
+                .unwrap_or_default();
             _ = app.update_in(window, |app, window, cx| {
                 app.tags = tags;
+                app.set_collection_forest(forest, window, cx);
                 app.sync_tag_picker(window, cx);
                 cx.notify();
             });
         })
+        .detach();
+
+        let collection_picker = cx.new(|cx| {
+            ComboboxState::new(CollectionDelegate::new(&[]), Vec::new(), window, cx)
+                .searchable(true)
+        });
+        cx.subscribe_in(
+            &collection_picker,
+            window,
+            |this, picker, event: &ComboboxEvent<CollectionDelegate>, window, cx| {
+                let ComboboxEvent::Change(values) = event else {
+                    return;
+                };
+                let Some(choice) = values.first().cloned() else {
+                    return;
+                };
+                picker.update(cx, |state, cx| {
+                    state.set_selected_indices(Vec::new(), window, cx);
+                    state.set_query("", window, cx);
+                });
+                this.stage_collection_on_edit_form(choice, window, cx);
+            },
+        )
+        .detach();
+
+        let collection_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Collection name"));
+        cx.subscribe_in(
+            &collection_name_input,
+            window,
+            |this, _input, event: &InputEvent, window, cx| {
+                if matches!(
+                    event,
+                    InputEvent::PressEnter {
+                        secondary: false,
+                        ..
+                    }
+                ) {
+                    this.commit_collection_rename(window, cx);
+                }
+            },
+        )
         .detach();
 
         Self {
@@ -1833,13 +2130,20 @@ impl LibraryApp {
             settings_dir,
             published_from_input,
             published_to_input,
-            detail_open: false,
+            detail_open: true,
             left_panel_open: true,
+            resizing_sidebar: None,
             counts: None,
             counts_error: None,
             counts_gen: 0,
             tags: Vec::new(),
+            collection_forest: Vec::new(),
+            expanded_collections: HashSet::new(),
+            collection_focus_parent: None,
+            renaming_collection: None,
+            collection_name_input,
             tag_picker,
+            collection_picker,
             selected: None,
             detail: None,
             detail_cache: DetailCache::new(),
@@ -1879,13 +2183,284 @@ impl LibraryApp {
         cx.spawn_in(window, async move |app, window| {
             let result = worker.resource_counts().await;
             let tags = worker.list_tags().await.unwrap_or_default();
+            let forest = worker.list_collection_forest().await.unwrap_or_default();
             _ = app.update_in(window, |app, window, cx| {
                 app.tags = tags;
+                app.set_collection_forest(forest, window, cx);
                 app.sync_tag_picker(window, cx);
                 app.set_counts(result, generation, cx)
             });
         })
         .detach();
+    }
+
+    fn set_collection_forest(
+        &mut self,
+        forest: Vec<CollectionTreeNode>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut expanded = HashSet::new();
+        expand_all_parents(&forest, &mut expanded);
+        self.collection_forest = forest;
+        self.expanded_collections = expanded;
+        self.sync_collection_picker(window, cx);
+    }
+
+    fn sync_collection_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let staged = match &self.edit {
+            Some(EditFetch::Ready(form)) => form.collections.clone(),
+            _ => Vec::new(),
+        };
+        let staged_ids: HashSet<CollectionId> = staged.iter().map(|c| c.id).collect();
+        let available: Vec<Collection> = flatten_collections(&self.collection_forest)
+            .into_iter()
+            .filter(|c| !staged_ids.contains(&c.id))
+            .collect();
+        self.collection_picker.update(cx, |state, cx| {
+            state.set_items(CollectionDelegate::new(&available), window, cx);
+        });
+    }
+
+    fn stage_collection_on_edit_form(
+        &mut self,
+        choice: CollectionChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(collection) = flatten_collections(&self.collection_forest)
+            .into_iter()
+            .find(|c| c.id == choice.0)
+        else {
+            return;
+        };
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        if form.collections.iter().any(|c| c.id == choice.0) {
+            return;
+        }
+        form.collections.push(collection);
+        self.sync_collection_picker(window, cx);
+        cx.notify();
+    }
+
+    fn unstage_collection_on_edit_form(
+        &mut self,
+        collection_id: CollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        form.collections.retain(|c| c.id != collection_id);
+        self.sync_collection_picker(window, cx);
+        cx.notify();
+    }
+
+    /// New collection at the same tree level as the current selection (sibling),
+    /// or a root when no collection is selected.
+    fn create_sidebar_collection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Sibling of the selected row: same tree parent (None → new root).
+        let parent_id = match self.table.read(cx).delegate().filter.collection {
+            Some(_) => self.collection_focus_parent,
+            None => None,
+        };
+        if let Some(parent) = parent_id {
+            self.expanded_collections.insert(parent);
+        }
+        let focus_parent = parent_id;
+        let worker = self.table.read(cx).delegate().worker().clone();
+        let name = NonEmptyStr::try_new("New collection").expect("literal");
+        cx.spawn_in(window, async move |app, window| {
+            let result = worker.create_collection(name, parent_id).await;
+            _ = app.update_in(window, |app, window, cx| {
+                if let Ok(collection) = result {
+                    app.collection_focus_parent = focus_parent;
+                    app.refresh_counts(window, cx);
+                    app.select_sidebar_nav(SidebarNav::Collection(collection.id), window, cx);
+                    app.begin_collection_rename(collection.id, window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn begin_collection_rename(
+        &mut self,
+        id: CollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = flatten_collections(&self.collection_forest)
+            .into_iter()
+            .find(|c| c.id == id)
+            .map(|c| c.name.as_str().to_owned())
+            .unwrap_or_default();
+        self.renaming_collection = Some(id);
+        self.collection_name_input.update(cx, |state, cx| {
+            state.set_value(name, window, cx);
+            state.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn cancel_collection_rename(&mut self, cx: &mut Context<Self>) {
+        self.renaming_collection = None;
+        cx.notify();
+    }
+
+    fn commit_collection_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.renaming_collection else {
+            return;
+        };
+        let raw = self.collection_name_input.read(cx).value().to_string();
+        let Ok(name) = NonEmptyStr::try_new(raw.trim()) else {
+            self.cancel_collection_rename(cx);
+            return;
+        };
+        let worker = self.table.read(cx).delegate().worker().clone();
+        self.renaming_collection = None;
+        cx.spawn_in(window, async move |app, window| {
+            let result = worker.rename_collection(id, name).await;
+            _ = app.update_in(window, |app, window, cx| {
+                if result.is_ok() {
+                    app.refresh_counts(window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn nest_collection_under(
+        &mut self,
+        child_id: CollectionId,
+        parent_id: CollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let result = worker.add_collection_parent(child_id, parent_id).await;
+            _ = app.update_in(window, |app, window, cx| {
+                if result.is_ok() {
+                    app.expanded_collections.insert(parent_id);
+                    app.collection_focus_parent = Some(parent_id);
+                    app.refresh_counts(window, cx);
+                    app.select_sidebar_nav(SidebarNav::Collection(child_id), window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Drag-drop reparent: drop the edge from `from_parent` (if any), then nest under `to_parent`.
+    fn reparent_collection(
+        &mut self,
+        child_id: CollectionId,
+        from_parent: Option<CollectionId>,
+        to_parent: CollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if from_parent == Some(to_parent) {
+            return;
+        }
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            if let Some(old_parent) = from_parent {
+                if worker
+                    .remove_collection_parent(child_id, old_parent)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let result = worker.add_collection_parent(child_id, to_parent).await;
+            _ = app.update_in(window, |app, window, cx| {
+                if result.is_ok() {
+                    app.expanded_collections.insert(to_parent);
+                    app.collection_focus_parent = Some(to_parent);
+                    app.refresh_counts(window, cx);
+                    app.select_sidebar_nav(SidebarNav::Collection(child_id), window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn unnest_collection(
+        &mut self,
+        child_id: CollectionId,
+        parent_id: CollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let result = worker.remove_collection_parent(child_id, parent_id).await;
+            _ = app.update_in(window, |app, window, cx| {
+                if result.is_ok() {
+                    app.collection_focus_parent = None;
+                    app.refresh_counts(window, cx);
+                    app.select_sidebar_nav(SidebarNav::Collection(child_id), window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn delete_sidebar_collection(
+        &mut self,
+        id: CollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let result = worker.delete_collection(id).await;
+            _ = app.update_in(window, |app, window, cx| {
+                if result.is_ok() {
+                    app.collection_focus_parent = None;
+                    app.renaming_collection = None;
+                    app.select_sidebar_nav(SidebarNav::All, window, cx);
+                    app.refresh_counts(window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn toggle_collection_expanded(&mut self, id: CollectionId, cx: &mut Context<Self>) {
+        if !self.expanded_collections.remove(&id) {
+            self.expanded_collections.insert(id);
+        }
+        cx.notify();
+    }
+
+    fn select_collection_row(
+        &mut self,
+        id: CollectionId,
+        parent: Option<CollectionId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .renaming_collection
+            .is_some_and(|renaming| renaming != id)
+        {
+            self.renaming_collection = None;
+        }
+        self.collection_focus_parent = parent;
+        self.select_sidebar_nav(SidebarNav::Collection(id), window, cx);
     }
 
     /// Rebuild the edit-form tag Combobox from the library list minus tags
@@ -1951,9 +2526,8 @@ impl LibraryApp {
                             Ok(tag) => {
                                 if !app.tags.iter().any(|t| t.id == tag.id) {
                                     app.tags.push(tag.clone());
-                                    app.tags.sort_by(|a, b| {
-                                        a.text.as_str().cmp(b.text.as_str())
-                                    });
+                                    app.tags
+                                        .sort_by(|a, b| a.text.as_str().cmp(b.text.as_str()));
                                 }
                                 if let Some(EditFetch::Ready(form)) = &mut app.edit {
                                     if !form.tags.iter().any(|t| t.id == tag.id) {
@@ -2006,15 +2580,30 @@ impl LibraryApp {
         };
         let kind = match nav {
             SidebarNav::Kind(kind) => Some(kind),
-            SidebarNav::All | SidebarNav::Favorites | SidebarNav::Tag(_) => None,
+            SidebarNav::All
+            | SidebarNav::Favorites
+            | SidebarNav::Tag(_)
+            | SidebarNav::Collection(_) => None,
         };
         let favorite = match nav {
             SidebarNav::Favorites => Some(true),
-            SidebarNav::All | SidebarNav::Kind(_) | SidebarNav::Tag(_) => None,
+            SidebarNav::All
+            | SidebarNav::Kind(_)
+            | SidebarNav::Tag(_)
+            | SidebarNav::Collection(_) => None,
         };
         let tag = match nav {
             SidebarNav::Tag(id) => Some(id),
-            SidebarNav::All | SidebarNav::Favorites | SidebarNav::Kind(_) => None,
+            SidebarNav::All
+            | SidebarNav::Favorites
+            | SidebarNav::Kind(_)
+            | SidebarNav::Collection(_) => None,
+        };
+        let collection = match nav {
+            SidebarNav::Collection(id) => Some(id),
+            SidebarNav::All | SidebarNav::Favorites | SidebarNav::Kind(_) | SidebarNav::Tag(_) => {
+                None
+            }
         };
         if let Some(input) = input {
             input.update(cx, |state, cx| {
@@ -2028,14 +2617,20 @@ impl LibraryApp {
             let kind_changed = delegate.filter.kind != kind;
             let favorite_changed = delegate.filter.favorite != favorite;
             let tag_changed = delegate.filter.tag != tag;
-            if !kind_changed && !favorite_changed && !tag_changed {
+            let collection_changed = delegate.filter.collection != collection;
+            if !kind_changed && !favorite_changed && !tag_changed && !collection_changed {
                 return;
             }
             delegate.filter.kind = kind;
             delegate.filter.favorite = favorite;
             delegate.filter.tag = tag;
+            delegate.filter.collection = collection;
             delegate.reload_from_top(selected_id, None, window, cx);
         });
+        if !matches!(nav, SidebarNav::Collection(_)) {
+            self.collection_focus_parent = None;
+            self.renaming_collection = None;
+        }
         cx.notify();
     }
 
@@ -2478,6 +3073,147 @@ impl LibraryApp {
         }
     }
 
+    /// Both author comboboxes create people through the worker, then select the
+    /// saved id on the same still-open form. A late reply cannot edit a new form.
+    fn wire_author_creation(
+        picker: &Entity<ComboboxState<PersonDelegate>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe_in(
+            picker,
+            window,
+            |app, picker, event: &ComboboxEvent<PersonDelegate>, window, cx| {
+                let ComboboxEvent::Change(choices) = event else {
+                    return;
+                };
+                let Some(raw) = choices.iter().find_map(|choice| match choice {
+                    PersonChoice::Create(raw) => Some(raw.clone()),
+                    PersonChoice::Existing(_) => None,
+                }) else {
+                    return;
+                };
+                let existing: Vec<_> = choices
+                    .iter()
+                    .filter(|choice| matches!(choice, PersonChoice::Existing(_)))
+                    .cloned()
+                    .collect();
+                picker.update(cx, |state, cx| {
+                    state.set_selected_values(&existing, window, cx)
+                });
+                let inline = app
+                    .table
+                    .read(cx)
+                    .delegate()
+                    .inline
+                    .as_ref()
+                    .and_then(|session| session.ready_form())
+                    .is_some_and(|form| form.creators == *picker);
+                let sidebar =
+                    matches!(&app.edit, Some(EditFetch::Ready(form)) if form.creators == *picker);
+                if !inline && !sidebar {
+                    return;
+                }
+                let busy = if inline {
+                    app.table
+                        .read(cx)
+                        .delegate()
+                        .inline
+                        .as_ref()
+                        .and_then(|s| s.ready_form())
+                        .is_some_and(|f| f.author_creating)
+                } else {
+                    matches!(&app.edit, Some(EditFetch::Ready(f)) if f.author_creating)
+                };
+                if busy {
+                    return;
+                }
+                let Ok(name) = person_name_from_query(&raw) else {
+                    return;
+                };
+                if inline {
+                    app.table.update(cx, |table, cx| {
+                        if let Some(form) = table
+                            .delegate_mut()
+                            .inline
+                            .as_mut()
+                            .and_then(|s| s.ready_form_mut())
+                        {
+                            form.author_creating = true;
+                            form.error = None;
+                            cx.notify();
+                        }
+                    });
+                } else if let Some(EditFetch::Ready(form)) = &mut app.edit {
+                    form.author_creating = true;
+                    form.error = None;
+                    cx.notify();
+                }
+                let picker = picker.clone();
+                let worker = app.table.read(cx).delegate().worker().clone();
+                cx.spawn_in(window, async move |app, window| {
+                    let result = match worker.create_person(name).await {
+                        Ok(person) => worker.list_persons().await.map(|people| (person, people)),
+                        Err(err) => Err(err),
+                    };
+                    _ = app.update_in(window, |app, window, cx| {
+                        let still_open = if inline {
+                            app.table
+                                .read(cx)
+                                .delegate()
+                                .inline
+                                .as_ref()
+                                .and_then(|s| s.ready_form())
+                                .is_some_and(|f| f.creators == picker)
+                        } else {
+                            matches!(&app.edit, Some(EditFetch::Ready(f)) if f.creators == picker)
+                        };
+                        if !still_open {
+                            return;
+                        }
+                        let error = match result {
+                            Ok((person, people)) => {
+                                let mut values: Vec<_> = picker
+                                    .read(cx)
+                                    .selected_values()
+                                    .into_iter()
+                                    .filter(|choice| matches!(choice, PersonChoice::Existing(_)))
+                                    .collect();
+                                values.push(PersonChoice::Existing(person.id));
+                                picker.update(cx, |state, cx| {
+                                    state.set_items(PersonDelegate::new(&people), window, cx);
+                                    state.set_selected_values(&values, window, cx);
+                                });
+                                None
+                            }
+                            Err(err) => Some(err),
+                        };
+                        if inline {
+                            app.table.update(cx, |table, cx| {
+                                if let Some(form) = table
+                                    .delegate_mut()
+                                    .inline
+                                    .as_mut()
+                                    .and_then(|s| s.ready_form_mut())
+                                {
+                                    form.author_creating = false;
+                                    form.error = error;
+                                    cx.notify();
+                                }
+                            });
+                        } else if let Some(EditFetch::Ready(form)) = &mut app.edit {
+                            form.author_creating = false;
+                            form.error = error;
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            },
+        )
+        .detach();
+    }
+
     /// Focus the inline editor for `col_ix`, keeping the edit row selected.
     fn focus_inline_col(&mut self, col_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let field = InlineField::from_col(col_ix);
@@ -2583,6 +3319,7 @@ impl LibraryApp {
                         // the next paint owns the focused Input entity.
                         let title = form.title.clone();
                         Self::wire_inline_active_tracking(&form, window, cx);
+                        Self::wire_author_creation(&form.creators, window, cx);
                         app.table.update(cx, |table, _| {
                             table.delegate_mut().inline =
                                 Some(InlineSession::Ready(Box::new(form)));
@@ -2626,6 +3363,7 @@ impl LibraryApp {
                 let form = InlineRowEdit::for_create(&people, window, cx);
                 let title = form.title.clone();
                 Self::wire_inline_active_tracking(&form, window, cx);
+                Self::wire_author_creation(&form.creators, window, cx);
                 app.table.update(cx, |table, cx| {
                     table.col_selectable = false;
                     table.delegate_mut().inline = Some(InlineSession::Create(Box::new(form)));
@@ -2655,7 +3393,7 @@ impl LibraryApp {
         else {
             return;
         };
-        if form.saving {
+        if form.saving || form.author_creating {
             return;
         }
         let draft = form.draft(cx);
@@ -2774,9 +3512,18 @@ impl LibraryApp {
                         {
                             let parent_id = record.parent_id;
                             let rule = record.kind.parent_rule();
-                            let form =
-                                EditForm::new(record, &app.tags, &worker, &people, window, cx);
+                            let library_collections = flatten_collections(&app.collection_forest);
+                            let form = EditForm::new(
+                                record,
+                                &app.tags,
+                                &library_collections,
+                                &worker,
+                                &people,
+                                window,
+                                cx,
+                            );
                             let title = form.title.clone();
+                            Self::wire_author_creation(&form.creators, window, cx);
                             app.edit = Some(EditFetch::Ready(Box::new(form)));
                             // Land the caret in the title so `e` opens ready
                             // to type; parent options load in the background.
@@ -2784,6 +3531,7 @@ impl LibraryApp {
                                 state.focus(window, cx);
                             });
                             app.sync_tag_picker(window, cx);
+                            app.sync_collection_picker(window, cx);
                             app.load_parent_options(
                                 worker.clone(),
                                 id,
@@ -2917,7 +3665,7 @@ impl LibraryApp {
         let Some(EditFetch::Ready(form)) = &self.edit else {
             return;
         };
-        if form.saving {
+        if form.saving || form.author_creating {
             return;
         }
         let record = form.record.clone();
@@ -3036,9 +3784,14 @@ impl LibraryApp {
         let filter = self.table.read(cx).delegate().filter.clone();
         let selected_kind = filter.kind;
         let selected_tag = filter.tag;
-        let all_selected =
-            filter.kind.is_none() && filter.favorite.is_none() && filter.tag.is_none();
+        let selected_collection = filter.collection;
+        let all_selected = filter.kind.is_none()
+            && filter.favorite.is_none()
+            && filter.tag.is_none()
+            && filter.collection.is_none();
         let favorites_selected = filter.favorite == Some(true);
+        let collection_rows =
+            visible_collection_rows(&self.collection_forest, &self.expanded_collections);
         let kinds = ResourceKind::ALL
             .into_iter()
             .enumerate()
@@ -3064,17 +3817,18 @@ impl LibraryApp {
                 all_selected,
                 cx,
             ))
-            .child(self.sidebar_row(
-                1,
-                SidebarNav::Favorites,
-                "Favorites".into(),
-                symbol("star", AssetIconName::Star).text_color(favorite_star_color(
-                    cx.theme().is_dark(),
-                )),
-                self.counts.as_ref().map(|counts| counts.favorites),
-                favorites_selected,
-                cx,
-            ))
+            .child(
+                self.sidebar_row(
+                    1,
+                    SidebarNav::Favorites,
+                    "Favorites".into(),
+                    symbol("star", AssetIconName::Star)
+                        .text_color(favorite_star_color(cx.theme().is_dark())),
+                    self.counts.as_ref().map(|counts| counts.favorites),
+                    favorites_selected,
+                    cx,
+                ),
+            )
             .child(
                 div()
                     .pt_4()
@@ -3123,6 +3877,220 @@ impl LibraryApp {
                     cx,
                 ))
             }))
+            .child(
+                h_flex()
+                    .id("collections-header")
+                    .pt_4()
+                    .pb_1()
+                    .px_2()
+                    .items_center()
+                    .gap_1()
+                    .rounded(px(8.))
+                    .can_drop(|dragged: &dyn Any, _, _| {
+                        dragged
+                            .downcast_ref::<CollectionDrag>()
+                            .is_some_and(|drag| drag.from_parent.is_some())
+                    })
+                    .on_drop(cx.listener(|this, drag: &CollectionDrag, window, cx| {
+                        if let Some(parent_id) = drag.from_parent {
+                            this.unnest_collection(drag.id, parent_id, window, cx);
+                        }
+                    }))
+                    .drag_over::<CollectionDrag>(|style, _, _, cx| style.bg(cx.theme().accent))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Collections"),
+                    )
+                    .child(
+                        Button::new("new-collection")
+                            .ghost()
+                            .xsmall()
+                            .icon(Icon::new(IconName::Plus).xsmall())
+                            .tooltip(if selected_collection.is_some() {
+                                "New collection at this level"
+                            } else {
+                                "New collection"
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.create_sidebar_collection(window, cx)
+                            })),
+                    ),
+            )
+            .children(collection_rows.into_iter().enumerate().map(
+                |(index, (collection, depth, has_children, tree_parent))| {
+                    let id = collection.id;
+                    let name = collection.name.as_str().to_owned();
+                    let drag_name = SharedString::from(name.as_str());
+                    let expanded = self.expanded_collections.contains(&id);
+                    let selected = selected_collection == Some(id);
+                    let renaming = self.renaming_collection == Some(id);
+                    let hover = cx.theme().accent;
+                    let nest_targets = nest_parent_candidates(&self.collection_forest, id);
+                    let forest = self.collection_forest.clone();
+                    let app = cx.weak_entity();
+                    h_flex()
+                        .id(("collection-row", index))
+                        .w_full()
+                        .items_center()
+                        .gap_0p5()
+                        .pl(px(depth as f32 * 8.))
+                        .pr_2()
+                        .py_1()
+                        .rounded(px(8.))
+                        .when(selected, |row| {
+                            row.bg(sidebar_selected_background(cx.theme()))
+                        })
+                        .hover(move |row| row.bg(hover))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.select_collection_row(id, tree_parent, window, cx);
+                        }))
+                        .when(!renaming, |row| {
+                            row.on_drag(
+                                CollectionDrag {
+                                    id,
+                                    name: drag_name,
+                                    from_parent: tree_parent,
+                                },
+                                |drag, _, _, cx| {
+                                    cx.new(|_| CollectionDragGhost {
+                                        name: drag.name.clone(),
+                                    })
+                                },
+                            )
+                        })
+                        .can_drop(move |dragged: &dyn Any, _, _| {
+                            dragged
+                                .downcast_ref::<CollectionDrag>()
+                                .is_some_and(|drag| can_nest_under(&forest, drag.id, id))
+                        })
+                        .on_drop(cx.listener(move |this, drag: &CollectionDrag, window, cx| {
+                            this.reparent_collection(drag.id, drag.from_parent, id, window, cx);
+                        }))
+                        .drag_over::<CollectionDrag>(|style, _, _, cx| style.bg(cx.theme().accent))
+                        .context_menu({
+                            let nest_targets = nest_targets.clone();
+                            move |menu, window, menu_cx| {
+                                let app_rename = app.clone();
+                                let app_unnest = app.clone();
+                                let app_delete = app.clone();
+                                let mut menu = menu.min_w(px(0.)).item(compact_menu_item(
+                                    "Rename",
+                                    move |_, window, cx| {
+                                        let _ = app_rename.update(cx, |this, cx| {
+                                            this.select_collection_row(id, tree_parent, window, cx);
+                                            this.begin_collection_rename(id, window, cx);
+                                        });
+                                    },
+                                ));
+                                if !nest_targets.is_empty() {
+                                    let app_nest = app.clone();
+                                    menu = menu.submenu("Nest under", window, menu_cx, {
+                                        let nest_targets = nest_targets.clone();
+                                        move |menu, _, _| {
+                                            let mut menu = menu.min_w(px(0.));
+                                            for target in &nest_targets {
+                                                let parent_id = target.id;
+                                                let label = target.name.as_str().to_owned();
+                                                let app_nest = app_nest.clone();
+                                                menu = menu.item(compact_menu_item(
+                                                    label,
+                                                    move |_, window, cx| {
+                                                        let _ = app_nest.update(cx, |this, cx| {
+                                                            this.nest_collection_under(
+                                                                id, parent_id, window, cx,
+                                                            );
+                                                        });
+                                                    },
+                                                ));
+                                            }
+                                            menu
+                                        }
+                                    });
+                                }
+                                if let Some(parent_id) = tree_parent {
+                                    menu = menu.item(compact_menu_item(
+                                        "Unnest",
+                                        move |_, window, cx| {
+                                            let _ = app_unnest.update(cx, |this, cx| {
+                                                this.unnest_collection(id, parent_id, window, cx);
+                                            });
+                                        },
+                                    ));
+                                }
+                                menu.item(PopupMenuItem::separator())
+                                    .item(compact_menu_item("Delete", move |_, window, cx| {
+                                        let _ = app_delete.update(cx, |this, cx| {
+                                            this.delete_sidebar_collection(id, window, cx);
+                                        });
+                                    }))
+                            }
+                        })
+                        .child(
+                            div()
+                                .w(px(12.))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(cx.theme().muted_foreground)
+                                .when(has_children, |slot| {
+                                    let chevron = if expanded {
+                                        symbol("chevron.down", AssetIconName::ChevronDown)
+                                    } else {
+                                        symbol("chevron.right", AssetIconName::ChevronRight)
+                                    }
+                                    .with_size(px(12.));
+                                    slot.child(
+                                        Button::new(SharedString::from(format!(
+                                            "toggle-collection-{id}"
+                                        )))
+                                        .ghost()
+                                        .xsmall()
+                                        .size(px(12.))
+                                        .icon(chevron)
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.toggle_collection_expanded(id, cx)
+                                            }),
+                                        ),
+                                    )
+                                }),
+                        )
+                        .child(
+                            symbol(
+                                if expanded && has_children {
+                                    "folder.fill"
+                                } else {
+                                    "folder"
+                                },
+                                if expanded && has_children {
+                                    AssetIconName::FolderOpen
+                                } else {
+                                    AssetIconName::Folder
+                                },
+                            )
+                            .with_size(px(14.))
+                            .text_color(cx.theme().muted_foreground)
+                            .flex_shrink_0(),
+                        )
+                        .child(if renaming {
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Input::new(&self.collection_name_input).small().w_full())
+                                .into_any_element()
+                        } else {
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(name)
+                                .into_any_element()
+                        })
+                },
+            ))
             .when_some(self.counts_error.as_ref(), |panel, error| {
                 panel.child(
                     div()
@@ -3190,9 +4158,12 @@ impl LibraryApp {
                             .flex_wrap()
                             .gap_x_2()
                             .gap_y_1()
-                            .children(detail.tags.iter().map(|tag| {
-                                div().child(format!("#{}", tag.text.as_str()))
-                            }))
+                            .children(
+                                detail
+                                    .tags
+                                    .iter()
+                                    .map(|tag| div().child(format!("#{}", tag.text.as_str()))),
+                            )
                             .into_any_element(),
                     ),
                     _ => None,
@@ -3208,7 +4179,7 @@ impl LibraryApp {
     /// dropdown of library titles, not an id to type: users pick the
     /// containing work by name.
     fn render_edit_panel(&self, form: &EditForm, cx: &mut Context<Self>) -> Div {
-        let saving = form.saving;
+        let saving = form.saving || form.author_creating;
         let error = form.error.clone();
         let danger = cx.theme().danger;
 
@@ -3234,11 +4205,9 @@ impl LibraryApp {
                                     .ghost()
                                     .small()
                                     .label("Cancel")
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            this.cancel_edit(window, cx)
-                                        }),
-                                    ),
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.cancel_edit(window, cx)
+                                    })),
                             )
                             .child(
                                 Button::new("save-edit")
@@ -3330,9 +4299,55 @@ impl LibraryApp {
                                         .xsmall()
                                         .icon(Icon::new(IconName::Close).xsmall())
                                         .tooltip("Remove tag")
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.unstage_tag_on_edit_form(tag_id, window, cx)
-                                        })),
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.unstage_tag_on_edit_form(tag_id, window, cx)
+                                            }),
+                                        ),
+                                    )
+                            })),
+                    ))
+                    .child(edit_field(
+                        "Collections",
+                        v_flex()
+                            .gap_1()
+                            .w_full()
+                            .child(
+                                Combobox::new(&self.collection_picker)
+                                    .small()
+                                    .placeholder("Add collection")
+                                    .search_placeholder("Search collections...")
+                                    .w_full(),
+                            )
+                            .children(form.collections.iter().map(|collection| {
+                                let collection_id = collection.id;
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .child(collection.name.as_str().to_owned()),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "unstage-collection-{collection_id}"
+                                        )))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(Icon::new(IconName::Close).xsmall())
+                                        .tooltip("Remove collection")
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.unstage_collection_on_edit_form(
+                                                    collection_id,
+                                                    window,
+                                                    cx,
+                                                )
+                                            }),
+                                        ),
                                     )
                             })),
                     )),
@@ -3357,14 +4372,33 @@ fn padded_input(state: &Entity<InputState>) -> Input {
     Input::new(state).small().px(px(10.)).py(px(5.))
 }
 
-/// The inspector can occupy the whole viewport on a narrow window; its
-/// controls must remain inside the window rather than forcing a fixed 320px pane.
-fn sidebar_target_width(viewport: Pixels) -> Pixels {
-    PANEL_WIDTH.min(viewport.max(px(0.)))
-}
-
-fn left_panel_target_width(open: bool) -> Pixels {
-    if open { px(180.) } else { px(0.) }
+/// Keep a usable center region, shrinking both sidebars on small windows
+/// without overwriting the user's preferred widths.
+fn sidebar_target_widths(
+    viewport: Pixels,
+    left: Option<Option<f64>>,
+    right: Option<Option<f64>>,
+) -> (Pixels, Pixels) {
+    fn width(value: Option<Option<f64>>, default: f32, min: f32, max: f32) -> f32 {
+        match value {
+            None => 0.,
+            Some(value) => value
+                .filter(|v| v.is_finite())
+                .map(|v| v as f32)
+                .unwrap_or(default)
+                .clamp(min, max),
+        }
+    }
+    let left = width(left, 180., 140., 420.);
+    let right = width(right, f32::from(PANEL_WIDTH), 240., 640.);
+    // Outer padding and two gutters occupy 32px; reserve 240px for the grid.
+    let available = (f32::from(viewport) - 272.).max(0.);
+    let scale = if left + right > available {
+        available / (left + right)
+    } else {
+        1.
+    };
+    (px(left * scale), px(right * scale))
 }
 
 // Sidebar navigation is neutral; the table keeps its blue active-row tint.
@@ -3467,26 +4501,30 @@ impl Render for LibraryApp {
             .as_ref()
             .map(|inputs| inputs.title.clone());
         let danger = cx.theme().danger;
-        // Always sample the width so the first closed frame anchors at 0
-        // and later toggles animate from the live value.
+        let settings = &delegate.settings;
+        let (left_target, right_target) = sidebar_target_widths(
+            window.viewport_size().width,
+            self.left_panel_open.then_some(settings.left_sidebar_width),
+            self.detail_open.then_some(settings.right_sidebar_width),
+        );
         let motion = cx.theme().motion_tokens();
-        let panel_transition =
-            MotionTransition::new(motion.duration_normal).easing(motion.easing_move.clone());
-        let sidebar_target = if self.detail_open {
-            sidebar_target_width(window.viewport_size().width)
+        // Dragging follows the pointer without easing; toggles still animate.
+        let duration = if self.resizing_sidebar.is_some() {
+            Duration::ZERO
         } else {
-            px(0.)
+            motion.duration_normal
         };
+        let panel_transition = MotionTransition::new(duration).easing(motion.easing_move.clone());
         let sidebar_width = transition(
             "detail-sidebar-width",
-            sidebar_target,
+            right_target,
             panel_transition.clone(),
             window,
             cx,
         );
         let left_panel_width = transition(
             "left-panel-width",
-            left_panel_target_width(self.left_panel_open),
+            left_target,
             panel_transition,
             window,
             cx,
@@ -3506,6 +4544,16 @@ impl Render for LibraryApp {
             .size_full()
             .bg(background.clone())
             .text_color(cx.theme().foreground)
+            .on_drag_move(cx.listener(Self::resize_sidebar))
+            .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                if event.button == MouseButton::Left {
+                    this.finish_sidebar_resize(cx);
+                }
+            }))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_sidebar_resize(cx)),
+            )
             // Handlers sit on this ancestor so bindings fire for any focused
             // descendant (table, toolbar, sidebar), not only the DataTable.
             // `InlineEdit` tags the tree so Tab bindings can target this mode.
@@ -3734,6 +4782,7 @@ impl Render for LibraryApp {
                         el.child(
                             div()
                                 .id("left-panel-clip")
+                                .relative()
                                 .w(left_panel_width)
                                 .flex_shrink_0()
                                 .h_full()
@@ -3742,7 +4791,10 @@ impl Render for LibraryApp {
                                 .border_1()
                                 .border_color(cx.theme().border)
                                 .bg(cx.theme().background)
-                                .child(self.render_left_panel(cx)),
+                                .child(self.render_left_panel(cx))
+                                .when(self.left_panel_open, |el| {
+                                    el.child(self.sidebar_resize_handle(true, left_panel_width, cx))
+                                }),
                         )
                     })
                     .child(
@@ -3812,7 +4864,10 @@ impl Render for LibraryApp {
                                 .bg(cx.theme().background)
                                 .flex_shrink_0()
                                 .child(self.render_side_panel(cx))
-                                .child(island_corner_mask(stops)),
+                                .child(island_corner_mask(stops))
+                                .when(self.detail_open, |el| {
+                                    el.child(self.sidebar_resize_handle(false, sidebar_width, cx))
+                                }),
                         )
                     }),
             )
@@ -3832,20 +4887,115 @@ impl Render for LibraryApp {
 
 #[cfg(test)]
 mod panel_width_tests {
-    use super::sidebar_target_width;
+    use super::sidebar_target_widths;
     use gpui_kit::px;
 
-    #[test]
-    fn left_panel_releases_space_when_closed() {
-        assert_eq!(super::left_panel_target_width(true), px(180.));
-        assert_eq!(super::left_panel_target_width(false), px(0.));
+    #[gpui_kit::test]
+    fn dragging_sidebars_saves_widths(cx: &mut gpui_kit::TestAppContext) {
+        use super::{LibraryApp, LibraryDelegate, Settings};
+        use crate::db::DbWorker;
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{AppContext as _, point, size};
+
+        let dir = tempfile::tempdir().unwrap();
+        // The production DbWorker completes requests on its own OS thread.
+        cx.executor().allow_parking();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let first = worker.list_page_blocking(None, 50).unwrap();
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(
+                gpui_kit::WindowOptions {
+                    window_bounds: Some(gpui_kit::WindowBounds::Windowed(gpui_kit::Bounds {
+                        origin: Default::default(),
+                        size: size(px(1100.), px(700.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    let delegate = LibraryDelegate::new(
+                        worker,
+                        first,
+                        Settings {
+                            left_sidebar_width: Some(200.),
+                            right_sidebar_width: Some(360.),
+                            ..Settings::default()
+                        },
+                    );
+                    let table = cx.new(|cx| {
+                        gpui_kit::component::table::TableState::new(delegate, window, cx)
+                    });
+                    cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+                },
+            )
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            // Both handles exist on the first frame, including the default-open inspector.
+            let left = window.find("resize-left-sidebar").bounds().center();
+            let right = window.find("resize-right-sidebar").bounds().center();
+            assert!((left.x - px(208.)).abs() < px(8.));
+            assert!((right.x - px(732.)).abs() < px(8.));
+            window.drag(left, point(left.x + px(50.), left.y), cx);
+            let settings = Settings::load(dir.path());
+            assert!((230. ..=250.).contains(&settings.left_sidebar_width.unwrap()));
+            assert_eq!(settings.right_sidebar_width, Some(360.));
+            let right = window.find("resize-right-sidebar").bounds().center();
+            window.drag(right, point(right.x - px(60.), right.y), cx);
+            let settings = Settings::load(dir.path());
+            assert!(
+                (400. ..=420.).contains(&settings.right_sidebar_width.unwrap()),
+                "{settings:?}; handle={right:?}"
+            );
+            assert!((230. ..=250.).contains(&settings.left_sidebar_width.unwrap()));
+        })
+        .unwrap();
     }
 
     #[test]
-    fn edit_sidebar_fits_narrow_windows() {
-        assert_eq!(sidebar_target_width(px(240.)), px(240.));
-        assert_eq!(sidebar_target_width(px(320.)), px(320.));
-        assert_eq!(sidebar_target_width(px(900.)), px(320.));
+    fn default_widths_and_closed_panels() {
+        assert_eq!(
+            sidebar_target_widths(px(1000.), Some(None), Some(None)),
+            (px(180.), px(320.))
+        );
+        assert_eq!(
+            sidebar_target_widths(px(1000.), None, None),
+            (px(0.), px(0.))
+        );
+    }
+
+    #[test]
+    fn restored_widths_are_bounded_and_invalid_values_use_defaults() {
+        assert_eq!(
+            sidebar_target_widths(px(2000.), Some(Some(230.)), Some(Some(410.))),
+            (px(230.), px(410.))
+        );
+        assert_eq!(
+            sidebar_target_widths(px(2000.), Some(Some(-10.)), Some(Some(900.))),
+            (px(140.), px(640.))
+        );
+        assert_eq!(
+            sidebar_target_widths(px(2000.), Some(Some(f64::NAN)), Some(Some(f64::INFINITY))),
+            (px(180.), px(320.))
+        );
+    }
+
+    #[test]
+    fn narrow_windows_keep_the_grid_usable() {
+        assert_eq!(
+            sidebar_target_widths(px(522.), Some(None), Some(None)),
+            (px(90.), px(160.))
+        );
+        assert_eq!(
+            sidebar_target_widths(px(240.), Some(None), Some(None)),
+            (px(0.), px(0.))
+        );
     }
 }
 

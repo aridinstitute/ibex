@@ -5,9 +5,7 @@ use oeuvre_app::command::{
 };
 use oeuvre_app::testing::MemoryStore;
 use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{
-    NewResource, NonEmptyStr, ResourceFilter, ResourceKind, ResourceQuery, Store,
-};
+use oeuvre_core::{NewResource, NonEmptyStr, ResourceFilter, ResourceKind, ResourceQuery, Store};
 
 fn book(title: &str) -> NewResource {
     NewResource {
@@ -21,6 +19,7 @@ fn book(title: &str) -> NewResource {
         series_id: None,
         series_number: None,
         tag_ids: vec![],
+        collection_ids: vec![],
     }
 }
 

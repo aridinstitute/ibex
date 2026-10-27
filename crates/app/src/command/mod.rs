@@ -1,9 +1,14 @@
+mod collection;
 mod health;
 mod person;
 mod resource;
 mod series;
 mod tag;
 
+pub use collection::{
+    AddCollectionParent, CreateCollection, DeleteCollection, DeletedCollection,
+    ListCollectionForest, RemoveCollectionParent, RenameCollection,
+};
 pub use health::{Health, HealthReport};
 pub use person::{
     CreatePerson, DeletePerson, DeletedPerson, FindPersonsByName, GetPerson, ListPersons,
@@ -17,8 +22,8 @@ pub use series::CreateSeries;
 pub use tag::{CreateTag, FindTagByText, GetTag, ListTags};
 
 use oeuvre_core::{
-    Person, Resource, ResourceCounts, ResourceDetail, ResourcePage, ResourceSummary, Series,
-    SortedResourcePage, StoreError, Tag,
+    Collection, CollectionTreeNode, Person, Resource, ResourceCounts, ResourceDetail, ResourcePage,
+    ResourceSummary, Series, SortedResourcePage, StoreError, Tag,
 };
 
 use crate::AppState;
@@ -40,6 +45,12 @@ pub enum Command {
     GetTag(GetTag),
     FindTagByText(FindTagByText),
     ListTags(ListTags),
+    CreateCollection(CreateCollection),
+    RenameCollection(RenameCollection),
+    ListCollectionForest(ListCollectionForest),
+    AddCollectionParent(AddCollectionParent),
+    RemoveCollectionParent(RemoveCollectionParent),
+    DeleteCollection(DeleteCollection),
     CreateResource(CreateResource),
     UpdateResource(UpdateResource),
     SetResourceFavorite(SetResourceFavorite),
@@ -67,6 +78,12 @@ pub enum Outcome {
     GetTag(Tag),
     FindTagByText(Option<Tag>),
     ListTags(Vec<Tag>),
+    CreateCollection(Collection),
+    RenameCollection(Collection),
+    ListCollectionForest(Vec<CollectionTreeNode>),
+    AddCollectionParent(()),
+    RemoveCollectionParent(()),
+    DeleteCollection(DeletedCollection),
     CreateResource(Resource),
     UpdateResource(Resource),
     SetResourceFavorite(Resource),
@@ -121,6 +138,12 @@ impl Command {
             Command::GetTag(_) => GetTag::NAME,
             Command::FindTagByText(_) => FindTagByText::NAME,
             Command::ListTags(_) => ListTags::NAME,
+            Command::CreateCollection(_) => CreateCollection::NAME,
+            Command::RenameCollection(_) => RenameCollection::NAME,
+            Command::ListCollectionForest(_) => ListCollectionForest::NAME,
+            Command::AddCollectionParent(_) => AddCollectionParent::NAME,
+            Command::RemoveCollectionParent(_) => RemoveCollectionParent::NAME,
+            Command::DeleteCollection(_) => DeleteCollection::NAME,
             Command::CreateResource(_) => CreateResource::NAME,
             Command::UpdateResource(_) => UpdateResource::NAME,
             Command::SetResourceFavorite(_) => SetResourceFavorite::NAME,
@@ -165,6 +188,12 @@ pub(crate) async fn dispatch(
         Command::GetTag(c) => drive(c, state, ev).await,
         Command::FindTagByText(c) => drive(c, state, ev).await,
         Command::ListTags(c) => drive(c, state, ev).await,
+        Command::CreateCollection(c) => drive(c, state, ev).await,
+        Command::RenameCollection(c) => drive(c, state, ev).await,
+        Command::ListCollectionForest(c) => drive(c, state, ev).await,
+        Command::AddCollectionParent(c) => drive(c, state, ev).await,
+        Command::RemoveCollectionParent(c) => drive(c, state, ev).await,
+        Command::DeleteCollection(c) => drive(c, state, ev).await,
         Command::CreateResource(c) => drive(c, state, ev).await,
         Command::UpdateResource(c) => drive(c, state, ev).await,
         Command::SetResourceFavorite(c) => drive(c, state, ev).await,

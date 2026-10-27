@@ -151,7 +151,9 @@ mod tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc macro.
     use super::{TagChoice, TagDelegate};
     use gpui_kit::component::IndexPath;
-    use gpui_kit::component::searchable_list::{SearchableListDelegate as _, SearchableListItem as _};
+    use gpui_kit::component::searchable_list::{
+        SearchableListDelegate as _, SearchableListItem as _,
+    };
     use oeuvre_core::{NonEmptyStr, Tag, TagId};
 
     fn tag(text: &str) -> Tag {

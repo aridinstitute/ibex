@@ -187,6 +187,7 @@ fn listing_query(args: &ListArgs) -> Result<Option<ResourceQuery>> {
             kind: None,
             favorite: None,
             tag: None,
+            collection: None,
         },
     }))
 }
@@ -604,6 +605,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             },
         )
         .expect("book valid")

@@ -8,8 +8,8 @@ use gpui_kit::SharedString;
 use gpui_kit::component::searchable_list::SearchableListItem;
 
 use oeuvre_core::{
-    BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId, Resource,
-    ResourceId, ResourceKind, SeriesId, TagId, UtcMillis, utc_year_from_millis,
+    BibliographicDate, CollectionId, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId,
+    Resource, ResourceId, ResourceKind, SeriesId, TagId, UtcMillis, utc_year_from_millis,
 };
 
 use crate::kind::kind_label;
@@ -33,6 +33,8 @@ pub struct EditDraft {
     pub creators: Vec<CreatorSpec>,
     /// Tags attached on save, in the order shown on the form.
     pub tag_ids: Vec<TagId>,
+    /// Collections attached on save, in the order shown on the form.
+    pub collection_ids: Vec<CollectionId>,
 }
 
 /// The value each input opens with: the stored record's own values,
@@ -56,6 +58,7 @@ pub fn prefill_draft(record: &Resource) -> EditDraft {
             .unwrap_or_default(),
         creators: record.to_new().creators,
         tag_ids: record.tag_ids.clone(),
+        collection_ids: record.collection_ids.clone(),
     }
 }
 
@@ -73,6 +76,7 @@ pub fn empty_create_draft() -> EditDraft {
         series_number: String::new(),
         creators: Vec::new(),
         tag_ids: Vec::new(),
+        collection_ids: Vec::new(),
     }
 }
 
@@ -102,6 +106,7 @@ pub fn build_create(draft: &EditDraft) -> Result<NewResource, String> {
         series_id: None,
         series_number: None,
         tag_ids: vec![],
+        collection_ids: vec![],
     };
     apply_draft_fields(&mut new, draft)?;
     Ok(new)
@@ -116,6 +121,7 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), S
     edit.parent_id = draft.parent;
     edit.creators = draft.creators.clone();
     edit.tag_ids = draft.tag_ids.clone();
+    edit.collection_ids = draft.collection_ids.clone();
 
     let publisher = draft.publisher.trim();
     edit.publisher = (!publisher.is_empty()).then(|| publisher.to_owned());
@@ -262,6 +268,7 @@ mod tests {
                 series_id: Some(SeriesId::generate()),
                 series_number: Some(NonEmptyStr::try_new("LCL 26").expect("number")),
                 tag_ids: vec![],
+                collection_ids: vec![],
             },
         )
         .expect("record valid")
@@ -279,6 +286,7 @@ mod tests {
             series_number: "".into(),
             creators,
             tag_ids: Vec::new(),
+            collection_ids: vec![],
         }
     }
 

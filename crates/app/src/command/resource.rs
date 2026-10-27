@@ -211,6 +211,9 @@ fn changed_fields(old: &Resource, new: &NewResource) -> Vec<&'static str> {
     if old.tag_ids != new.tag_ids {
         changed.push("tags");
     }
+    if old.collection_ids != new.collection_ids {
+        changed.push("collections");
+    }
     changed
 }
 
@@ -254,13 +257,25 @@ impl Handler for CreateResource {
         }
 
         for tag_id in &self.new.tag_ids {
+            state.store().get_tag(*tag_id).await.map_err(|e| {
+                if e.is_not_found() {
+                    CommandError::NotFound(tag_id.to_string())
+                } else if e.is_invalid() {
+                    CommandError::Invalid(e.message.clone())
+                } else {
+                    CommandError::Store(e)
+                }
+            })?;
+        }
+
+        for collection_id in &self.new.collection_ids {
             state
                 .store()
-                .get_tag(*tag_id)
+                .get_collection(*collection_id)
                 .await
                 .map_err(|e| {
                     if e.is_not_found() {
-                        CommandError::NotFound(tag_id.to_string())
+                        CommandError::NotFound(collection_id.to_string())
                     } else if e.is_invalid() {
                         CommandError::Invalid(e.message.clone())
                     } else {
@@ -337,13 +352,25 @@ impl Handler for UpdateResource {
         }
 
         for tag_id in &self.new.tag_ids {
+            state.store().get_tag(*tag_id).await.map_err(|e| {
+                if e.is_not_found() {
+                    CommandError::NotFound(tag_id.to_string())
+                } else if e.is_invalid() {
+                    CommandError::Invalid(e.message.clone())
+                } else {
+                    CommandError::Store(e)
+                }
+            })?;
+        }
+
+        for collection_id in &self.new.collection_ids {
             state
                 .store()
-                .get_tag(*tag_id)
+                .get_collection(*collection_id)
                 .await
                 .map_err(|e| {
                     if e.is_not_found() {
-                        CommandError::NotFound(tag_id.to_string())
+                        CommandError::NotFound(collection_id.to_string())
                     } else if e.is_invalid() {
                         CommandError::Invalid(e.message.clone())
                     } else {
@@ -468,19 +495,15 @@ impl Handler for GetResourceDetail {
 
         let mut tags = Vec::with_capacity(resource.tag_ids.len());
         for tag_id in &resource.tag_ids {
-            let tag = state
-                .store()
-                .get_tag(*tag_id)
-                .await
-                .map_err(|e| {
-                    if e.is_not_found() {
-                        CommandError::NotFound(tag_id.to_string())
-                    } else if e.is_invalid() {
-                        CommandError::Invalid(e.message.clone())
-                    } else {
-                        CommandError::Store(e)
-                    }
-                })?;
+            let tag = state.store().get_tag(*tag_id).await.map_err(|e| {
+                if e.is_not_found() {
+                    CommandError::NotFound(tag_id.to_string())
+                } else if e.is_invalid() {
+                    CommandError::Invalid(e.message.clone())
+                } else {
+                    CommandError::Store(e)
+                }
+            })?;
             tags.push(tag);
         }
 
@@ -585,6 +608,9 @@ impl Handler for ListResourcesQueryPage {
         }
         if let Some(tag) = self.query.filter.tag {
             ev.set(event::RESOURCE_FILTER_TAG, tag.to_string());
+        }
+        if let Some(collection) = self.query.filter.collection {
+            ev.set(event::RESOURCE_FILTER_COLLECTION, collection.to_string());
         }
         if let Some(range) = self.query.filter.published {
             if let Some(from) = range.from {

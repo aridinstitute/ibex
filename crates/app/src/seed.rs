@@ -27,7 +27,7 @@ const DEMO_PEOPLE: [(&str, &str); 8] = [
 ];
 
 /// Populate a fresh store with a demo library: a few people, the containers
-/// parented kinds need, and `count` resources cycling kinds and creators.
+/// parented kinds need, nested collections, tags, and `count` resources.
 pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), StoreError> {
     let people: Vec<PersonId> = {
         let mut ids = Vec::with_capacity(DEMO_PEOPLE.len());
@@ -69,13 +69,43 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
             series_id: None,
             series_number: None,
             tag_ids: vec![],
+            collection_ids: vec![],
         })
         .await?
         .id;
 
+    let mut tags = Vec::new();
+    for text in ["methods", "review", "to-read", "reference"] {
+        tags.push(store.create_tag(non_empty(text)).await?.id);
+    }
+    let research = store
+        .create_collection(non_empty("Research"), None)
+        .await?
+        .id;
+    let methods = store
+        .create_collection(non_empty("Methods"), Some(research))
+        .await?
+        .id;
+    let networks = store
+        .create_collection(non_empty("Citation networks"), Some(methods))
+        .await?
+        .id;
+    let reading = store
+        .create_collection(non_empty("Reading list"), None)
+        .await?
+        .id;
+    let to_read = store
+        .create_collection(non_empty("To read"), Some(reading))
+        .await?
+        .id;
+    store
+        .create_collection(non_empty("Empty collection"), None)
+        .await?;
+    let collections = [methods, networks, to_read, research];
+
     for n in 0..count {
         let year = 1962 + (n % 64) as u16;
-        let new = match n % 8 {
+        let mut new = match n % 8 {
             0 => {
                 let mut creators = authors_for(n, &people);
                 // Exercise credited_as on a predictable slice of rows.
@@ -93,6 +123,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                     series_id: None,
                     series_number: None,
                     tag_ids: vec![],
+                    collection_ids: vec![],
                 }
             }
             1 => NewResource {
@@ -106,6 +137,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             },
             2 => NewResource {
                 kind: ResourceKind::BookSection,
@@ -118,6 +150,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             },
             3 => NewResource {
                 kind: ResourceKind::Preprint,
@@ -130,6 +163,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             },
             4 => NewResource {
                 kind: ResourceKind::PodcastEpisode,
@@ -146,6 +180,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             },
             5 => NewResource {
                 kind: ResourceKind::Report,
@@ -158,6 +193,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             },
             6 => NewResource {
                 kind: ResourceKind::Dataset,
@@ -170,6 +206,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             },
             _ => NewResource {
                 kind: ResourceKind::Webpage,
@@ -182,8 +219,17 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             },
         };
+        // Keep some rows unassigned to exercise empty membership and tag filters.
+        if n % 5 != 4 {
+            new.tag_ids = vec![tags[n % tags.len()]];
+            if n % 3 == 0 {
+                new.tag_ids.push(tags[(n + 1) % tags.len()]);
+            }
+            new.collection_ids = vec![collections[n % collections.len()]];
+        }
         store.create_resource(new).await?;
     }
     Ok(())
@@ -201,6 +247,7 @@ fn container(kind: ResourceKind, title: &str) -> NewResource {
         series_id: None,
         series_number: None,
         tag_ids: vec![],
+        collection_ids: vec![],
     }
 }
 
@@ -236,6 +283,53 @@ mod tests {
     use super::*;
     use crate::testing::MemoryStore;
     use oeuvre_core::{NonEmptyStr, ResourceKind};
+
+    #[tokio::test]
+    async fn demo_library_has_nested_collections_and_tagged_resources() {
+        let store = MemoryStore::new();
+        seed_demo_library(&store, 12).await.unwrap();
+
+        let tags = store.list_tags().await.unwrap();
+        assert_eq!(tags.len(), 4);
+        assert!(tags.iter().any(|tag| tag.text.as_str() == "methods"));
+        let forest = store.list_collection_forest().await.unwrap();
+        assert_eq!(forest.len(), 3);
+        let research = forest
+            .iter()
+            .find(|node| node.collection.name.as_str() == "Research")
+            .unwrap();
+        let methods = research
+            .children
+            .iter()
+            .find(|node| node.collection.name.as_str() == "Methods")
+            .unwrap();
+        assert_eq!(
+            methods.children[0].collection.name.as_str(),
+            "Citation networks"
+        );
+        assert!(
+            forest
+                .iter()
+                .any(|node| node.collection.name.as_str() == "Empty collection"
+                    && node.children.is_empty())
+        );
+
+        let rows = store.list_resources().await.unwrap();
+        let first = rows
+            .iter()
+            .find(|row| row.title.as_str() == "Citation Networks 000")
+            .unwrap();
+        let resource = store.get_resource(first.id).await.unwrap();
+        assert!(!resource.tag_ids.is_empty());
+        assert_eq!(resource.collection_ids, vec![methods.collection.id]);
+        let unassigned = rows
+            .iter()
+            .find(|row| row.title.as_str() == "Interview with a Cataloger 004")
+            .unwrap();
+        let resource = store.get_resource(unassigned.id).await.unwrap();
+        assert!(resource.tag_ids.is_empty());
+        assert!(resource.collection_ids.is_empty());
+    }
 
     #[tokio::test]
     async fn demo_library_shows_expected_rows() {

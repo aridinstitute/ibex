@@ -3,11 +3,12 @@ use std::path::Path;
 use std::time::Duration;
 
 use oeuvre_core::{
-    BibliographicDate, Creator, CreatorRole, Name, NewResource, NewSeries, NonEmptyStr, Person,
-    PersonId, Resource, ResourceCounts, ResourceFilter, ResourceId, ResourceKind, ResourcePage,
-    ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
-    SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId, UtcMillis, creator_label_name,
-    format_creators_label, published_label_from,
+    BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole, Name,
+    NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceCounts,
+    ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort,
+    ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store, StoreError,
+    StoreHealth, Tag, TagId, UtcMillis, build_collection_forest, collection_descendant_closure,
+    creator_label_name, format_creators_label, published_label_from,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -19,6 +20,8 @@ const DB: &str = "oeuvre";
 const PERSON_TABLE: &str = "person";
 const SERIES_TABLE: &str = "series";
 const TAG_TABLE: &str = "tag";
+const COLLECTION_TABLE: &str = "collection";
+const CHILD_OF_TABLE: &str = "child_of";
 const RESOURCE_TABLE: &str = "resource";
 pub struct SurrealStore {
     db: Surreal<Db>,
@@ -60,9 +63,28 @@ struct TagDoc {
     text: NonEmptyStr,
 }
 
+#[derive(Debug, Clone, SurrealValue)]
+struct CollectionDoc {
+    #[surreal(wrap)]
+    name: NonEmptyStr,
+}
+
 #[derive(Debug, SurrealValue)]
 struct TagIdRow {
     id: RecordId,
+}
+
+#[derive(Debug, SurrealValue)]
+struct CollectionIdRow {
+    id: RecordId,
+}
+
+#[derive(Debug, SurrealValue)]
+struct ChildOfEdgeRow {
+    #[surreal(rename = "in")]
+    child: RecordId,
+    #[surreal(rename = "out")]
+    parent: RecordId,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -91,6 +113,9 @@ struct ResourceDoc {
     /// Record links to tag rows; legacy rows omit the field.
     #[surreal(default)]
     tags: Option<Vec<RecordId>>,
+    /// Record links to collection rows; legacy rows omit the field.
+    #[surreal(default)]
+    collections: Option<Vec<RecordId>>,
     /// Legacy rows omit the field; treat missing as not favorited.
     #[surreal(default)]
     favorite: Option<bool>,
@@ -282,6 +307,35 @@ impl SurrealStore {
             )
             .await;
 
+        let _ = self
+            .db
+            .query("DEFINE TABLE IF NOT EXISTS collection SCHEMALESS")
+            .await;
+        let _ = self
+            .db
+            .query(format!(
+                "DEFINE TABLE IF NOT EXISTS {CHILD_OF_TABLE} TYPE RELATION IN collection OUT collection ENFORCED"
+            ))
+            .await;
+        let _ = self
+            .db
+            .query(format!(
+                "DEFINE INDEX IF NOT EXISTS child_of_in ON TABLE {CHILD_OF_TABLE} FIELDS in"
+            ))
+            .await;
+        let _ = self
+            .db
+            .query(format!(
+                "DEFINE INDEX IF NOT EXISTS child_of_out ON TABLE {CHILD_OF_TABLE} FIELDS out"
+            ))
+            .await;
+        let _ = self
+            .db
+            .query(
+                "DEFINE FIELD IF NOT EXISTS collections ON TABLE resource                  TYPE option<array<record<collection>>> DEFAULT []                  REFERENCE ON DELETE UNSET",
+            )
+            .await;
+
         let _ = self.backfill_record_dates().await;
         self.db
             .query(include_str!("primary_creator_sort.surql"))
@@ -336,6 +390,10 @@ impl SurrealStore {
         RecordId::new(TAG_TABLE, id.to_string())
     }
 
+    fn collection_key(id: CollectionId) -> RecordId {
+        RecordId::new(COLLECTION_TABLE, id.to_string())
+    }
+
     fn resource_key(id: ResourceId) -> RecordId {
         RecordId::new(RESOURCE_TABLE, id.to_string())
     }
@@ -372,6 +430,86 @@ impl SurrealStore {
             .map_err(|e| StoreError::new(format!("invalid tag id in store: {e}")))
     }
 
+    fn thing_to_collection_id(thing: &RecordId) -> Result<CollectionId, StoreError> {
+        CollectionId::parse(&record_key(thing))
+            .map_err(|e| StoreError::new(format!("invalid collection id in store: {e}")))
+    }
+
+    async fn load_collection_graph(
+        &self,
+    ) -> Result<(Vec<Collection>, Vec<(CollectionId, CollectionId)>), StoreError> {
+        let mut response = self
+            .db
+            .query("SELECT id FROM collection;")
+            .query("SELECT in, out FROM child_of;")
+            .await
+            .map_err(map_err)?;
+        let id_rows: Vec<CollectionIdRow> = response.take(0).map_err(map_err)?;
+        let edge_rows: Vec<ChildOfEdgeRow> = response.take(1).map_err(map_err)?;
+        let mut collections = Vec::with_capacity(id_rows.len());
+        for row in id_rows {
+            let id = Self::thing_to_collection_id(&row.id)?;
+            collections.push(self.get_collection(id).await?);
+        }
+        let mut edges = Vec::with_capacity(edge_rows.len());
+        for row in edge_rows {
+            let child = Self::thing_to_collection_id(&row.child)?;
+            let parent = Self::thing_to_collection_id(&row.parent)?;
+            edges.push((child, parent));
+        }
+        Ok((collections, edges))
+    }
+
+    /// Smart cascade delete. Resource membership clears via REFERENCE ON DELETE UNSET.
+    async fn delete_collection_recursive(&self, id: CollectionId) -> Result<(), StoreError> {
+        let mut response = self
+            .db
+            .query("SELECT in, out FROM child_of WHERE out = $parent")
+            .bind(("parent", Self::collection_key(id)))
+            .await
+            .map_err(map_err)?;
+        let child_rows: Vec<ChildOfEdgeRow> = response.take(0).map_err(map_err)?;
+        for row in child_rows {
+            let child = Self::thing_to_collection_id(&row.child)?;
+            let mut parent_response = self
+                .db
+                .query("SELECT count() AS total FROM child_of WHERE in = $child GROUP ALL")
+                .bind(("child", Self::collection_key(child)))
+                .await
+                .map_err(map_err)?;
+            #[derive(Debug, SurrealValue)]
+            struct CountRow {
+                total: i64,
+            }
+            let counts: Vec<CountRow> = parent_response.take(0).map_err(map_err)?;
+            let parent_count = counts.first().map(|c| c.total).unwrap_or(0);
+            if parent_count <= 1 {
+                Box::pin(self.delete_collection_recursive(child)).await?;
+            } else {
+                self.db
+                    .query("DELETE child_of WHERE in = $child AND out = $parent")
+                    .bind(("child", Self::collection_key(child)))
+                    .bind(("parent", Self::collection_key(id)))
+                    .await
+                    .map_err(map_err)?;
+            }
+        }
+        self.db
+            .query("DELETE child_of WHERE in = $id OR out = $id")
+            .bind(("id", Self::collection_key(id)))
+            .await
+            .map_err(map_err)?;
+        let deleted: Option<CollectionDoc> = self
+            .db
+            .delete(Self::collection_key(id))
+            .await
+            .map_err(map_err)?;
+        if deleted.is_none() {
+            return Err(StoreError::not_found(format!("collection {id}")));
+        }
+        Ok(())
+    }
+
     fn resource_doc_from(resource: &Resource) -> ResourceDoc {
         ResourceDoc {
             kind: resource.kind,
@@ -385,7 +523,22 @@ impl SurrealStore {
                 .series_number
                 .as_ref()
                 .map(|s| s.as_str().to_owned()),
-            tags: Some(resource.tag_ids.iter().copied().map(Self::tag_key).collect()),
+            tags: Some(
+                resource
+                    .tag_ids
+                    .iter()
+                    .copied()
+                    .map(Self::tag_key)
+                    .collect(),
+            ),
+            collections: Some(
+                resource
+                    .collection_ids
+                    .iter()
+                    .copied()
+                    .map(Self::collection_key)
+                    .collect(),
+            ),
             favorite: Some(resource.favorite),
             date_added: Some(resource.date_added.as_unix_ms()),
             date_edited: Some(resource.date_edited.as_unix_ms()),
@@ -740,7 +893,9 @@ impl Store for SurrealStore {
             .await;
         match created {
             Ok(Some(_)) => Ok(tag),
-            Ok(None) => Err(StoreError::new(format!("create_tag returned empty for {id}"))),
+            Ok(None) => Err(StoreError::new(format!(
+                "create_tag returned empty for {id}"
+            ))),
             Err(err) => {
                 let msg = err.to_string();
                 if msg.contains("unique")
@@ -759,11 +914,7 @@ impl Store for SurrealStore {
     }
 
     async fn get_tag(&self, id: TagId) -> Result<Tag, StoreError> {
-        let row: Option<TagDoc> = self
-            .db
-            .select(Self::tag_key(id))
-            .await
-            .map_err(map_err)?;
+        let row: Option<TagDoc> = self.db.select(Self::tag_key(id)).await.map_err(map_err)?;
         match row {
             Some(doc) => Ok(Tag { id, text: doc.text }),
             None => Err(StoreError::not_found(format!("tag {id}"))),
@@ -800,6 +951,152 @@ impl Store for SurrealStore {
             tags.push(self.get_tag(id).await?);
         }
         Ok(tags)
+    }
+
+    async fn create_collection(
+        &self,
+        name: NonEmptyStr,
+        parent: Option<CollectionId>,
+    ) -> Result<Collection, StoreError> {
+        if let Some(parent_id) = parent {
+            let _ = self.get_collection(parent_id).await?;
+        }
+        let id = CollectionId::generate();
+        let collection = Collection::try_new(id, name);
+        let created: Option<CollectionDoc> = self
+            .db
+            .create(Self::collection_key(id))
+            .content(CollectionDoc {
+                name: collection.name.clone(),
+            })
+            .await
+            .map_err(map_err)?;
+        if created.is_none() {
+            return Err(StoreError::new(format!(
+                "create_collection returned empty for {id}"
+            )));
+        }
+        if let Some(parent_id) = parent {
+            self.db
+                .query("RELATE $from -> child_of -> $to")
+                .bind(("from", Self::collection_key(id)))
+                .bind(("to", Self::collection_key(parent_id)))
+                .await
+                .map_err(map_err)?;
+        }
+        Ok(collection)
+    }
+
+    async fn get_collection(&self, id: CollectionId) -> Result<Collection, StoreError> {
+        let row: Option<CollectionDoc> = self
+            .db
+            .select(Self::collection_key(id))
+            .await
+            .map_err(map_err)?;
+        match row {
+            Some(doc) => Ok(Collection { id, name: doc.name }),
+            None => Err(StoreError::not_found(format!("collection {id}"))),
+        }
+    }
+
+    async fn rename_collection(
+        &self,
+        id: CollectionId,
+        name: NonEmptyStr,
+    ) -> Result<Collection, StoreError> {
+        let _ = self.get_collection(id).await?;
+        let updated: Option<CollectionDoc> = self
+            .db
+            .update(Self::collection_key(id))
+            .content(CollectionDoc { name: name.clone() })
+            .await
+            .map_err(map_err)?;
+        match updated {
+            Some(doc) => Ok(Collection { id, name: doc.name }),
+            None => Err(StoreError::not_found(format!("collection {id}"))),
+        }
+    }
+
+    async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {
+        let (collections, edges) = self.load_collection_graph().await?;
+        Ok(build_collection_forest(collections, edges))
+    }
+
+    async fn add_collection_parent(
+        &self,
+        child: CollectionId,
+        parent: CollectionId,
+    ) -> Result<(), StoreError> {
+        if child == parent {
+            return Err(StoreError::invalid(
+                "collection cannot be its own parent".to_owned(),
+            ));
+        }
+        let _ = self.get_collection(child).await?;
+        let _ = self.get_collection(parent).await?;
+        let mut response = self
+            .db
+            .query(
+                "SELECT count() AS total FROM child_of WHERE in = $child AND out = $parent GROUP ALL",
+            )
+            .bind(("child", Self::collection_key(child)))
+            .bind(("parent", Self::collection_key(parent)))
+            .await
+            .map_err(map_err)?;
+        #[derive(Debug, SurrealValue)]
+        struct CountRow {
+            total: i64,
+        }
+        let counts: Vec<CountRow> = response.take(0).map_err(map_err)?;
+        if counts.first().map(|c| c.total).unwrap_or(0) > 0 {
+            return Err(StoreError::invalid(
+                "collection parent edge already exists".to_owned(),
+            ));
+        }
+        self.db
+            .query("RELATE $from -> child_of -> $to")
+            .bind(("from", Self::collection_key(child)))
+            .bind(("to", Self::collection_key(parent)))
+            .await
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn remove_collection_parent(
+        &self,
+        child: CollectionId,
+        parent: CollectionId,
+    ) -> Result<(), StoreError> {
+        let _ = self.get_collection(child).await?;
+        let _ = self.get_collection(parent).await?;
+        let mut response = self
+            .db
+            .query("DELETE child_of WHERE in = $child AND out = $parent RETURN BEFORE")
+            .bind(("child", Self::collection_key(child)))
+            .bind(("parent", Self::collection_key(parent)))
+            .await
+            .map_err(map_err)?;
+        let deleted: Vec<ChildOfEdgeRow> = response.take(0).map_err(map_err)?;
+        if deleted.is_empty() {
+            return Err(StoreError::not_found(format!(
+                "collection parent edge {child} -> {parent}"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn delete_collection(&self, id: CollectionId) -> Result<(), StoreError> {
+        let _ = self.get_collection(id).await?;
+        self.delete_collection_recursive(id).await
+    }
+
+    async fn collection_descendant_ids(
+        &self,
+        id: CollectionId,
+    ) -> Result<Vec<CollectionId>, StoreError> {
+        let _ = self.get_collection(id).await?;
+        let (_, edges) = self.load_collection_graph().await?;
+        Ok(collection_descendant_closure(id, edges))
     }
 
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError> {
@@ -954,6 +1251,13 @@ impl Store for SurrealStore {
                 .collect::<Result<Vec<_>, _>>()?,
             None => Vec::new(),
         };
+        let collection_ids = match doc.collections {
+            Some(refs) => refs
+                .iter()
+                .map(Self::thing_to_collection_id)
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
         let (date_added, date_edited) = Self::recorded_dates(doc.date_added, doc.date_edited, id);
 
         Resource::from_stored(
@@ -968,6 +1272,7 @@ impl Store for SurrealStore {
             series_id,
             series_number,
             tag_ids,
+            collection_ids,
             doc.favorite.unwrap_or(false),
             date_added,
             date_edited,
@@ -987,9 +1292,7 @@ impl Store for SurrealStore {
             .db
             .query("SELECT kind, count() AS total FROM resource GROUP BY kind")
             .query("SELECT count() AS total FROM resource WHERE favorite = true GROUP ALL")
-            .query(
-                "SELECT id, count(<~(resource FIELD tags)) AS total FROM tag"
-            )
+            .query("SELECT id, count(<~(resource FIELD tags)) AS total FROM tag")
             .await
             .map_err(map_err)?;
         let rows: Vec<KindCountRow> = response.take(0).map_err(map_err)?;
@@ -1079,6 +1382,19 @@ impl Store for SurrealStore {
         // without the sort field land at the no-data end for the direction
         // via the boolean pre-key (`sort_missing`).
         let fetch_limit = (u64::from(limit) + 1).min(u64::from(u32::MAX)) as usize;
+        // Collection filter expands to the selected id plus descendants so
+        // nested membership matches without the caller walking the graph.
+        let collection_record_ids = if let Some(cid) = query.filter.collection {
+            Some(
+                self.collection_descendant_ids(cid)
+                    .await?
+                    .into_iter()
+                    .map(Self::collection_key)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
         // Filter predicates AND into one WHERE ahead of the order contract;
         // values are bound parameters, never interpolated text.
         let where_sql = filter_where(&query.filter);
@@ -1190,6 +1506,9 @@ impl Store for SurrealStore {
         if let Some(tag) = query.filter.tag {
             statement = statement.bind(("tag_id", Self::tag_key(tag)));
         }
+        if let Some(ids) = collection_record_ids {
+            statement = statement.bind(("collection_ids", ids));
+        }
         if let Some(range) = query.filter.published {
             if let Some(from) = range.from {
                 statement = statement.bind(("published_from", from.as_unix_ms()));
@@ -1265,6 +1584,10 @@ fn filter_where(filter: &ResourceFilter) -> String {
     if filter.tag.is_some() && filter.creator.is_some() {
         clauses.push("tags CONTAINS $tag_id");
     }
+    // Selected collection plus descendants (bound as `$collection_ids`).
+    if filter.collection.is_some() {
+        clauses.push("array::len(array::intersect(collections ?? [], $collection_ids)) > 0");
+    }
     // The creator predicate lives in `filter_from`: membership rides the
     // `created` relation, and the source-position traversal is what keeps
     // it off a full resource scan.
@@ -1324,6 +1647,7 @@ mod tests {
                     series_id: None,
                     series_number: None,
                     tag_ids: vec![],
+                    collection_ids: vec![],
                 })
                 .await
                 .unwrap();
@@ -1421,6 +1745,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap()
@@ -1464,6 +1789,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap();
@@ -1483,6 +1809,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap();
@@ -1530,6 +1857,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap();
@@ -1618,6 +1946,7 @@ mod tests {
                     series_id: None,
                     series_number: None,
                     tag_ids: vec![],
+                    collection_ids: vec![],
                 })
                 .await
                 .unwrap();
@@ -1660,6 +1989,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap();
@@ -1749,6 +2079,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap()
@@ -1767,6 +2098,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap()
@@ -2052,6 +2384,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap()
@@ -2313,6 +2646,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         }
     }
@@ -2415,6 +2749,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         };
         let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
@@ -2437,6 +2772,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         }
     }
@@ -2530,6 +2866,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         };
         let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
@@ -2604,6 +2941,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         }
     }
@@ -2732,6 +3070,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         };
         let first = store.list_resources_query_page(&query, 0, 1).await.unwrap();
@@ -2805,6 +3144,7 @@ mod tests {
                 kind: None,
                 favorite: None,
                 tag: None,
+                collection: None,
             },
         };
         let page = store
@@ -3007,6 +3347,7 @@ mod tests {
                 series_id: Some(series.id),
                 series_number: Some(NonEmptyStr::try_new("LCL 26").unwrap()),
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap();
@@ -3073,6 +3414,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap();
@@ -3151,6 +3493,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap();
@@ -3281,6 +3624,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap();
@@ -3414,6 +3758,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap();
@@ -3463,6 +3808,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap();
@@ -3496,6 +3842,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap();
@@ -3522,6 +3869,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap();
@@ -3589,6 +3937,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![tag.id],
+                collection_ids: vec![],
             })
             .await
             .unwrap();
@@ -3604,6 +3953,7 @@ mod tests {
                 series_id: None,
                 series_number: None,
                 tag_ids: vec![],
+                collection_ids: vec![],
             })
             .await
             .unwrap();

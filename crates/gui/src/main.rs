@@ -1,3 +1,4 @@
+mod collections;
 mod db;
 mod detail;
 mod edit;

@@ -11,8 +11,8 @@ use oeuvre_app::{
     AppState, Command, CommandError, FieldValue, Outcome, Status, Store, StoreError, StoreHealth,
 };
 use oeuvre_core::{
-    Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceId, Series,
-    SeriesId, Tag, TagId,
+    Collection, CollectionId, CollectionTreeNode, Name, NewResource, NewSeries, NonEmptyStr,
+    Person, PersonId, Resource, ResourceId, Series, SeriesId, Tag, TagId,
 };
 
 #[tokio::test]
@@ -114,6 +114,57 @@ impl Store for HangStore {
     }
 
     async fn list_tags(&self) -> Result<Vec<Tag>, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn create_collection(
+        &self,
+        _name: NonEmptyStr,
+        _parent: Option<CollectionId>,
+    ) -> Result<Collection, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn get_collection(&self, _id: CollectionId) -> Result<Collection, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn rename_collection(
+        &self,
+        _id: CollectionId,
+        _name: NonEmptyStr,
+    ) -> Result<Collection, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn add_collection_parent(
+        &self,
+        _child: CollectionId,
+        _parent: CollectionId,
+    ) -> Result<(), StoreError> {
+        std::future::pending().await
+    }
+
+    async fn remove_collection_parent(
+        &self,
+        _child: CollectionId,
+        _parent: CollectionId,
+    ) -> Result<(), StoreError> {
+        std::future::pending().await
+    }
+
+    async fn delete_collection(&self, _id: CollectionId) -> Result<(), StoreError> {
+        std::future::pending().await
+    }
+
+    async fn collection_descendant_ids(
+        &self,
+        _id: CollectionId,
+    ) -> Result<Vec<CollectionId>, StoreError> {
         std::future::pending().await
     }
 
