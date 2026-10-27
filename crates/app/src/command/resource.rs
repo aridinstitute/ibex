@@ -560,7 +560,11 @@ impl Handler for GetResourceDetail {
                     .map_err(|e| map_resource_lookup(e, parent_id))?;
                 Some(parent.title)
             }
-            None => None,
+            None => resource
+                .metadata
+                .venue
+                .as_ref()
+                .and_then(|v| oeuvre_core::NonEmptyStr::try_new(v).ok()),
         };
         let series_title = match resource.series_id {
             Some(series_id) => {

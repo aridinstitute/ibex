@@ -55,6 +55,8 @@ pub(crate) const COLLECTION_FOREST_ROOTS: Key = Key::new("collection.forest_root
 
 pub(crate) const IMPORT_ENTRY_KEY: Key = Key::new("import.entry_key");
 pub(crate) const IMPORT_IMPORTED_COUNT: Key = Key::new("import.imported_count");
+pub(crate) const IMPORT_SKIPPED_COUNT: Key = Key::new("import.skipped_count");
+pub(crate) const IMPORT_WARNING_COUNT: Key = Key::new("import.warning_count");
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +103,8 @@ mod tests {
         COLLECTION_FOREST_ROOTS,
         IMPORT_ENTRY_KEY,
         IMPORT_IMPORTED_COUNT,
+        IMPORT_SKIPPED_COUNT,
+        IMPORT_WARNING_COUNT,
     ];
 
     #[test]

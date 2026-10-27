@@ -245,7 +245,11 @@ impl MemoryStore {
 
             let container_title = match row.parent_id {
                 Some(parent_id) => resources.get(&parent_id).map(|parent| parent.title.clone()),
-                None => None,
+                None => row
+                    .metadata
+                    .venue
+                    .as_ref()
+                    .and_then(|v| NonEmptyStr::try_new(v).ok()),
             };
 
             summaries.push(ResourceSummary {
