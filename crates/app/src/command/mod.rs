@@ -2,11 +2,12 @@ mod biblatex_import;
 mod collection;
 mod health;
 mod person;
-mod resource;
+pub(crate) mod resource;
 mod series;
 mod tag;
 
-pub use biblatex_import::{ImportBiblatex, ImportIssue, ImportReport, ImportedEntry};
+pub use biblatex_import::{ImportBiblatex, ImportIssue, ImportedEntry};
+pub use oeuvre_core::ImportReport;
 pub use collection::{
     AddCollectionParent, CreateCollection, DeleteCollection, DeletedCollection,
     ListCollectionForest, RemoveCollectionParent, RenameCollection,
