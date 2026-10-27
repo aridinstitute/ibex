@@ -17,6 +17,10 @@ const CONFIG_FILE: &str = "config.toml";
 pub struct Settings {
     #[serde(default)]
     pub column_widths: BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_sidebar_width: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_sidebar_width: Option<f64>,
 }
 
 impl Settings {
@@ -82,6 +86,7 @@ mod tests {
                 ("title".to_owned(), 310.),
                 ("creators".to_owned(), 260.),
             ]),
+            ..Settings::default()
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(Settings::load(dir.path()), settings);
@@ -94,5 +99,21 @@ mod tests {
         Settings::default().save(&nested).unwrap();
         assert!(nested.join(CONFIG_FILE).is_file());
         assert_eq!(Settings::load(&nested), Settings::default());
+    }
+
+    #[test]
+    fn sidebar_widths_load_from_config_and_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(CONFIG_FILE),
+            "left_sidebar_width = 230.0\nright_sidebar_width = 410.0\n",
+        )
+        .unwrap();
+        let settings = Settings::load(dir.path());
+        let saved = toml::to_string(&settings).unwrap();
+        assert!(saved.contains("left_sidebar_width = 230.0"));
+        assert!(saved.contains("right_sidebar_width = 410.0"));
+        settings.save(dir.path()).unwrap();
+        assert_eq!(Settings::load(dir.path()), settings);
     }
 }

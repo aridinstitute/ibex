@@ -30,6 +30,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSIm
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData", "NSDictionary", "NSString"] }
 
 [dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
 oeuvre-app = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
 tokio = { workspace = true }

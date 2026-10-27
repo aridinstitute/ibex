@@ -14,6 +14,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{Enter, Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::resizable::resize_handle;
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
 use gpui_kit::component::tooltip::Tooltip;
@@ -170,6 +171,19 @@ impl Render for CollectionDragGhost {
             .border_1()
             .border_color(cx.theme().border)
             .child(self.name.clone())
+    }
+}
+
+#[derive(Clone)]
+struct SidebarResize {
+    left: bool,
+    width: Pixels,
+    pointer_x: Pixels,
+}
+
+impl Render for SidebarResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
     }
 }
 
@@ -1411,6 +1425,7 @@ pub struct LibraryApp {
     published_to_input: Entity<InputState>,
     detail_open: bool,
     left_panel_open: bool,
+    resizing_sidebar: Option<SidebarResize>,
     counts: Option<ResourceCounts>,
     counts_error: Option<String>,
     counts_gen: u64,
@@ -1676,6 +1691,83 @@ fn prefill_input(
 }
 
 impl LibraryApp {
+    fn sidebar_resize_handle(
+        &self,
+        left: bool,
+        width: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let entity = cx.entity().downgrade();
+        resize_handle(
+            if left {
+                "resize-left-sidebar"
+            } else {
+                "resize-right-sidebar"
+            },
+            Axis::Horizontal,
+        )
+        .inside(if left {
+            gpui_kit::component::resizable::HandleEdge::Trailing
+        } else {
+            gpui_kit::component::resizable::HandleEdge::Leading
+        })
+        .on_drag(
+            SidebarResize {
+                left,
+                width,
+                pointer_x: px(0.),
+            },
+            move |drag, _, window, cx| {
+                let mut drag = drag.clone();
+                drag.pointer_x = window.mouse_position().x;
+                let _ = entity.update(cx, |this, cx| {
+                    this.resizing_sidebar = Some(drag.clone());
+                    cx.notify();
+                });
+                cx.new(|_| drag)
+            },
+        )
+    }
+
+    fn resize_sidebar(
+        &mut self,
+        event: &DragMoveEvent<SidebarResize>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.resizing_sidebar.as_ref() else {
+            return;
+        };
+        let delta = event.event.position.x - drag.pointer_x;
+        let width = drag.width + if drag.left { delta } else { -delta };
+        self.table.update(cx, |table, _| {
+            let settings = &mut table.delegate_mut().settings;
+            if drag.left {
+                settings.left_sidebar_width =
+                    Some(f64::from(f32::from(width.clamp(px(140.), px(420.)))));
+            } else {
+                settings.right_sidebar_width =
+                    Some(f64::from(f32::from(width.clamp(px(240.), px(640.)))));
+            }
+        });
+        cx.notify();
+    }
+
+    fn finish_sidebar_resize(&mut self, cx: &mut Context<Self>) {
+        if self.resizing_sidebar.take().is_none() {
+            return;
+        }
+        if let Err(err) = self
+            .table
+            .read(cx)
+            .delegate()
+            .settings
+            .save(&self.settings_dir)
+        {
+            eprintln!("warning: could not save sidebar widths: {err:#}");
+        }
+        cx.notify();
+    }
     /// Persist a finished column resize to config.toml. The table emits
     /// [`TableEvent::ColumnWidthsChanged`] once per completed drag or fit,
     /// so this is one small write per user action; the delegate's copy is
@@ -2033,8 +2125,9 @@ impl LibraryApp {
             settings_dir,
             published_from_input,
             published_to_input,
-            detail_open: false,
+            detail_open: true,
             left_panel_open: true,
+            resizing_sidebar: None,
             counts: None,
             counts_error: None,
             counts_gen: 0,
@@ -4130,14 +4223,33 @@ fn padded_input(state: &Entity<InputState>) -> Input {
     Input::new(state).small().px(px(10.)).py(px(5.))
 }
 
-/// The inspector can occupy the whole viewport on a narrow window; its
-/// controls must remain inside the window rather than forcing a fixed 320px pane.
-fn sidebar_target_width(viewport: Pixels) -> Pixels {
-    PANEL_WIDTH.min(viewport.max(px(0.)))
-}
-
-fn left_panel_target_width(open: bool) -> Pixels {
-    if open { px(180.) } else { px(0.) }
+/// Keep a usable center region, shrinking both sidebars on small windows
+/// without overwriting the user's preferred widths.
+fn sidebar_target_widths(
+    viewport: Pixels,
+    left: Option<Option<f64>>,
+    right: Option<Option<f64>>,
+) -> (Pixels, Pixels) {
+    fn width(value: Option<Option<f64>>, default: f32, min: f32, max: f32) -> f32 {
+        match value {
+            None => 0.,
+            Some(value) => value
+                .filter(|v| v.is_finite())
+                .map(|v| v as f32)
+                .unwrap_or(default)
+                .clamp(min, max),
+        }
+    }
+    let left = width(left, 180., 140., 420.);
+    let right = width(right, f32::from(PANEL_WIDTH), 240., 640.);
+    // Outer padding and two gutters occupy 32px; reserve 240px for the grid.
+    let available = (f32::from(viewport) - 272.).max(0.);
+    let scale = if left + right > available {
+        available / (left + right)
+    } else {
+        1.
+    };
+    (px(left * scale), px(right * scale))
 }
 
 // Sidebar navigation is neutral; the table keeps its blue active-row tint.
@@ -4240,26 +4352,30 @@ impl Render for LibraryApp {
             .as_ref()
             .map(|inputs| inputs.title.clone());
         let danger = cx.theme().danger;
-        // Always sample the width so the first closed frame anchors at 0
-        // and later toggles animate from the live value.
+        let settings = &delegate.settings;
+        let (left_target, right_target) = sidebar_target_widths(
+            window.viewport_size().width,
+            self.left_panel_open.then_some(settings.left_sidebar_width),
+            self.detail_open.then_some(settings.right_sidebar_width),
+        );
         let motion = cx.theme().motion_tokens();
-        let panel_transition =
-            MotionTransition::new(motion.duration_normal).easing(motion.easing_move.clone());
-        let sidebar_target = if self.detail_open {
-            sidebar_target_width(window.viewport_size().width)
+        // Dragging follows the pointer without easing; toggles still animate.
+        let duration = if self.resizing_sidebar.is_some() {
+            Duration::ZERO
         } else {
-            px(0.)
+            motion.duration_normal
         };
+        let panel_transition = MotionTransition::new(duration).easing(motion.easing_move.clone());
         let sidebar_width = transition(
             "detail-sidebar-width",
-            sidebar_target,
+            right_target,
             panel_transition.clone(),
             window,
             cx,
         );
         let left_panel_width = transition(
             "left-panel-width",
-            left_panel_target_width(self.left_panel_open),
+            left_target,
             panel_transition,
             window,
             cx,
@@ -4279,6 +4395,16 @@ impl Render for LibraryApp {
             .size_full()
             .bg(background.clone())
             .text_color(cx.theme().foreground)
+            .on_drag_move(cx.listener(Self::resize_sidebar))
+            .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                if event.button == MouseButton::Left {
+                    this.finish_sidebar_resize(cx);
+                }
+            }))
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.finish_sidebar_resize(cx)),
+            )
             // Handlers sit on this ancestor so bindings fire for any focused
             // descendant (table, toolbar, sidebar), not only the DataTable.
             // `InlineEdit` tags the tree so Tab bindings can target this mode.
@@ -4507,6 +4633,7 @@ impl Render for LibraryApp {
                         el.child(
                             div()
                                 .id("left-panel-clip")
+                                .relative()
                                 .w(left_panel_width)
                                 .flex_shrink_0()
                                 .h_full()
@@ -4515,7 +4642,10 @@ impl Render for LibraryApp {
                                 .border_1()
                                 .border_color(cx.theme().border)
                                 .bg(cx.theme().background)
-                                .child(self.render_left_panel(cx)),
+                                .child(self.render_left_panel(cx))
+                                .when(self.left_panel_open, |el| {
+                                    el.child(self.sidebar_resize_handle(true, left_panel_width, cx))
+                                }),
                         )
                     })
                     .child(
@@ -4585,7 +4715,10 @@ impl Render for LibraryApp {
                                 .bg(cx.theme().background)
                                 .flex_shrink_0()
                                 .child(self.render_side_panel(cx))
-                                .child(island_corner_mask(stops)),
+                                .child(island_corner_mask(stops))
+                                .when(self.detail_open, |el| {
+                                    el.child(self.sidebar_resize_handle(false, sidebar_width, cx))
+                                }),
                         )
                     }),
             )
@@ -4605,20 +4738,115 @@ impl Render for LibraryApp {
 
 #[cfg(test)]
 mod panel_width_tests {
-    use super::sidebar_target_width;
+    use super::sidebar_target_widths;
     use gpui_kit::px;
 
-    #[test]
-    fn left_panel_releases_space_when_closed() {
-        assert_eq!(super::left_panel_target_width(true), px(180.));
-        assert_eq!(super::left_panel_target_width(false), px(0.));
+    #[gpui_kit::test]
+    fn dragging_sidebars_saves_widths(cx: &mut gpui_kit::TestAppContext) {
+        use super::{LibraryApp, LibraryDelegate, Settings};
+        use crate::db::DbWorker;
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{AppContext as _, point, size};
+
+        let dir = tempfile::tempdir().unwrap();
+        // The production DbWorker completes requests on its own OS thread.
+        cx.executor().allow_parking();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let first = worker.list_page_blocking(None, 50).unwrap();
+        let (handle, _) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(
+                gpui_kit::WindowOptions {
+                    window_bounds: Some(gpui_kit::WindowBounds::Windowed(gpui_kit::Bounds {
+                        origin: Default::default(),
+                        size: size(px(1100.), px(700.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    let delegate = LibraryDelegate::new(
+                        worker,
+                        first,
+                        Settings {
+                            left_sidebar_width: Some(200.),
+                            right_sidebar_width: Some(360.),
+                            ..Settings::default()
+                        },
+                    );
+                    let table = cx.new(|cx| {
+                        gpui_kit::component::table::TableState::new(delegate, window, cx)
+                    });
+                    cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+                },
+            )
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            // Both handles exist on the first frame, including the default-open inspector.
+            let left = window.find("resize-left-sidebar").bounds().center();
+            let right = window.find("resize-right-sidebar").bounds().center();
+            assert!((left.x - px(208.)).abs() < px(8.));
+            assert!((right.x - px(732.)).abs() < px(8.));
+            window.drag(left, point(left.x + px(50.), left.y), cx);
+            let settings = Settings::load(dir.path());
+            assert!((230. ..=250.).contains(&settings.left_sidebar_width.unwrap()));
+            assert_eq!(settings.right_sidebar_width, Some(360.));
+            let right = window.find("resize-right-sidebar").bounds().center();
+            window.drag(right, point(right.x - px(60.), right.y), cx);
+            let settings = Settings::load(dir.path());
+            assert!(
+                (400. ..=420.).contains(&settings.right_sidebar_width.unwrap()),
+                "{settings:?}; handle={right:?}"
+            );
+            assert!((230. ..=250.).contains(&settings.left_sidebar_width.unwrap()));
+        })
+        .unwrap();
     }
 
     #[test]
-    fn edit_sidebar_fits_narrow_windows() {
-        assert_eq!(sidebar_target_width(px(240.)), px(240.));
-        assert_eq!(sidebar_target_width(px(320.)), px(320.));
-        assert_eq!(sidebar_target_width(px(900.)), px(320.));
+    fn default_widths_and_closed_panels() {
+        assert_eq!(
+            sidebar_target_widths(px(1000.), Some(None), Some(None)),
+            (px(180.), px(320.))
+        );
+        assert_eq!(
+            sidebar_target_widths(px(1000.), None, None),
+            (px(0.), px(0.))
+        );
+    }
+
+    #[test]
+    fn restored_widths_are_bounded_and_invalid_values_use_defaults() {
+        assert_eq!(
+            sidebar_target_widths(px(2000.), Some(Some(230.)), Some(Some(410.))),
+            (px(230.), px(410.))
+        );
+        assert_eq!(
+            sidebar_target_widths(px(2000.), Some(Some(-10.)), Some(Some(900.))),
+            (px(140.), px(640.))
+        );
+        assert_eq!(
+            sidebar_target_widths(px(2000.), Some(Some(f64::NAN)), Some(Some(f64::INFINITY))),
+            (px(180.), px(320.))
+        );
+    }
+
+    #[test]
+    fn narrow_windows_keep_the_grid_usable() {
+        assert_eq!(
+            sidebar_target_widths(px(522.), Some(None), Some(None)),
+            (px(90.), px(160.))
+        );
+        assert_eq!(
+            sidebar_target_widths(px(240.), Some(None), Some(None)),
+            (px(0.), px(0.))
+        );
     }
 }
 
