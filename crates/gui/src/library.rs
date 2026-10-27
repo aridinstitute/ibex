@@ -3688,8 +3688,8 @@ impl LibraryApp {
                         .id(("collection-row", index))
                         .w_full()
                         .items_center()
-                        .gap_1()
-                        .pl(px(8. + depth as f32 * 12.))
+                        .gap_0p5()
+                        .pl(px(depth as f32 * 8.))
                         .pr_2()
                         .py_1()
                         .rounded(px(8.))
@@ -3793,17 +3793,27 @@ impl LibraryApp {
                         })
                         .child(
                             div()
-                                .w(px(14.))
+                                .w(px(12.))
                                 .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
                                 .text_color(cx.theme().muted_foreground)
                                 .when(has_children, |slot| {
+                                    let chevron = if expanded {
+                                        symbol("chevron.down", AssetIconName::ChevronDown)
+                                    } else {
+                                        symbol("chevron.right", AssetIconName::ChevronRight)
+                                    }
+                                    .with_size(px(12.));
                                     slot.child(
                                         Button::new(SharedString::from(format!(
                                             "toggle-collection-{id}"
                                         )))
                                         .ghost()
                                         .xsmall()
-                                        .label(if expanded { "▾" } else { "▸" })
+                                        .size(px(12.))
+                                        .icon(chevron)
                                         .on_click(
                                             cx.listener(move |this, _, _, cx| {
                                                 this.toggle_collection_expanded(id, cx)
@@ -3811,6 +3821,23 @@ impl LibraryApp {
                                         ),
                                     )
                                 }),
+                        )
+                        .child(
+                            symbol(
+                                if expanded && has_children {
+                                    "folder.fill"
+                                } else {
+                                    "folder"
+                                },
+                                if expanded && has_children {
+                                    AssetIconName::FolderOpen
+                                } else {
+                                    AssetIconName::Folder
+                                },
+                            )
+                            .with_size(px(14.))
+                            .text_color(cx.theme().muted_foreground)
+                            .flex_shrink_0(),
                         )
                         .child(if renaming {
                             div()
