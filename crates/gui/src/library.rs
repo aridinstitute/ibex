@@ -9,6 +9,7 @@ use std::{
 };
 
 use gpui_kit::assets::IconName as AssetIconName;
+use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::base::{Transition as MotionTransition, transition};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
@@ -51,6 +52,8 @@ use crate::inline_edit::{
 use crate::kind::{kind_color, kind_label, kind_symbol};
 use crate::settings::Settings;
 use crate::tags::{TagChoice, TagDelegate};
+use gpui_kit::component::Disableable as _;
+use oeuvre_app::command::ImportReport;
 
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
 /// enough that the demo library spans several pages.
@@ -1329,6 +1332,7 @@ fn sort_marker(direction: SortDirection, cx: &App) -> Icon {
 }
 
 gpui_kit::actions!([
+    ImportBiblatexFile,
     OpenCommandPalette,
     ToggleLeftPanel,
     ToggleDetailPanel,
@@ -1421,7 +1425,16 @@ enum SidebarNav {
     Collection(CollectionId),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImportState {
+    Idle,
+    Choosing,
+    Importing,
+}
 pub struct LibraryApp {
+    import_state: ImportState,
+    import_gen: u64,
+    import_task: Option<Task<()>>,
     table: Entity<TableState<LibraryDelegate>>,
     /// App data directory holding config.toml, where settings persist.
     settings_dir: PathBuf,
@@ -2137,6 +2150,9 @@ impl LibraryApp {
         .detach();
 
         Self {
+            import_state: ImportState::Idle,
+            import_gen: 0,
+            import_task: None,
             table,
             settings_dir,
             published_from_input,
@@ -2166,7 +2182,99 @@ impl LibraryApp {
         }
     }
 
+    fn import_biblatex(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.import_state != ImportState::Idle || window.has_active_dialog(cx) {
+            return;
+        }
+        if self.edit.is_some() || self.has_inline(cx) {
+            window.push_notification(
+                "Save or cancel your edit before importing a bibliography",
+                cx,
+            );
+            return;
+        }
+        self.import_state = ImportState::Choosing;
+        self.import_gen = self.import_gen.wrapping_add(1);
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import BibLaTeX (.bib)".into()),
+        });
+        let worker = self.table.read(cx).delegate().worker().clone();
+        self.import_task = Some(cx.spawn_in(window, async move |app, window| {
+            let result: Result<Option<ImportReport>, String> = async {
+                let paths = paths
+                    .await
+                    .map_err(|e| format!("File picker closed: {e}"))?
+                    .map_err(|e| format!("Unable to open file picker: {e}"))?;
+                let Some(path) = paths.and_then(|paths| paths.into_iter().next()) else {
+                    return Ok(None);
+                };
+                app.update_in(window, |app, _, cx| {
+                    app.import_state = ImportState::Importing;
+                    cx.notify();
+                })
+                .map_err(|e| e.to_string())?;
+                worker.import_biblatex(path).await.map(Some)
+            }
+            .await;
+            _ = app.update_in(window, |app, window, cx| {
+                app.import_state = ImportState::Idle;
+                match result {
+                    Ok(None) => {}
+                    Ok(Some(report)) => app.show_import_report(Ok(report), window, cx),
+                    Err(error) => app.show_import_report(Err(error), window, cx),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn show_import_report(
+        &mut self,
+        result: Result<ImportReport, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A failed storage operation may follow successful entries, so refresh on errors too.
+        self.refresh_counts(window, cx);
+        let selected = self.selected;
+        self.table.update(cx, |table, cx| {
+            table
+                .delegate_mut()
+                .reload_from_top(selected, None, window, cx);
+        });
+        let (title, summary, issues) = match result {
+            Ok(report) => {
+                let summary = format!("{} imported · {} skipped · {} warnings", report.imported.len(), report.skipped.len(), report.warnings.len());
+                let count = report.skipped.len() + report.warnings.len();
+                let mut issues: Vec<String> = report.skipped.iter().map(|issue| ("Skipped", issue))
+                    .chain(report.warnings.iter().map(|issue| ("Warning", issue)))
+                    .take(100)
+                    .map(|(kind, issue)| format!("{kind} — {}: {}", issue.entry_key.as_deref().unwrap_or("bibliography"), issue.message)).collect();
+                if count > 100 { issues.push(format!("Showing the first 100 of {count} issues.")); }
+                ("BibLaTeX import complete", summary, issues)
+            },
+            Err(error) => ("BibLaTeX import failed", error, vec!["If a storage error stopped the import, earlier entries may already have been added.".into()]),
+        };
+        window.open_dialog(cx, move |dialog, _, cx| {
+            dialog.title(title).entrance(gpui_kit::component::dialog::DialogEntrance::None).width(px(560.)).child(
+                v_flex().id("biblatex-import-report").test_support().aria_label(summary.clone()).gap_3()
+                    .child(summary.clone())
+                    .child(div().id("biblatex-import-issues").max_h(px(320.)).overflow_y_scroll()
+                        .child(v_flex().gap_2().children(issues.iter().map(|issue| div().text_size(px(12.)).child(issue.clone())))))
+                    .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground)
+                        .child("Imports add new entries; existing records are not overwritten. Current library filters still apply."))
+            )
+        });
+    }
     fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.import_state != ImportState::Idle {
+            window.push_notification("Wait for the bibliography import to finish", cx);
+            return;
+        }
         if window.has_active_dialog(cx) {
             return;
         }
@@ -3389,6 +3497,10 @@ impl LibraryApp {
 
     /// Fetch the selected record and open borderless cell editors on its row.
     fn begin_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.import_state != ImportState::Idle {
+            window.push_notification("Wait for the bibliography import to finish", cx);
+            return;
+        }
         let Some(id) = self.selected else {
             return;
         };
@@ -3452,6 +3564,10 @@ impl LibraryApp {
 
     /// N opens a new Book draft as table row 0 in the same inline chrome.
     fn begin_new_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.import_state != ImportState::Idle {
+            window.push_notification("Wait for the bibliography import to finish", cx);
+            return;
+        }
         if matches!(
             self.table.read(cx).delegate().inline.as_ref(),
             Some(InlineSession::Create(_))
@@ -3463,9 +3579,13 @@ impl LibraryApp {
             table.delegate_mut().inline = None;
         });
         let worker = self.table.read(cx).delegate().worker().clone();
+        let import_gen = self.import_gen;
         cx.spawn_in(window, async move |app, window| {
             let people = worker.list_persons().await.unwrap_or_default();
             _ = app.update_in(window, |app, window, cx| {
+                if app.import_gen != import_gen || app.import_state != ImportState::Idle {
+                    return;
+                }
                 let form = InlineRowEdit::for_create(&people, window, cx);
                 let title = form.title.clone();
                 Self::wire_inline_active_tracking(&form, window, cx);
@@ -3592,6 +3712,10 @@ impl LibraryApp {
     /// a second fetch in the same flow. One form at a time; the sidebar
     /// swaps to it while it exists.
     fn request_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.import_state != ImportState::Idle {
+            window.push_notification("Wait for the bibliography import to finish", cx);
+            return;
+        }
         let Some(id) = self.selected else {
             return;
         };
@@ -4668,6 +4792,9 @@ impl Render for LibraryApp {
             } else {
                 "LibraryApp"
             })
+            .on_action(cx.listener(|this, _: &ImportBiblatexFile, window, cx| {
+                this.import_biblatex(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &OpenCommandPalette, window, cx| {
                 this.open_command_palette(window, cx);
             }))
@@ -4830,6 +4957,20 @@ impl Render for LibraryApp {
                                     .min_w_0()
                                     .items_center()
                                     .justify_end()
+                                    .child(
+                                        Button::new("import-biblatex")
+                                            .ghost()
+                                            .label(match self.import_state {
+                                                ImportState::Idle => "Import BibLaTeX…",
+                                                ImportState::Choosing => "Choosing file…",
+                                                ImportState::Importing => "Importing…",
+                                            })
+                                            .disabled(self.import_state != ImportState::Idle)
+                                            .tooltip("Import a UTF-8 .bib file (⌘⇧I)")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.import_biblatex(window, cx)
+                                            })),
+                                    )
                                     .child(
                                         h_flex()
                                             .items_center()
@@ -5813,5 +5954,114 @@ mod parent_options_tests {
             .map(String::from)
             .collect();
         assert_eq!(labels, ["Zzz Journal"]);
+    }
+}
+
+#[cfg(test)]
+mod biblatex_gui_tests {
+    use super::{LibraryApp, LibraryDelegate, Settings};
+    use crate::db::DbWorker;
+    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, KeyBinding};
+
+    #[gpui_kit::test]
+    fn toolbar_imports_bibliography_refreshes_rows_and_cancel_does_not_write(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("example.bib");
+        std::fs::write(&path, "@book{book,title={A GUI imported book}}\n@online{web,title={A GUI imported website}}\n@patent{patent,title={Skipped}}").unwrap();
+        cx.executor().allow_parking();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let first = worker.list_page_blocking(None, 50).unwrap();
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.bind_keys([KeyBinding::new(
+                "n",
+                super::BeginNewRow,
+                Some("LibraryApp && !Input"),
+            )]);
+            cx.bind_keys([KeyBinding::new(
+                "cmd-shift-i",
+                super::ImportBiblatexFile,
+                Some("LibraryApp"),
+            )]);
+            let worker = worker.clone();
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let table = cx.new(|cx| {
+                    gpui_kit::component::table::TableState::new(
+                        LibraryDelegate::new(worker, first, Settings::default()),
+                        window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            app.update(cx, |app, cx| app.focus_table(window, cx));
+            window.press("n", cx);
+            window.click("import-biblatex", cx);
+        })
+        .unwrap();
+        assert!(cx.did_prompt_for_paths());
+        cx.run_until_parked();
+        worker.list_page_blocking(None, 50).unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, _window, cx| {
+            assert!(
+                !app.read(cx).has_inline(cx),
+                "stale new-row reply must not open a draft during import"
+            );
+        })
+        .unwrap();
+        cx.simulate_path_prompt_response(|options| {
+            assert!(options.files);
+            assert!(!options.directories);
+            assert!(!options.multiple);
+            Some(vec![path.clone()])
+        });
+        cx.run_until_parked();
+        // Fence the external database thread, then process the GUI completion and reload.
+        assert_eq!(worker.list_page_blocking(None, 50).unwrap().rows.len(), 2);
+        cx.run_until_parked();
+        worker.list_page_blocking(None, 50).unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.has_active_dialog(cx));
+            assert!(window.try_find("biblatex-import-report").is_some());
+            assert_eq!(
+                window.find("biblatex-import-report").label(),
+                Some("2 imported · 1 skipped · 0 warnings")
+            );
+            assert_eq!(app.read(cx).counts.as_ref().unwrap().all_items, 2);
+            assert_eq!(app.read(cx).table.read(cx).delegate().rows.len(), 2);
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(!window.has_active_dialog(cx));
+            app.update(cx, |app, cx| app.focus_table(window, cx));
+            window.press("cmd-shift-i", cx);
+        })
+        .unwrap();
+        assert!(cx.did_prompt_for_paths());
+        cx.simulate_path_prompt_response(|_| None);
+        cx.run_until_parked();
+        assert_eq!(worker.list_page_blocking(None, 50).unwrap().rows.len(), 2);
+        cx.update_window(handle, |_, window, cx| {
+            assert!(!window.has_active_dialog(cx));
+        })
+        .unwrap();
     }
 }
