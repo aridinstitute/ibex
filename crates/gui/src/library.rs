@@ -20,7 +20,8 @@ use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, T
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, FocusTrapElement as _, FocusableExt as _, Icon, IconName, IndexPath,
-    Selectable as _, Sizable as _, Size, ThemeColor, ThemeMode, TitleBar, h_flex, v_flex,
+    Selectable as _, Sizable as _, Size, ThemeColor, ThemeMode, TitleBar, WindowExt as _, h_flex,
+    v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Focusable as _, *};
@@ -33,6 +34,7 @@ use oeuvre_core::{
 };
 
 use crate::collections::{CollectionChoice, CollectionDelegate, flatten_collections};
+use crate::command_palette::{CommandPalette, PaletteRequest};
 use crate::db::DbWorker;
 use crate::detail::{
     DetailFetch, DetailView, FIELD_LABEL_WIDTH, FIELD_TEXT_SIZE, PANEL_WIDTH, render_panel,
@@ -1327,6 +1329,7 @@ fn sort_marker(direction: SortDirection, cx: &App) -> Icon {
 }
 
 gpui_kit::actions!([
+    OpenCommandPalette,
     ToggleLeftPanel,
     ToggleDetailPanel,
     CycleColumnSort,
@@ -2008,6 +2011,14 @@ impl LibraryApp {
         // unless a Combobox menu was open (List in the stack): that Esc only
         // dismisses the menu.
         cx.observe_keystrokes(|this, event, window, cx| {
+            if event
+                .context_stack
+                .iter()
+                .any(|ctx| ctx.contains("ResourcePalette"))
+            {
+                this.last_escape_at = None;
+                return;
+            }
             if event.keystroke.key != "escape" || event.keystroke.modifiers.modified() {
                 this.last_escape_at = None;
                 return;
@@ -2152,6 +2163,101 @@ impl LibraryApp {
             detail_gens: HashMap::new(),
             last_escape_at: None,
             inline_trap: cx.focus_handle(),
+        }
+    }
+
+    fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        if self.edit.is_some() || self.has_inline(cx) {
+            window.push_notification(
+                "Save or cancel your edit before opening resource commands",
+                cx,
+            );
+            return;
+        }
+        self.last_escape_at = None;
+        let target = self.selected;
+        let palette = cx.new(|cx| CommandPalette::new(target, window, cx));
+        cx.subscribe_in(
+            &palette,
+            window,
+            |app, palette, request: &PaletteRequest, window, cx| {
+                let request = request.clone();
+                let palette = palette.downgrade();
+                let worker = app.table.read(cx).delegate().worker().clone();
+                cx.spawn_in(window, async move |app, window| {
+                    let result = apply_palette_request(&worker, &request).await;
+                    _ = app.update_in(window, |app, window, cx| {
+                        match result {
+                            Ok(record) => {
+                                let id = record.id;
+                                *app.detail_gens.entry(id).or_default() += 1;
+                                app.detail_inflight.remove(&id);
+                                app.detail_cache.invalidate(&id);
+                                if app.selected == Some(id) {
+                                    app.detail = Some((id, DetailFetch::Loading));
+                                    app.fetch_detail(id, window, cx);
+                                }
+                                app.refresh_counts(window, cx);
+                                let selected = app.selected;
+                                app.table.update(cx, |table, cx| {
+                                    table
+                                        .delegate_mut()
+                                        .reload_from_top(selected, None, window, cx);
+                                });
+                                if palette.upgrade().is_some() {
+                                    window.close_dialog(cx);
+                                }
+                            }
+                            Err(error) => {
+                                _ = palette.update(cx, |palette, cx| palette.failed(error, cx));
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            },
+        )
+        .detach();
+
+        let initial_focus = std::cell::Cell::new(true);
+        let content = palette.clone();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if initial_focus.replace(false) {
+                content.update(cx, |palette, cx| palette.focus(window, cx));
+            }
+            dialog
+                .close_button(false)
+                .overlay_closable(false)
+                .keyboard(false)
+                // Commands should appear in place, not slide beneath the pointer.
+                .entrance(gpui_kit::component::dialog::DialogEntrance::None)
+                .width(px(480.))
+                .p_0()
+                .child(content.clone())
+        });
+        if let Some(id) = target {
+            let worker = self.table.read(cx).delegate().worker().clone();
+            let palette = palette.downgrade();
+            cx.spawn_in(window, async move |_app, window| {
+                let result = async {
+                    let record = worker.resource(id).await?;
+                    let tags = worker.list_tags().await?;
+                    let forest = worker.list_collection_forest().await?;
+                    Ok::<_, String>((record, tags, flatten_collections(&forest)))
+                }
+                .await;
+                _ = palette.update_in(window, |palette, _, cx| match result {
+                    Ok((record, tags, collections)) => {
+                        palette.loaded(record, tags, collections, cx)
+                    }
+                    Err(error) => palette.failed(error, cx),
+                });
+            })
+            .detach();
         }
     }
 
@@ -4562,6 +4668,9 @@ impl Render for LibraryApp {
             } else {
                 "LibraryApp"
             })
+            .on_action(cx.listener(|this, _: &OpenCommandPalette, window, cx| {
+                this.open_command_palette(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleDetailPanel, _window, cx| {
                 this.toggle_detail_panel(cx);
             }))
@@ -4882,6 +4991,243 @@ impl Render for LibraryApp {
                         .child(error),
                 )
             })
+    }
+}
+
+async fn apply_palette_request(
+    worker: &DbWorker,
+    request: &crate::command_palette::PaletteRequest,
+) -> Result<Resource, String> {
+    use crate::command_palette::PaletteRequest;
+    // Read at Apply time, not palette-open time, to preserve intervening changes.
+    let record = worker.resource(request.resource_id()).await?;
+    let mut new = record.to_new();
+    match request {
+        PaletteRequest::EditTags(_, ids, removed) => {
+            new.tag_ids.retain(|id| !removed.contains(id));
+            for id in ids {
+                if !new.tag_ids.contains(id) {
+                    new.tag_ids.push(*id);
+                }
+            }
+        }
+        PaletteRequest::EditCollections(_, ids, removed) => {
+            new.collection_ids.retain(|id| !removed.contains(id));
+            for id in ids {
+                if !new.collection_ids.contains(id) {
+                    new.collection_ids.push(*id);
+                }
+            }
+        }
+    }
+    worker.update_resource(record.id, new).await
+}
+
+#[cfg(test)]
+mod palette_persistence_tests {
+    use super::{LibraryApp, LibraryDelegate, OpenCommandPalette, Settings, apply_palette_request};
+    use crate::command_palette::PaletteRequest;
+    use crate::db::DbWorker;
+    use gpui_kit::component::{WindowExt as _, table::TableState};
+    use gpui_kit::{AppContext as _, Focusable as _, KeyBinding};
+    use oeuvre_core::{NonEmptyStr, ResourceId};
+
+    #[tokio::test]
+    async fn palette_adds_tags_without_replacing_existing_memberships_or_fields() {
+        let store = oeuvre_app::testing::MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 2)
+            .await
+            .unwrap();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(store)
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let id = worker.list_page(None, 1).await.unwrap().rows[0].id;
+        let before = worker.resource(id).await.unwrap();
+        let tag = worker
+            .create_tag(NonEmptyStr::try_new("palette tag").unwrap())
+            .await
+            .unwrap();
+        let request = PaletteRequest::EditTags(id, vec![tag.id, tag.id], vec![]);
+        apply_palette_request(&worker, &request).await.unwrap();
+        let after = worker.resource(id).await.unwrap();
+        assert!(after.tag_ids.contains(&tag.id));
+        assert_eq!(after.tag_ids.iter().filter(|&&id| id == tag.id).count(), 1);
+        assert!(before.tag_ids.iter().all(|id| after.tag_ids.contains(id)));
+        assert_eq!(after.title, before.title);
+        assert_eq!(after.collection_ids, before.collection_ids);
+    }
+
+    #[tokio::test]
+    async fn palette_adds_collections_idempotently_and_preserves_later_edits() {
+        let store = oeuvre_app::testing::MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 2)
+            .await
+            .unwrap();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(store)
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let id = worker.list_page(None, 1).await.unwrap().rows[0].id;
+        let before = worker.resource(id).await.unwrap();
+        let collection = worker
+            .create_collection(NonEmptyStr::try_new("Palette collection").unwrap(), None)
+            .await
+            .unwrap();
+        let request =
+            PaletteRequest::EditCollections(id, vec![collection.id, collection.id], vec![]);
+        let mut edited = before.to_new();
+        edited.title = NonEmptyStr::try_new("Changed after palette opened").unwrap();
+        worker.update_resource(id, edited).await.unwrap();
+        apply_palette_request(&worker, &request).await.unwrap();
+        apply_palette_request(&worker, &request).await.unwrap();
+        let after = worker.resource(id).await.unwrap();
+        assert_eq!(after.title.as_str(), "Changed after palette opened");
+        assert_eq!(after.tag_ids, before.tag_ids);
+        assert!(
+            before
+                .collection_ids
+                .iter()
+                .all(|id| after.collection_ids.contains(id))
+        );
+        assert_eq!(
+            after
+                .collection_ids
+                .iter()
+                .filter(|&&id| id == collection.id)
+                .count(),
+            1
+        );
+        let err = apply_palette_request(
+            &worker,
+            &PaletteRequest::EditTags(ResourceId::generate(), vec![], vec![]),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn palette_removes_only_unchecked_memberships_and_keeps_intervening_additions() {
+        let store = oeuvre_app::testing::MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 2)
+            .await
+            .unwrap();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(store)
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let id = worker.list_page(None, 1).await.unwrap().rows[0].id;
+        let mut tags = Vec::new();
+        let mut collections = Vec::new();
+        for label in ["Remove", "Keep", "Concurrent", "Add"] {
+            tags.push(
+                worker
+                    .create_tag(NonEmptyStr::try_new(format!("palette {label}")).unwrap())
+                    .await
+                    .unwrap()
+                    .id,
+            );
+            collections.push(
+                worker
+                    .create_collection(
+                        NonEmptyStr::try_new(format!("palette {label}")).unwrap(),
+                        None,
+                    )
+                    .await
+                    .unwrap()
+                    .id,
+            );
+        }
+        let mut current = worker.resource(id).await.unwrap().to_new();
+        current.title = NonEmptyStr::try_new("Intervening title").unwrap();
+        current.tag_ids = tags[..3].to_vec();
+        current.collection_ids = collections[..3].to_vec();
+        worker.update_resource(id, current).await.unwrap();
+        let edits = [
+            PaletteRequest::EditTags(id, vec![tags[3]], vec![tags[0]]),
+            PaletteRequest::EditCollections(id, vec![collections[3]], vec![collections[0]]),
+        ];
+        for edit in &edits {
+            apply_palette_request(&worker, edit).await.unwrap();
+            apply_palette_request(&worker, edit).await.unwrap();
+        }
+        let after = worker.resource(id).await.unwrap();
+        assert_eq!(after.title.as_str(), "Intervening title");
+        assert_eq!(after.tag_ids, tags[1..]);
+        assert_eq!(after.collection_ids, collections[1..]);
+        // Unchecking the final memberships must allow clearing the sets entirely.
+        apply_palette_request(
+            &worker,
+            &PaletteRequest::EditTags(id, vec![], after.tag_ids.clone()),
+        )
+        .await
+        .unwrap();
+        apply_palette_request(
+            &worker,
+            &PaletteRequest::EditCollections(id, vec![], after.collection_ids.clone()),
+        )
+        .await
+        .unwrap();
+        let cleared = worker.resource(id).await.unwrap();
+        assert!(cleared.tag_ids.is_empty());
+        assert!(cleared.collection_ids.is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn command_k_opens_modal_and_escape_restores_library_focus(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::test::TestWindowExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        cx.executor().allow_parking();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let first = worker.list_page_blocking(None, 50).unwrap();
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.bind_keys([KeyBinding::new(
+                "cmd-k",
+                OpenCommandPalette,
+                Some("LibraryApp"),
+            )]);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let table = cx.new(|cx| {
+                    TableState::new(
+                        LibraryDelegate::new(worker, first, Settings::default()),
+                        window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| app.focus_table(window, cx));
+            window.render_frame(cx);
+            window.press("cmd-k", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            assert!(window.has_active_dialog(cx));
+            window.render_frame(cx);
+            assert!(window.try_find("palette-back").is_some());
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            assert!(!window.has_active_dialog(cx));
+            assert!(app.read(cx).table.focus_handle(cx).is_focused(window));
+            assert!(!app.read(cx).table.read(cx).delegate().filter.is_active());
+        })
+        .unwrap();
     }
 }
 
