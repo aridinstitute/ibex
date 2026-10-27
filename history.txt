@@ -1,0 +1,48 @@
+#V2
+DEFINE TABLE tag SCHEMALESS;
+DEFINE TABLE resource SCHEMALESS;
+DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET;
+DEFINE INDEX tag_text_unique ON tag FIELDS text UNIQUE;
+CREATE tag:t1 SET text = 'methods';
+CREATE resource:r1 SET title = 'Tagged', tags = [tag:t1];
+CREATE resource:r2 SET title = 'Untagged', tags = [];
+-- A
+SELECT id FROM tag:t1;
+-- B projection
+SELECT <~(resource FIELD tags) AS resources FROM ONLY tag:t1;
+-- C 
+SELECT VALUE <~(resource FIELD tags) FROM ONLY tag:t1;
+-- D try FROM array
+SELECT id, title FROM array::flatten((SELECT VALUE <~(resource FIELD tags) FROM ONLY tag:t1));
+-- E CONTAINS
+SELECT id, title FROM resource WHERE tags CONTAINS tag:t1;
+DEFINE TABLE tag SCHEMALESS;
+DEFINE TABLE resource SCHEMALESS;
+DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET;
+CREATE tag:t1 SET text = 'methods';
+CREATE resource:r1 SET title = 'Tagged', tags = [tag:t1], kind = 'book';
+CREATE resource:r2 SET title = 'Untagged', tags = [], kind = 'book';
+-- 1: graph-style path on record
+DEFINE TABLE tag SCHEMALESS; DEFINE TABLE resource SCHEMALESS; DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET; CREATE tag:t1 SET text = "methods"; CREATE resource:r1 SET title = "Tagged", tags = [tag:t1]; CREATE resource:r2 SET title = "Untagged", tags = [];
+SELECT id, title FROM (SELECT VALUE <~(resource FIELD tags) FROM ONLY tag:t1);
+DEFINE TABLE tag SCHEMALESS; DEFINE TABLE resource SCHEMALESS; DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET; CREATE tag:t1 SET text = "methods"; CREATE resource:r1 SET title = "Tagged", tags = [tag:t1]; CREATE resource:r2 SET title = "Untagged", tags = [];
+SELECT <~(resource FIELD tags).{id, title} AS rows FROM ONLY tag:t1;
+DEFINE TABLE tag SCHEMALESS; DEFINE TABLE resource SCHEMALESS; DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET; CREATE tag:t1 SET text = "methods"; CREATE resource:r1 SET title = "Tagged", tags = [tag:t1]; CREATE resource:r2 SET title = "Untagged", tags = [];
+SELECT id, title FROM resource WHERE tags CONTAINS tag:t1;
+DEFINE TABLE tag SCHEMALESS; DEFINE TABLE resource SCHEMALESS; DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET; CREATE tag:t1 SET text = "methods"; CREATE resource:r1 SET title = "Tagged", tags = [tag:t1]; CREATE resource:r2 SET title = "Untagged", tags = [];
+SELECT id, title FROM (SELECT VALUE <~(resource FIELD tags) FROM tag:t1)[0];
+DEFINE TABLE tag SCHEMALESS; DEFINE TABLE resource SCHEMALESS; DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET; CREATE tag:t1 SET text = "methods"; CREATE resource:r1 SET title = "Tagged", tags = [tag:t1], kind = "book", date_added = 1; CREATE resource:r2 SET title = "Untagged", tags = [], kind = "book", date_added = 2;
+LET $rs = (SELECT VALUE <~(resource FIELD tags) FROM ONLY tag:t1); SELECT id, title FROM $rs ORDER BY id DESC;
+DEFINE TABLE tag SCHEMALESS; DEFINE TABLE resource SCHEMALESS; DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET; CREATE tag:t1 SET text = "methods"; CREATE resource:r1 SET title = "Tagged", tags = [tag:t1], kind = "book", date_added = 1; CREATE resource:r2 SET title = "Untagged", tags = [], kind = "book", date_added = 2;
+SELECT id, title, kind FROM (SELECT VALUE <~(resource FIELD tags) FROM ONLY tag:t1)[0] ORDER BY id DESC;
+DEFINE TABLE tag SCHEMALESS; DEFINE TABLE resource SCHEMALESS; DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET; CREATE tag:t1 SET text = "methods"; CREATE resource:r1 SET title = "Tagged", tags = [tag:t1], kind = "book", date_added = 1; CREATE resource:r2 SET title = "Untagged", tags = [], kind = "book", date_added = 2;
+SELECT id, title FROM ONLY (SELECT VALUE <~(resource FIELD tags) FROM ONLY tag:t1);
+DEFINE TABLE tag SCHEMALESS; DEFINE TABLE resource SCHEMALESS; DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET; CREATE tag:t1 SET text = "methods"; CREATE resource:r1 SET title = "Tagged", tags = [tag:t1], kind = "book", date_added = 1; CREATE resource:r2 SET title = "Untagged", tags = [], kind = "book", date_added = 2;
+DEFINE TABLE tag SCHEMALESS; DEFINE TABLE resource SCHEMALESS; DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET; CREATE tag:t1 SET text = "methods"; CREATE resource:r1 SET title = "Tagged", tags = [tag:t1], kind = "book"; CREATE resource:r2 SET title = "Untagged", tags = [], kind = "book";
+SELECT * FROM tag:t1<~resource;
+DEFINE TABLE tag SCHEMALESS; DEFINE TABLE resource SCHEMALESS; DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET; CREATE tag:t1 SET text = "methods"; CREATE resource:r1 SET title = "Tagged", tags = [tag:t1], kind = "book"; CREATE resource:r2 SET title = "Untagged", tags = [], kind = "book";
+SELECT id, title, kind FROM tag:t1<~resource ORDER BY id DESC;
+DEFINE TABLE tag SCHEMALESS; DEFINE TABLE resource SCHEMALESS; DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET; CREATE tag:t1 SET text = "methods"; CREATE resource:r1 SET title = "Tagged", tags = [tag:t1], kind = "book"; CREATE resource:r2 SET title = "Untagged", tags = [], kind = "book";
+SELECT id, title FROM tag:t1<~(resource FIELD tags);
+DEFINE TABLE tag SCHEMALESS; DEFINE TABLE resource SCHEMALESS; DEFINE FIELD tags ON resource TYPE option<array<record<tag>>> DEFAULT [] REFERENCE ON DELETE UNSET; CREATE tag:t1 SET text = "methods"; CREATE resource:r1 SET title = "Tagged", tags = [tag:t1], kind = "book"; CREATE resource:r2 SET title = "Untagged", tags = [], kind = "book";
+LET $tag_id = tag:t1; SELECT id, title FROM $tag_id<~resource;

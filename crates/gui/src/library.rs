@@ -103,13 +103,14 @@ fn collection_subtree_ids(node: &CollectionTreeNode) -> HashSet<CollectionId> {
 }
 
 /// Nest targets: every collection except `child` and its descendants.
-fn nest_parent_candidates(
-    forest: &[CollectionTreeNode],
-    child: CollectionId,
-) -> Vec<Collection> {
+fn nest_parent_candidates(forest: &[CollectionTreeNode], child: CollectionId) -> Vec<Collection> {
     let mut blocked = HashSet::new();
     blocked.insert(child);
-    fn walk_blocked(nodes: &[CollectionTreeNode], child: CollectionId, blocked: &mut HashSet<CollectionId>) {
+    fn walk_blocked(
+        nodes: &[CollectionTreeNode],
+        child: CollectionId,
+        blocked: &mut HashSet<CollectionId>,
+    ) {
         for node in nodes {
             if node.collection.id == child {
                 blocked.extend(collection_subtree_ids(node));
@@ -2354,7 +2355,10 @@ impl LibraryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.renaming_collection.is_some_and(|renaming| renaming != id) {
+        if self
+            .renaming_collection
+            .is_some_and(|renaming| renaming != id)
+        {
             self.renaming_collection = None;
         }
         self.collection_focus_parent = parent;
@@ -3720,13 +3724,7 @@ impl LibraryApp {
                                 .is_some_and(|drag| can_nest_under(&forest, drag.id, id))
                         })
                         .on_drop(cx.listener(move |this, drag: &CollectionDrag, window, cx| {
-                            this.reparent_collection(
-                                drag.id,
-                                drag.from_parent,
-                                id,
-                                window,
-                                cx,
-                            );
+                            this.reparent_collection(drag.id, drag.from_parent, id, window, cx);
                         }))
                         .drag_over::<CollectionDrag>(|style, _, _, cx| style.bg(cx.theme().accent))
                         .context_menu({
@@ -3774,21 +3772,17 @@ impl LibraryApp {
                                         "Unnest",
                                         move |_, window, cx| {
                                             let _ = app_unnest.update(cx, |this, cx| {
-                                                this.unnest_collection(
-                                                    id, parent_id, window, cx,
-                                                );
+                                                this.unnest_collection(id, parent_id, window, cx);
                                             });
                                         },
                                     ));
                                 }
-                                menu.item(PopupMenuItem::separator()).item(compact_menu_item(
-                                    "Delete",
-                                    move |_, window, cx| {
+                                menu.item(PopupMenuItem::separator())
+                                    .item(compact_menu_item("Delete", move |_, window, cx| {
                                         let _ = app_delete.update(cx, |this, cx| {
                                             this.delete_sidebar_collection(id, window, cx);
                                         });
-                                    },
-                                ))
+                                    }))
                             }
                         })
                         .child(

@@ -361,9 +361,10 @@ impl DbWorker {
                                     .map_err(|e| e.to_string())
                                     .and_then(|outcome| match outcome {
                                         Outcome::AddCollectionParent(()) => Ok(()),
-                                        _ => Err(
-                                            "unexpected outcome from add_collection_parent".into(),
-                                        ),
+                                        _ => {
+                                            Err("unexpected outcome from add_collection_parent"
+                                                .into())
+                                        }
                                     });
                                 let _ = reply.send(result);
                             }
@@ -383,10 +384,10 @@ impl DbWorker {
                                     .map_err(|e| e.to_string())
                                     .and_then(|outcome| match outcome {
                                         Outcome::RemoveCollectionParent(()) => Ok(()),
-                                        _ => Err(
-                                            "unexpected outcome from remove_collection_parent"
-                                                .into(),
-                                        ),
+                                        _ => {
+                                            Err("unexpected outcome from remove_collection_parent"
+                                                .into())
+                                        }
                                     });
                                 let _ = reply.send(result);
                             }
