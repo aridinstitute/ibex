@@ -95,6 +95,58 @@ struct TagCountRow {
 
 #[derive(Debug, Clone, SurrealValue)]
 struct ResourceDoc {
+    #[surreal(default, wrap)]
+    subtitle: Option<NonEmptyStr>,
+    #[surreal(default, wrap)]
+    title_addon: Option<NonEmptyStr>,
+    #[surreal(default, wrap)]
+    short_title: Option<NonEmptyStr>,
+    #[surreal(default)]
+    place: Option<String>,
+    #[surreal(default)]
+    volume: Option<String>,
+    #[surreal(default)]
+    issue: Option<String>,
+    #[surreal(default)]
+    pages: Option<String>,
+    #[surreal(default)]
+    total_pages: Option<String>,
+    #[surreal(default)]
+    article_number: Option<String>,
+    #[surreal(default)]
+    edition: Option<String>,
+    #[surreal(default)]
+    doi: Option<String>,
+    #[surreal(default)]
+    url: Option<String>,
+    #[surreal(default)]
+    eprint: Option<String>,
+    #[surreal(default)]
+    isbns: Vec<String>,
+    #[surreal(default)]
+    issns: Vec<String>,
+    #[surreal(default)]
+    isrns: Vec<String>,
+    #[surreal(default, wrap)]
+    original_date: Option<BibliographicDate>,
+    #[surreal(default, wrap)]
+    event_date: Option<BibliographicDate>,
+    #[surreal(default)]
+    language: Option<String>,
+    #[surreal(default)]
+    document_type: Option<String>,
+    #[surreal(default)]
+    publication_method: Option<String>,
+    #[surreal(default)]
+    institution: Option<String>,
+    #[surreal(default)]
+    organization: Option<String>,
+    #[surreal(default)]
+    school: Option<String>,
+    #[surreal(default)]
+    abstract_text: Option<String>,
+    #[surreal(default)]
+    keywords: Vec<String>,
     #[surreal(wrap)]
     kind: ResourceKind,
     #[surreal(wrap)]
@@ -515,6 +567,32 @@ impl SurrealStore {
 
     fn resource_doc_from(resource: &Resource) -> ResourceDoc {
         ResourceDoc {
+            subtitle: resource.subtitle.clone(),
+            title_addon: resource.title_addon.clone(),
+            short_title: resource.short_title.clone(),
+            place: resource.place.clone(),
+            volume: resource.volume.clone(),
+            issue: resource.issue.clone(),
+            pages: resource.pages.clone(),
+            total_pages: resource.total_pages.clone(),
+            article_number: resource.article_number.clone(),
+            edition: resource.edition.clone(),
+            doi: resource.doi.clone(),
+            url: resource.url.clone(),
+            eprint: resource.eprint.clone(),
+            isbns: resource.isbns.clone(),
+            issns: resource.issns.clone(),
+            isrns: resource.isrns.clone(),
+            original_date: resource.original_date.clone(),
+            event_date: resource.event_date.clone(),
+            language: resource.language.clone(),
+            document_type: resource.document_type.clone(),
+            publication_method: resource.publication_method.clone(),
+            institution: resource.institution.clone(),
+            organization: resource.organization.clone(),
+            school: resource.school.clone(),
+            abstract_text: resource.abstract_text.clone(),
+            keywords: resource.keywords.clone(),
             kind: resource.kind,
             title: resource.title.clone(),
             publisher: resource.publisher.clone(),
@@ -1264,7 +1342,7 @@ impl Store for SurrealStore {
         };
         let (date_added, date_edited) = Self::recorded_dates(doc.date_added, doc.date_edited, id);
 
-        Resource::from_stored(
+        let mut resource = Resource::from_stored(
             id,
             doc.kind,
             doc.title,
@@ -1282,7 +1360,34 @@ impl Store for SurrealStore {
             date_added,
             date_edited,
         )
-        .map_err(StoreError::from)
+        .map_err(StoreError::from)?;
+        resource.subtitle = doc.subtitle;
+        resource.title_addon = doc.title_addon;
+        resource.short_title = doc.short_title;
+        resource.place = doc.place;
+        resource.volume = doc.volume;
+        resource.issue = doc.issue;
+        resource.pages = doc.pages;
+        resource.total_pages = doc.total_pages;
+        resource.article_number = doc.article_number;
+        resource.edition = doc.edition;
+        resource.doi = doc.doi;
+        resource.url = doc.url;
+        resource.eprint = doc.eprint;
+        resource.isbns = doc.isbns;
+        resource.issns = doc.issns;
+        resource.isrns = doc.isrns;
+        resource.original_date = doc.original_date;
+        resource.event_date = doc.event_date;
+        resource.language = doc.language;
+        resource.document_type = doc.document_type;
+        resource.publication_method = doc.publication_method;
+        resource.institution = doc.institution;
+        resource.organization = doc.organization;
+        resource.school = doc.school;
+        resource.abstract_text = doc.abstract_text;
+        resource.keywords = doc.keywords;
+        Ok(resource)
     }
 
     async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError> {
@@ -1628,17 +1733,8 @@ mod tests {
     async fn imported_metadata_round_trips_and_legacy_rows_default() {
         let store = SurrealStore::open_memory().await.unwrap();
         let mut metadata = ResourceMetadata {
-            doi: Some("10.1000/example".into()),
-            isbn: Some("9781234567890".into()),
-            url: Some("https://example.org".into()),
             citekey: Some("smith2024".into()),
             venue: Some("Journal".into()),
-            volume: Some("12".into()),
-            issue: Some("3".into()),
-            pages: Some("1--20".into()),
-            abstract_text: Some("An abstract".into()),
-            keywords: vec!["history".into()],
-            language: Some("english".into()),
             ..Default::default()
         };
         metadata
@@ -1656,6 +1752,32 @@ mod tests {
             series_number: None,
             tag_ids: vec![],
             collection_ids: vec![],
+            subtitle: None,
+            title_addon: None,
+            short_title: None,
+            place: None,
+            volume: None,
+            issue: None,
+            pages: None,
+            total_pages: None,
+            article_number: None,
+            edition: None,
+            doi: None,
+            url: None,
+            eprint: None,
+            isbns: vec![],
+            issns: vec![],
+            isrns: vec![],
+            original_date: None,
+            event_date: None,
+            language: None,
+            document_type: None,
+            publication_method: None,
+            institution: None,
+            organization: None,
+            school: None,
+            abstract_text: None,
+            keywords: vec![],
             metadata: metadata.clone(),
         };
         let created = store.create_resource(new).await.unwrap();
@@ -1715,6 +1837,32 @@ mod tests {
                     tag_ids: vec![],
                     collection_ids: vec![],
                     metadata: Default::default(),
+                    subtitle: None,
+                    title_addon: None,
+                    short_title: None,
+                    place: None,
+                    volume: None,
+                    issue: None,
+                    pages: None,
+                    total_pages: None,
+                    article_number: None,
+                    edition: None,
+                    doi: None,
+                    url: None,
+                    eprint: None,
+                    isbns: vec![],
+                    issns: vec![],
+                    isrns: vec![],
+                    original_date: None,
+                    event_date: None,
+                    language: None,
+                    document_type: None,
+                    publication_method: None,
+                    institution: None,
+                    organization: None,
+                    school: None,
+                    abstract_text: None,
+                    keywords: vec![],
                 })
                 .await
                 .unwrap();
@@ -1814,6 +1962,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap()
@@ -1859,6 +2033,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -1880,6 +2080,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -1929,6 +2155,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -2019,6 +2271,32 @@ mod tests {
                     tag_ids: vec![],
                     collection_ids: vec![],
                     metadata: Default::default(),
+                    subtitle: None,
+                    title_addon: None,
+                    short_title: None,
+                    place: None,
+                    volume: None,
+                    issue: None,
+                    pages: None,
+                    total_pages: None,
+                    article_number: None,
+                    edition: None,
+                    doi: None,
+                    url: None,
+                    eprint: None,
+                    isbns: vec![],
+                    issns: vec![],
+                    isrns: vec![],
+                    original_date: None,
+                    event_date: None,
+                    language: None,
+                    document_type: None,
+                    publication_method: None,
+                    institution: None,
+                    organization: None,
+                    school: None,
+                    abstract_text: None,
+                    keywords: vec![],
                 })
                 .await
                 .unwrap();
@@ -2063,6 +2341,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -2154,6 +2458,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap()
@@ -2174,6 +2504,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap()
@@ -2461,6 +2817,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap()
@@ -3425,6 +3807,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3493,6 +3901,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3573,6 +4007,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3651,6 +4111,14 @@ mod tests {
             .unwrap();
 
         let loaded = store.get_resource(id).await.unwrap();
+        assert!(loaded.subtitle.is_none());
+        assert!(loaded.doi.is_none());
+        assert!(loaded.original_date.is_none());
+        assert!(loaded.abstract_text.is_none());
+        assert!(loaded.isbns.is_empty());
+        assert!(loaded.issns.is_empty());
+        assert!(loaded.isrns.is_empty());
+        assert!(loaded.keywords.is_empty());
         // The id's ULID already encodes when the row was written, so the
         // backfill reads exactly that; a record that never changed reads
         // as edited the day it was added.
@@ -3705,6 +4173,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3840,6 +4334,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3891,6 +4411,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3926,6 +4472,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3954,6 +4526,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -4023,6 +4621,32 @@ mod tests {
                 tag_ids: vec![tag.id],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -4040,6 +4664,32 @@ mod tests {
                 tag_ids: vec![],
                 collection_ids: vec![],
                 metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();

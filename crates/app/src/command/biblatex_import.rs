@@ -138,23 +138,7 @@ fn map_book(entry: &Entry) -> Result<(NewResource, Vec<Name>), CommandError> {
         .transpose()?;
     let mut metadata = ResourceMetadata {
         citekey: Some(entry.key.clone()),
-        doi: value(entry, "doi"),
-        isbn: value(entry, "isbn"),
-        url: value(entry, "url"),
         venue: value(entry, "booktitle").or_else(|| value(entry, "journaltitle")),
-        volume: value(entry, "volume"),
-        issue: value(entry, "number").or_else(|| value(entry, "issue")),
-        pages: value(entry, "pages"),
-        abstract_text: value(entry, "abstract"),
-        keywords: value(entry, "keywords")
-            .map(|s| {
-                s.split(',')
-                    .map(|w| w.trim().to_owned())
-                    .filter(|w| !w.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default(),
-        language: value(entry, "langid").or_else(|| value(entry, "language")),
         ..Default::default()
     };
     for key in entry.fields.keys() {
@@ -175,6 +159,40 @@ fn map_book(entry: &Entry) -> Result<(NewResource, Vec<Name>), CommandError> {
             series_number: None,
             tag_ids: vec![],
             collection_ids: vec![],
+            subtitle: None,
+            title_addon: None,
+            short_title: None,
+            place: None,
+            volume: value(entry, "volume"),
+            issue: value(entry, "number").or_else(|| value(entry, "issue")),
+            pages: value(entry, "pages"),
+            total_pages: None,
+            article_number: None,
+            edition: None,
+            doi: value(entry, "doi"),
+            url: value(entry, "url"),
+            eprint: None,
+            isbns: value(entry, "isbn").into_iter().collect(),
+            issns: vec![],
+            isrns: vec![],
+            original_date: None,
+            event_date: None,
+            language: value(entry, "langid").or_else(|| value(entry, "language")),
+            document_type: None,
+            publication_method: None,
+            institution: None,
+            organization: None,
+            school: None,
+            abstract_text: value(entry, "abstract"),
+            keywords: value(entry, "keywords")
+                .map(|s| {
+                    s.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
             metadata,
         },
         authors,

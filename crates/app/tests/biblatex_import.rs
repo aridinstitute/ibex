@@ -47,7 +47,7 @@ async fn imports_a_book_through_the_application_command() {
     assert_eq!(book.publisher.as_deref(), Some("Scientific Memoirs"));
     assert_eq!(book.creators.len(), 1);
     assert_eq!(book.metadata.citekey.as_deref(), Some("lovelace1843"));
-    assert_eq!(book.metadata.doi.as_deref(), Some("10.1000/notes"));
+    assert_eq!(book.doi.as_deref(), Some("10.1000/notes"));
     assert_eq!(
         book.metadata
             .source_fields
