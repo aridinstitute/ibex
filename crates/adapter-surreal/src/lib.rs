@@ -192,6 +192,8 @@ struct CreatedEdgeRow {
 
 #[derive(Debug, SurrealValue)]
 struct ListResourceRow {
+    #[surreal(default)]
+    venue: Option<String>,
     id: RecordId,
     #[surreal(wrap)]
     kind: ResourceKind,
@@ -792,7 +794,10 @@ impl SurrealStore {
                     let parent_id = Self::thing_to_resource_id(thing)?;
                     title_by_id.get(&parent_id).cloned()
                 }
-                None => None,
+                None => row
+                    .venue
+                    .as_ref()
+                    .and_then(|v| NonEmptyStr::try_new(v).ok()),
             };
             let (date_added, date_edited) =
                 Self::recorded_dates(row.date_added, row.date_edited, id);
@@ -1447,7 +1452,7 @@ impl Store for SurrealStore {
             Some(before) => self
                 .db
                 .query(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited FROM resource \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited FROM resource \
                      WHERE id < $before ORDER BY id DESC LIMIT $limit",
                 )
                 .bind(("before", Self::resource_key(before)))
@@ -1456,7 +1461,7 @@ impl Store for SurrealStore {
             None => self
                 .db
                 .query(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited FROM resource \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited FROM resource \
                      ORDER BY id DESC LIMIT $limit",
                 )
                 .bind(("limit", fetch_limit))
@@ -1516,20 +1521,20 @@ impl Store for SurrealStore {
         let sql = match query.sort {
             // The default listing order, paged by offset instead of cursor.
             None => format!(
-                "SELECT id, kind, title, publisher, published, parent, date_added, date_edited FROM {from_sql}{where_sql} \
+                "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited FROM {from_sql}{where_sql} \
                  ORDER BY id DESC LIMIT $limit START $offset"
             ),
             Some((ResourceSort::Title, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited FROM {from_sql}{where_sql} \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited FROM {from_sql}{where_sql} \
                      ORDER BY title COLLATE {dir}, id DESC LIMIT $limit START $offset"
                 )
             }
             Some((ResourceSort::Published, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
                             published.instant AS sort_key, \
                             (IF published THEN false ELSE true END) AS sort_missing \
                      FROM {from_sql}{where_sql} \
@@ -1543,7 +1548,7 @@ impl Store for SurrealStore {
             Some((ResourceSort::Publisher, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
                             (IF publisher THEN false ELSE true END) AS sort_missing \
                      FROM {from_sql}{where_sql} \
                      ORDER BY sort_missing {dir}, publisher COLLATE {dir}, id DESC \
@@ -1557,7 +1562,7 @@ impl Store for SurrealStore {
             Some((ResourceSort::DateAdded, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
                             (IF date_added THEN false ELSE true END) AS sort_missing \
                      FROM {from_sql}{where_sql} \
                      ORDER BY sort_missing {dir}, date_added {dir}, id DESC \
@@ -1567,7 +1572,7 @@ impl Store for SurrealStore {
             Some((ResourceSort::DateEdited, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
                             (IF date_edited THEN false ELSE true END) AS sort_missing \
                      FROM {from_sql}{where_sql} \
                      ORDER BY sort_missing {dir}, date_edited {dir}, id DESC \
@@ -1578,7 +1583,7 @@ impl Store for SurrealStore {
             Some((ResourceSort::PrimaryCreator, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
                             primary_creator_last_name, \
                             (IF primary_creator_last_name THEN false ELSE true END) AS sort_missing \
                      FROM {from_sql}{where_sql} \
