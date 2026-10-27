@@ -70,6 +70,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
             series_number: None,
             tag_ids: vec![],
             collection_ids: vec![],
+            metadata: Default::default(),
         })
         .await?
         .id;
@@ -124,6 +125,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                     series_number: None,
                     tag_ids: vec![],
                     collection_ids: vec![],
+                    metadata: Default::default(),
                 }
             }
             1 => NewResource {
@@ -138,6 +140,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
             2 => NewResource {
                 kind: ResourceKind::BookSection,
@@ -151,6 +154,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
             3 => NewResource {
                 kind: ResourceKind::Preprint,
@@ -164,6 +168,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
             4 => NewResource {
                 kind: ResourceKind::PodcastEpisode,
@@ -181,6 +186,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
             5 => NewResource {
                 kind: ResourceKind::Report,
@@ -194,6 +200,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
             6 => NewResource {
                 kind: ResourceKind::Dataset,
@@ -207,6 +214,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
             _ => NewResource {
                 kind: ResourceKind::Webpage,
@@ -220,6 +228,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         };
         // Keep some rows unassigned to exercise empty membership and tag filters.
@@ -248,6 +257,7 @@ fn container(kind: ResourceKind, title: &str) -> NewResource {
         series_number: None,
         tag_ids: vec![],
         collection_ids: vec![],
+        metadata: Default::default(),
     }
 }
 

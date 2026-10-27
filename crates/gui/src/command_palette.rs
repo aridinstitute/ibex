@@ -588,6 +588,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![tags[0].id],
                 collection_ids: vec![collections[0].id],
+                metadata: Default::default(),
             },
         )
         .unwrap();

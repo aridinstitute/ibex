@@ -5,10 +5,10 @@ use std::time::Duration;
 use oeuvre_core::{
     BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole, Name,
     NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceCounts,
-    ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort,
-    ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store, StoreError,
-    StoreHealth, Tag, TagId, UtcMillis, build_collection_forest, collection_descendant_closure,
-    creator_label_name, format_creators_label, published_label_from,
+    ResourceFilter, ResourceId, ResourceKind, ResourceMetadata, ResourcePage, ResourceQuery,
+    ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store,
+    StoreError, StoreHealth, Tag, TagId, UtcMillis, build_collection_forest,
+    collection_descendant_closure, creator_label_name, format_creators_label, published_label_from,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -104,6 +104,9 @@ struct ResourceDoc {
     published: Option<BibliographicDate>,
     #[surreal(wrap)]
     accessed: Option<BibliographicDate>,
+    /// Older resources lack import metadata.
+    #[surreal(wrap, default)]
+    metadata: Option<ResourceMetadata>,
     #[surreal(default)]
     parent: Option<RecordId>,
     #[surreal(default)]
@@ -517,6 +520,7 @@ impl SurrealStore {
             publisher: resource.publisher.clone(),
             published: resource.published.clone(),
             accessed: resource.accessed.clone(),
+            metadata: Some(resource.metadata.clone()),
             parent: resource.parent_id.map(Self::resource_key),
             series: resource.series_id.map(Self::series_key),
             series_number: resource
@@ -1273,6 +1277,7 @@ impl Store for SurrealStore {
             series_number,
             tag_ids,
             collection_ids,
+            doc.metadata.unwrap_or_default(),
             doc.favorite.unwrap_or(false),
             date_added,
             date_edited,
@@ -1620,6 +1625,67 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn imported_metadata_round_trips_and_legacy_rows_default() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let mut metadata = ResourceMetadata {
+            doi: Some("10.1000/example".into()),
+            isbn: Some("9781234567890".into()),
+            url: Some("https://example.org".into()),
+            citekey: Some("smith2024".into()),
+            venue: Some("Journal".into()),
+            volume: Some("12".into()),
+            issue: Some("3".into()),
+            pages: Some("1--20".into()),
+            abstract_text: Some("An abstract".into()),
+            keywords: vec!["history".into()],
+            language: Some("english".into()),
+            ..Default::default()
+        };
+        metadata
+            .source_fields
+            .insert("custom".into(), "{Original}".into());
+        let new = NewResource {
+            kind: ResourceKind::Book,
+            title: NonEmptyStr::try_new("Imported").unwrap(),
+            creators: vec![],
+            publisher: None,
+            published: None,
+            accessed: None,
+            parent_id: None,
+            series_id: None,
+            series_number: None,
+            tag_ids: vec![],
+            collection_ids: vec![],
+            metadata: metadata.clone(),
+        };
+        let created = store.create_resource(new).await.unwrap();
+        let fetched = store.get_resource(created.id).await.unwrap();
+        assert_eq!(fetched.metadata, metadata);
+        let updated = store
+            .update_resource(created.id, fetched.to_new())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_resource(updated.id).await.unwrap().metadata,
+            metadata
+        );
+
+        let legacy = ResourceId::generate();
+        store
+            .db
+            .query("CREATE type::record('resource', $id) SET kind = $kind, title = $title")
+            .bind(("id", legacy.to_string()))
+            .bind(("kind", "book"))
+            .bind(("title", "Before metadata"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_resource(legacy).await.unwrap().metadata,
+            ResourceMetadata::default()
+        );
+    }
+
+    #[tokio::test]
 
     async fn search_matches_title_or_publisher_before_paging() {
         let store = SurrealStore::open_memory().await.unwrap();
@@ -1648,6 +1714,7 @@ mod tests {
                     series_number: None,
                     tag_ids: vec![],
                     collection_ids: vec![],
+                    metadata: Default::default(),
                 })
                 .await
                 .unwrap();
@@ -1746,6 +1813,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap()
@@ -1790,6 +1858,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -1810,6 +1879,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -1858,6 +1928,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -1947,6 +2018,7 @@ mod tests {
                     series_number: None,
                     tag_ids: vec![],
                     collection_ids: vec![],
+                    metadata: Default::default(),
                 })
                 .await
                 .unwrap();
@@ -1990,6 +2062,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -2080,6 +2153,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap()
@@ -2099,6 +2173,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap()
@@ -2385,6 +2460,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap()
@@ -3348,6 +3424,7 @@ mod tests {
                 series_number: Some(NonEmptyStr::try_new("LCL 26").unwrap()),
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -3415,6 +3492,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -3494,6 +3572,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -3625,6 +3704,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -3759,6 +3839,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -3809,6 +3890,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -3843,6 +3925,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -3870,6 +3953,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -3938,6 +4022,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![tag.id],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -3954,6 +4039,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();

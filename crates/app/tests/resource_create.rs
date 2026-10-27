@@ -1,6 +1,8 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{CreatePerson, CreateResource, CreateSeries, GetResource, ListResources};
+use oeuvre_app::command::{
+    CreatePerson, CreateResource, CreateSeries, GetResource, ListResources, UpdateResource,
+};
 use oeuvre_app::testing::{MemorySink, MemoryStore};
 use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
 use oeuvre_core::{
@@ -42,7 +44,73 @@ fn book_new(author_id: PersonId, title: &str) -> NewResource {
         series_number: None,
         tag_ids: vec![],
         collection_ids: vec![],
+        metadata: Default::default(),
     }
+}
+
+#[tokio::test]
+async fn imported_metadata_round_trips_through_commands() {
+    use oeuvre_core::ResourceMetadata;
+    use std::collections::BTreeMap;
+
+    let state = AppState::builder(MemoryStore::new())
+        .surface(Surface::Test)
+        .sink(MemorySink::new())
+        .build();
+    let author_id = seed_author(&state).await;
+    let mut new = book_new(author_id, "An Imported Book");
+    let metadata = ResourceMetadata {
+        doi: Some("10.1000/example".into()),
+        isbn: Some("9781234567890".into()),
+        url: Some("https://example.org/book".into()),
+        citekey: Some("smith2024".into()),
+        venue: Some("Collected Works".into()),
+        volume: Some("12".into()),
+        issue: Some("3".into()),
+        pages: Some("1--20".into()),
+        abstract_text: Some("An abstract".into()),
+        keywords: vec!["research".into(), "history".into()],
+        language: Some("english".into()),
+        source_fields: BTreeMap::from([("customfield".into(), "{Unchanged}".into())]),
+    };
+    new.metadata = metadata.clone();
+    let Outcome::CreateResource(created) = state
+        .execute(Command::CreateResource(CreateResource { new }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected CreateResource");
+    };
+    let Outcome::GetResource(fetched) = state
+        .execute(Command::GetResource(GetResource { id: created.id }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected GetResource");
+    };
+    assert_eq!(fetched.metadata, metadata);
+    assert_eq!(fetched.to_new().metadata, metadata);
+    let mut edited = fetched.to_new();
+    edited.title = NonEmptyStr::try_new("Retitled").unwrap();
+    let Outcome::UpdateResource(updated) = state
+        .execute(Command::UpdateResource(UpdateResource {
+            id: created.id,
+            new: edited,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected UpdateResource");
+    };
+    assert_eq!(updated.metadata, metadata);
+    let Outcome::GetResource(reloaded) = state
+        .execute(Command::GetResource(GetResource { id: created.id }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected GetResource");
+    };
+    assert_eq!(reloaded.metadata, metadata);
 }
 
 #[tokio::test]
@@ -105,6 +173,7 @@ async fn get_resource_after_create_round_trip() {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await
@@ -175,6 +244,7 @@ async fn create_resource_empty_creators_is_allowed() {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await
@@ -209,6 +279,7 @@ async fn create_podcast_episode_with_podcast_parent() {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await
@@ -235,6 +306,7 @@ async fn create_podcast_episode_with_podcast_parent() {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await
@@ -291,6 +363,7 @@ async fn create_podcast_episode_without_parent_is_invalid() {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await
@@ -327,6 +400,7 @@ async fn create_episode_missing_parent_is_not_found() {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await
@@ -358,6 +432,7 @@ async fn create_episode_wrong_parent_kind_is_invalid() {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await
@@ -384,6 +459,7 @@ async fn create_episode_wrong_parent_kind_is_invalid() {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await
@@ -419,6 +495,7 @@ async fn create_resource_series_number_without_series_is_invalid() {
                 series_number: Some(NonEmptyStr::try_new("LCL 26").unwrap()),
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await
@@ -466,6 +543,7 @@ async fn create_resource_with_series() {
                 series_number: Some(NonEmptyStr::try_new("LCL 26").unwrap()),
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await
@@ -583,6 +661,7 @@ async fn list_resources_returns_summaries_ordered_newest_first() {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await
@@ -627,6 +706,7 @@ async fn list_resources_returns_summaries_ordered_newest_first() {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await
@@ -659,6 +739,7 @@ async fn list_resources_returns_summaries_ordered_newest_first() {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await

@@ -1095,6 +1095,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();

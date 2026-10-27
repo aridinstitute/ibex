@@ -48,6 +48,7 @@ fn container_new(kind: ResourceKind, title: &str) -> NewResource {
         series_number: None,
         tag_ids: vec![],
         collection_ids: vec![],
+        metadata: Default::default(),
     }
 }
 
@@ -121,6 +122,7 @@ async fn detail_resolves_names_roles_and_linked_titles() {
                 series_number: Some(non_empty("42")),
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await
@@ -218,6 +220,7 @@ async fn detail_emits_exactly_one_ok_event() {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await

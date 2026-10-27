@@ -214,6 +214,9 @@ fn changed_fields(old: &Resource, new: &NewResource) -> Vec<&'static str> {
     if old.collection_ids != new.collection_ids {
         changed.push("collections");
     }
+    if old.metadata != new.metadata {
+        changed.push("metadata");
+    }
     changed
 }
 

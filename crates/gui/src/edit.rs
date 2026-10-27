@@ -107,6 +107,7 @@ pub fn build_create(draft: &EditDraft) -> Result<NewResource, String> {
         series_number: None,
         tag_ids: vec![],
         collection_ids: vec![],
+        metadata: Default::default(),
     };
     apply_draft_fields(&mut new, draft)?;
     Ok(new)
@@ -269,6 +270,7 @@ mod tests {
                 series_number: Some(NonEmptyStr::try_new("LCL 26").expect("number")),
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         )
         .expect("record valid")

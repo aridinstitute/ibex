@@ -22,6 +22,7 @@ fn bare_book(title: &str) -> NewResource {
         series_number: None,
         tag_ids: vec![],
         collection_ids: vec![],
+        metadata: Default::default(),
     }
 }
 

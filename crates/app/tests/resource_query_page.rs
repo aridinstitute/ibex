@@ -41,6 +41,7 @@ async fn search_matches_title_or_publisher_before_paging() {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -234,6 +235,7 @@ fn resource(kind: ResourceKind, author: Option<PersonId>, title: &str) -> NewRes
         series_number: None,
         tag_ids: vec![],
         collection_ids: vec![],
+        metadata: Default::default(),
     }
 }
 
@@ -1029,6 +1031,7 @@ async fn create_book(state: &AppState, author_id: PersonId, title: &str) {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         }))
         .await

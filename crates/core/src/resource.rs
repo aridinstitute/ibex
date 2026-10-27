@@ -697,6 +697,25 @@ impl Creator {
     }
 }
 
+/// Import-specific bibliographic fields. Source values retain their original
+/// BibLaTeX spelling alongside the normalized, user-facing fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ResourceMetadata {
+    pub doi: Option<String>,
+    pub isbn: Option<String>,
+    pub url: Option<String>,
+    pub citekey: Option<String>,
+    pub venue: Option<String>,
+    pub volume: Option<String>,
+    pub issue: Option<String>,
+    pub pages: Option<String>,
+    pub abstract_text: Option<String>,
+    pub keywords: Vec<String>,
+    pub language: Option<String>,
+    pub source_fields: std::collections::BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewResource {
     pub kind: ResourceKind,
@@ -712,6 +731,7 @@ pub struct NewResource {
     pub tag_ids: Vec<TagId>,
     /// Collection record ids this resource belongs to; empty by default.
     pub collection_ids: Vec<CollectionId>,
+    pub metadata: ResourceMetadata,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -744,6 +764,7 @@ pub struct Resource {
     pub tag_ids: Vec<TagId>,
     /// Collection record ids this resource belongs to (not graph edges).
     pub collection_ids: Vec<CollectionId>,
+    pub metadata: ResourceMetadata,
     /// User-starred flag. Create starts false; only the favorite toggle
     /// changes it. Bibliographic updates preserve the existing value.
     pub favorite: bool,
@@ -818,6 +839,7 @@ impl Resource {
             series_number: new.series_number,
             tag_ids: new.tag_ids,
             collection_ids: new.collection_ids,
+            metadata: new.metadata,
             favorite: false,
             date_added: now,
             date_edited: now,
@@ -853,6 +875,7 @@ impl Resource {
         series_number: Option<NonEmptyStr>,
         tag_ids: Vec<TagId>,
         collection_ids: Vec<CollectionId>,
+        metadata: ResourceMetadata,
         favorite: bool,
         date_added: UtcMillis,
         date_edited: UtcMillis,
@@ -873,6 +896,7 @@ impl Resource {
             series_number,
             tag_ids,
             collection_ids,
+            metadata,
             favorite,
             date_added,
             date_edited,
@@ -897,6 +921,7 @@ impl Resource {
             series_number: self.series_number.clone(),
             tag_ids: self.tag_ids.clone(),
             collection_ids: self.collection_ids.clone(),
+            metadata: self.metadata.clone(),
         }
     }
 }
@@ -951,6 +976,7 @@ mod tests {
             series_number: None,
             tag_ids: vec![],
             collection_ids: vec![],
+            metadata: Default::default(),
         }
     }
 
@@ -1012,6 +1038,7 @@ mod tests {
             None,
             vec![],
             vec![],
+            ResourceMetadata::default(),
             false,
             added,
             edited,
@@ -1065,6 +1092,7 @@ mod tests {
                     series_number: None,
                     tag_ids: vec![],
                     collection_ids: vec![],
+                    metadata: Default::default(),
                 },
             )
             .unwrap();
@@ -1171,6 +1199,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         )
         .unwrap_err();
@@ -1193,6 +1222,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         )
         .unwrap();
@@ -1213,6 +1243,7 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         )
         .unwrap();
@@ -1235,6 +1266,7 @@ mod tests {
                 series_number: Some(title("LCL 26")),
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         )
         .unwrap_err();
@@ -1258,6 +1290,7 @@ mod tests {
                 series_number: Some(title("LCL 26")),
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
             },
         )
         .unwrap();
@@ -1334,6 +1367,7 @@ mod tests {
             None,
             vec![],
             vec![],
+            ResourceMetadata::default(),
             false,
             UtcMillis::from_unix_ms(0),
             UtcMillis::from_unix_ms(0),
@@ -1375,6 +1409,7 @@ mod tests {
             series_number: Some(title("3")),
             tag_ids: vec![],
             collection_ids: vec![],
+            metadata: Default::default(),
         };
         let stored = Resource::try_new(ResourceId::generate(), new.clone()).unwrap();
         assert_eq!(stored.to_new(), new);
