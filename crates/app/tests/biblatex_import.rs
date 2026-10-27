@@ -133,7 +133,6 @@ async fn imports_a_mixed_batch_and_reports_skips_without_losing_fields() {
         ("place", "London"),
         ("volume", "II"),
         ("issue", "3"),
-        ("pages", "10–20"),
         ("total_pages", "xii+250"),
         ("article_number", "e123"),
         ("edition", "Second"),
@@ -150,20 +149,60 @@ async fn imports_a_mixed_batch_and_reports_skips_without_losing_fields() {
     ] {
         assert_eq!(data[key], expected, "mapping {key}");
     }
-    assert_eq!(chapter.isbns, ["978-0-306-40615-7"]);
-    assert_eq!(chapter.issns, ["1234-5678"]);
-    assert_eq!(chapter.isrns, ["EXAMPLE-1"]);
+    assert_eq!(
+        chapter.pages.as_ref().map(|p| p.as_str()),
+        Some("10–20")
+    );
+    assert!(chapter.pages.as_ref().unwrap().is_structured());
+    assert_eq!(chapter.isbns[0].as_str(), "978-0-306-40615-7");
+    assert_eq!(
+        chapter.isbns[0].canonical.as_deref(),
+        Some("9780306406157")
+    );
+    assert_eq!(chapter.issns[0].as_str(), "1234-5678");
+    assert_eq!(chapter.isrns[0].as_str(), "EXAMPLE-1");
     assert_eq!(chapter.keywords, ["history", "research"]);
     assert_eq!(
         chapter.published.as_ref().unwrap().instant().as_unix_ms(),
         1_710_460_800_000
     );
+    assert_eq!(
+        chapter.published.as_ref().unwrap().precision(),
+        oeuvre_core::DatePrecision::Day
+    );
     assert!(chapter.original_date.is_some());
+    assert_eq!(
+        chapter.original_date.as_ref().unwrap().precision(),
+        oeuvre_core::DatePrecision::Year
+    );
     assert!(chapter.event_date.is_some());
     assert!(chapter.accessed.is_some());
+    assert!(
+        !chapter
+            .accessed
+            .as_ref()
+            .unwrap()
+            .claims_exact_time(),
+        "date-only urldate must not claim an exact time"
+    );
     assert!(chapter.tag_ids.is_empty());
     assert!(!chapter.metadata.source_fields.contains_key("note"));
     assert!(!chapter.metadata.source_fields.contains_key("annotation"));
+    assert_eq!(
+        chapter.metadata.provenance.note.as_deref(),
+        Some("Ignore note")
+    );
+    assert_eq!(
+        chapter.metadata.provenance.annotation.as_deref(),
+        Some("Ignore annotation")
+    );
+    assert!(
+        chapter
+            .metadata
+            .provenance
+            .original_fields
+            .contains_key("note")
+    );
     let events = sink.take();
     let imports: Vec<_> = events
         .iter()
@@ -279,8 +318,15 @@ async fn inherits_nearest_reference_date_and_does_not_abort_on_bad_entry_dates()
     let Outcome::ImportBiblatex(report) = state.execute(Command::ImportBiblatex(ImportBiblatex {
         source_text: "@book{grand,title={Grand},year={2020}} @book{parent,title={Parent},year={2021},crossref={grand}} @inbook{child,title={Child},crossref={parent}} @book{bad,title={Bad},year={bad}} @inbook{badchild,title={Bad child},crossref={bad}}".into(),
     })).await.unwrap() else { panic!("import"); };
-    assert_eq!(report.imported.len(), 3);
-    assert_eq!(report.skipped.len(), 2);
+    // Invalid optional dates warn and retain source values; entries still import.
+    assert_eq!(report.imported.len(), 5);
+    assert!(report.skipped.is_empty());
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.entry_key.as_deref() == Some("bad"))
+    );
     let id = report
         .imported
         .iter()

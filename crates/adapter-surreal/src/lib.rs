@@ -4,17 +4,17 @@ use std::time::Duration;
 
 use oeuvre_core::{
     BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole,
-    ImportedResourceWrite, Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource,
-    ResourceCounts, ResourceFilter, ResourceId, ResourceKind, ResourceMetadata, ResourcePage,
-    ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
-    SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId, UtcMillis,
+    DateCertainty, DatePrecision, ImportedResourceWrite, Name, NewResource, NewSeries, NonEmptyStr,
+    Person, PersonId, Resource, ResourceCounts, ResourceFilter, ResourceId, ResourceKind,
+    ResourceMetadata, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId,
+    SortDirection, SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId, UtcMillis,
     build_collection_forest, collection_descendant_closure, creator_label_name,
     format_creators_label, published_label_from,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
 use surrealdb::opt::Config;
-use surrealdb::types::{RecordId, RecordIdKey, SerdeWrapper, SurrealValue, ToSql};
+use surrealdb::types::{Datetime, RecordId, RecordIdKey, SerdeWrapper, SurrealValue, ToSql};
 
 const NS: &str = "oeuvre";
 const DB: &str = "oeuvre";
@@ -108,8 +108,8 @@ struct ResourceDoc {
     volume: Option<String>,
     #[surreal(default)]
     issue: Option<String>,
-    #[surreal(default)]
-    pages: Option<String>,
+    #[surreal(default, wrap)]
+    pages: Option<oeuvre_core::Pages>,
     #[surreal(default)]
     total_pages: Option<String>,
     #[surreal(default)]
@@ -122,12 +122,12 @@ struct ResourceDoc {
     url: Option<String>,
     #[surreal(default)]
     eprint: Option<String>,
-    #[surreal(default)]
-    isbns: Vec<String>,
-    #[surreal(default)]
-    issns: Vec<String>,
-    #[surreal(default)]
-    isrns: Vec<String>,
+    #[surreal(default, wrap)]
+    isbns: Vec<oeuvre_core::Identifier>,
+    #[surreal(default, wrap)]
+    issns: Vec<oeuvre_core::Identifier>,
+    #[surreal(default, wrap)]
+    isrns: Vec<oeuvre_core::Identifier>,
     #[surreal(default, wrap)]
     original_date: Option<BibliographicDate>,
     #[surreal(default, wrap)]
@@ -155,8 +155,9 @@ struct ResourceDoc {
     publisher: Option<String>,
     #[surreal(wrap)]
     published: Option<BibliographicDate>,
-    #[surreal(wrap)]
-    accessed: Option<BibliographicDate>,
+    /// Access date uses a native Surreal datetime (`at`), not an ISO string.
+    #[surreal(default)]
+    accessed: Option<AccessedDoc>,
     /// Older resources lack import metadata.
     #[surreal(wrap, default)]
     metadata: Option<ResourceMetadata>,
@@ -179,6 +180,68 @@ struct ResourceDoc {
     date_added: Option<i64>,
     #[surreal(default)]
     date_edited: Option<i64>,
+}
+
+/// Persisted access date: native datetime plus precision metadata.
+#[derive(Debug, Clone, SurrealValue)]
+struct AccessedDoc {
+    at: Datetime,
+    #[surreal(default)]
+    end: Option<Datetime>,
+    #[surreal(default, wrap)]
+    precision: DatePrecision,
+    #[surreal(default, wrap)]
+    certainty: DateCertainty,
+    #[surreal(default)]
+    display: Option<String>,
+}
+
+impl AccessedDoc {
+    fn from_bibliographic(date: &BibliographicDate) -> Option<Self> {
+        Some(Self {
+            at: millis_to_datetime(date.instant())?,
+            end: date.end().and_then(millis_to_datetime),
+            precision: date.precision(),
+            certainty: date.certainty(),
+            display: date.display().map(str::to_owned),
+        })
+    }
+
+    fn into_bibliographic(self) -> Result<BibliographicDate, StoreError> {
+        let instant = datetime_to_millis(&self.at);
+        let end = self.end.as_ref().map(datetime_to_millis);
+        let display = self
+            .display
+            .as_deref()
+            .map(NonEmptyStr::try_new)
+            .transpose()
+            .map_err(|e| StoreError::invalid(e.to_string()))?;
+        BibliographicDate::try_new_precise(
+            instant,
+            end,
+            self.precision,
+            self.certainty,
+            display,
+        )
+        .map_err(|e| StoreError::invalid(e.to_string()))
+    }
+}
+
+fn millis_to_datetime(ms: UtcMillis) -> Option<Datetime> {
+    let ms = ms.as_unix_ms();
+    let secs = ms.div_euclid(1_000);
+    let nanos = u32::try_from(ms.rem_euclid(1_000).saturating_mul(1_000_000)).ok()?;
+    Datetime::from_timestamp(secs, nanos)
+}
+
+fn datetime_to_millis(dt: &Datetime) -> UtcMillis {
+    let inner = dt.clone().into_inner();
+    UtcMillis::from_unix_ms(
+        inner
+            .timestamp()
+            .saturating_mul(1_000)
+            .saturating_add(i64::from(inner.timestamp_subsec_millis())),
+    )
 }
 
 #[derive(Debug, SurrealValue)]
@@ -403,7 +466,95 @@ impl SurrealStore {
             .map_err(map_err)?
             .check()
             .map_err(map_err)?;
+        self.migrate_accessed_native_datetime().await?;
+        self.migrate_name_keys_v2().await?;
 
+        Ok(())
+    }
+
+    /// Rewrite legacy `accessed: { instant: number, ... }` into native datetimes.
+    /// Idempotent via `oeuvre_migration:accessed_native_datetime`.
+    async fn migrate_accessed_native_datetime(&self) -> Result<(), StoreError> {
+        let mut exists = self
+            .db
+            .query("RETURN record::exists(oeuvre_migration:accessed_native_datetime)")
+            .await
+            .map_err(map_err)?;
+        let done: Option<bool> = exists.take(0).map_err(map_err)?;
+        if done == Some(true) {
+            return Ok(());
+        }
+
+        #[derive(Debug, SurrealValue)]
+        struct LegacyAccessedRow {
+            id: RecordId,
+            #[surreal(wrap)]
+            accessed: Option<BibliographicDate>,
+        }
+        let mut response = self
+            .db
+            .query(
+                "SELECT id, accessed FROM resource \
+                 WHERE accessed != NONE AND type::is_number(accessed.instant)",
+            )
+            .await
+            .map_err(map_err)?;
+        let rows: Vec<LegacyAccessedRow> = response.take(0).unwrap_or_default();
+        for row in rows {
+            let Some(date) = row.accessed else {
+                continue;
+            };
+            let Some(doc) = AccessedDoc::from_bibliographic(&date) else {
+                continue;
+            };
+            self.db
+                .query("UPDATE $id SET accessed = $accessed")
+                .bind(("id", row.id))
+                .bind(("accessed", doc))
+                .await
+                .map_err(map_err)?
+                .check()
+                .map_err(map_err)?;
+        }
+        self.db
+            .query("CREATE oeuvre_migration:accessed_native_datetime")
+            .await
+            .map_err(map_err)?
+            .check()
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    /// Recompute person `name_keys` after Unicode fold + particle key format.
+    /// Does not invent particles for legacy names that folded them into `last`.
+    async fn migrate_name_keys_v2(&self) -> Result<(), StoreError> {
+        let mut exists = self
+            .db
+            .query("RETURN record::exists(oeuvre_migration:name_keys_v2)")
+            .await
+            .map_err(map_err)?;
+        let done: Option<bool> = exists.take(0).map_err(map_err)?;
+        if done == Some(true) {
+            return Ok(());
+        }
+        let people = self.list_persons().await?;
+        for person in people {
+            let keys: Vec<String> = person.name_keys().map(|k| k.as_str().to_owned()).collect();
+            self.db
+                .query("UPDATE $id SET name_keys = $keys")
+                .bind(("id", Self::person_key(person.id)))
+                .bind(("keys", keys))
+                .await
+                .map_err(map_err)?
+                .check()
+                .map_err(map_err)?;
+        }
+        self.db
+            .query("CREATE oeuvre_migration:name_keys_v2")
+            .await
+            .map_err(map_err)?
+            .check()
+            .map_err(map_err)?;
         Ok(())
     }
 
@@ -690,7 +841,10 @@ impl SurrealStore {
             title: resource.title.clone(),
             publisher: resource.publisher.clone(),
             published: resource.published.clone(),
-            accessed: resource.accessed.clone(),
+            accessed: resource
+                .accessed
+                .as_ref()
+                .and_then(AccessedDoc::from_bibliographic),
             metadata: Some(resource.metadata.clone()),
             parent: resource.parent_id.map(Self::resource_key),
             series: resource.series_id.map(Self::series_key),
@@ -1535,7 +1689,7 @@ impl Store for SurrealStore {
             creators,
             doc.publisher,
             doc.published,
-            doc.accessed,
+            doc.accessed.map(|a| a.into_bibliographic()).transpose()?,
             parent_id,
             series_id,
             series_number,
@@ -1911,8 +2065,9 @@ fn filter_where(filter: &ResourceFilter) -> String {
 mod tests {
     use super::*;
     use oeuvre_core::{
-        BibliographicDate, CreatorRole, CreatorSpec, NewResource, NewSeries, ResourceFilter,
-        ResourceKind, ResourceQuery, ResourceSort, SortDirection, Store, UtcMillis,
+        BibliographicDate, CreatorRole, CreatorSpec, DateCertainty, DatePrecision, NewResource,
+        NewSeries, ResourceFilter, ResourceId, ResourceKind, ResourceQuery, ResourceSort,
+        SortDirection, Store, UtcMillis,
     };
 
     #[tokio::test]
@@ -4902,5 +5057,120 @@ mod tests {
 
         let counts = store.resource_counts().await.unwrap();
         assert_eq!(counts.by_tag.get(&tag.id).copied(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn accessed_is_stored_as_native_datetime_not_iso_string() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let accessed = BibliographicDate::try_new_precise(
+            UtcMillis::jan_1_utc(2025).unwrap(),
+            None,
+            DatePrecision::Day,
+            DateCertainty::Exact,
+            Some(NonEmptyStr::try_new("2025-01-01").unwrap()),
+        )
+        .unwrap();
+        let resource = store
+            .create_resource(NewResource {
+                kind: ResourceKind::Webpage,
+                title: NonEmptyStr::try_new("Accessed native").unwrap(),
+                creators: vec![],
+                publisher: None,
+                published: None,
+                accessed: Some(accessed),
+                parent_id: None,
+                series_id: None,
+                series_number: None,
+                tag_ids: vec![],
+                collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: Some("https://example.org".into()),
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
+            })
+            .await
+            .unwrap();
+
+        let mut response = store
+            .db
+            .query("SELECT VALUE type::is_datetime(accessed.at) FROM ONLY $id")
+            .bind(("id", SurrealStore::resource_key(resource.id)))
+            .await
+            .unwrap();
+        let is_dt: Option<bool> = response.take(0).unwrap();
+        assert_eq!(is_dt, Some(true), "accessed.at must be a native datetime");
+
+        let mut response = store
+            .db
+            .query("SELECT VALUE type::is_string(accessed.at) FROM ONLY $id")
+            .bind(("id", SurrealStore::resource_key(resource.id)))
+            .await
+            .unwrap();
+        let is_str: Option<bool> = response.take(0).unwrap();
+        assert_eq!(is_str, Some(false), "accessed.at must not be a string");
+        assert!(!resource.accessed.as_ref().unwrap().claims_exact_time());
+    }
+
+    #[tokio::test]
+    async fn accessed_datetime_migration_upgrades_legacy_instant_and_is_idempotent() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let id = ResourceId::generate();
+        // Simulate a legacy row: accessed stored as {instant, display} millis object.
+        store
+            .db
+            .query(
+                "CREATE $id SET \
+                 kind = 'webpage', title = 'Legacy access', \
+                 accessed = { instant: 1735689600000, display: '2025-01-01' }, \
+                 favorite = false, date_added = 0, date_edited = 0",
+            )
+            .bind(("id", SurrealStore::resource_key(id)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        store
+            .db
+            .query("DELETE oeuvre_migration:accessed_native_datetime")
+            .await
+            .ok();
+        store.migrate_accessed_native_datetime().await.unwrap();
+        store.migrate_accessed_native_datetime().await.unwrap(); // idempotent
+
+        let mut response = store
+            .db
+            .query("SELECT VALUE type::is_datetime(accessed.at) FROM ONLY $id")
+            .bind(("id", SurrealStore::resource_key(id)))
+            .await
+            .unwrap();
+        let is_dt: Option<bool> = response.take(0).unwrap();
+        assert_eq!(is_dt, Some(true));
+
+        let loaded = store.get_resource(id).await.unwrap();
+        assert!(loaded.accessed.is_some());
+        assert!(!loaded.accessed.as_ref().unwrap().claims_exact_time());
     }
 }

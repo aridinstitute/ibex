@@ -84,7 +84,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
             doi: None,
             url: None,
             eprint: None,
-            isbns: vec!["978-0-306-40615-7".into()],
+            isbns: vec![oeuvre_core::Identifier::from("978-0-306-40615-7")],
             issns: vec![],
             isrns: vec![],
             original_date: published(1960),
@@ -158,7 +158,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                     place: None,
                     volume: Some((1 + n / 8).to_string()),
                     issue: Some((1 + n % 4).to_string()),
-                    pages: Some("1–12".into()),
+                    pages: Some(oeuvre_core::Pages::parse("1–12").unwrap()),
                     total_pages: None,
                     article_number: Some(format!("e{n:04}")),
                     edition: None,
@@ -166,7 +166,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                     url: Some(format!("https://example.org/demo/articles/{n}")),
                     eprint: None,
                     isbns: vec![],
-                    issns: vec!["1234-5678".into()],
+                    issns: vec![oeuvre_core::Identifier::from("1234-5678")],
                     isrns: vec![],
                     original_date: None,
                     event_date: published(year),
@@ -208,7 +208,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 doi: None,
                 url: None,
                 eprint: None,
-                isbns: vec!["978-0-306-40615-7".into()],
+                isbns: vec![oeuvre_core::Identifier::from("978-0-306-40615-7")],
                 issns: vec![],
                 isrns: vec![],
                 original_date: published(1960),
@@ -241,7 +241,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 place: None,
                 volume: None,
                 issue: None,
-                pages: Some("25–42".into()),
+                pages: Some(oeuvre_core::Pages::parse("25–42").unwrap()),
                 total_pages: None,
                 article_number: None,
                 edition: None,
@@ -374,7 +374,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 eprint: None,
                 isbns: vec![],
                 issns: vec![],
-                isrns: vec![format!("DEMO-REPORT-{n:04}")],
+                isrns: vec![oeuvre_core::Identifier::from(format!("DEMO-REPORT-{n:04}"))],
                 original_date: None,
                 event_date: None,
                 language: None,
@@ -569,7 +569,10 @@ mod tests {
         assert_eq!(article.doi.as_deref(), Some("10.5555/demo.citations.0"));
         assert_eq!(article.volume.as_deref(), Some("1"));
         assert_eq!(article.issue.as_deref(), Some("1"));
-        assert_eq!(article.pages.as_deref(), Some("1–12"));
+        assert_eq!(
+            article.pages.as_ref().map(|p| p.as_str()),
+            Some("1–12")
+        );
         assert_eq!(article.keywords, ["citation networks", "bibliometrics"]);
         assert!(!article.tag_ids.is_empty());
         assert!(article.abstract_text.is_some());
@@ -578,7 +581,7 @@ mod tests {
             .find(|r| r.title.as_str() == "Provenance Studies 001")
             .unwrap();
         let book = store.get_resource(book.id).await.unwrap();
-        assert_eq!(book.isbns, ["978-0-306-40615-7"]);
+        assert_eq!(book.isbns[0].as_str(), "978-0-306-40615-7");
         assert_eq!(book.edition.as_deref(), Some("Second"));
         assert_eq!(book.place.as_deref(), Some("London"));
         assert!(book.original_date.is_some());
@@ -594,7 +597,7 @@ mod tests {
             .unwrap();
         let report = store.get_resource(report.id).await.unwrap();
         assert_eq!(report.document_type.as_deref(), Some("Technical report"));
-        assert_eq!(report.isrns, ["DEMO-REPORT-0005"]);
+        assert_eq!(report.isrns[0].as_str(), "DEMO-REPORT-0005");
         let webpage = rows
             .iter()
             .find(|r| r.kind == ResourceKind::Webpage)

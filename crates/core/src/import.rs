@@ -12,7 +12,7 @@ use crate::{
 };
 
 /// Parser/schema version stamped on drafts from this crate revision.
-pub const IMPORT_PARSER_VERSION: u32 = 1;
+pub const IMPORT_PARSER_VERSION: u32 = 2;
 
 /// Shared source-size ceiling applied at the import boundary (not only GUI).
 pub const IMPORT_MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
@@ -74,9 +74,18 @@ pub struct SourceProvenance {
 pub struct EntryProvenance {
     pub source_key: String,
     pub entry_type: Option<String>,
-    /// Original field map before or after format-specific expansion, as the
-    /// parser chooses to record it. Task 03 may split pre/post expansion.
+    /// Field map before reference expansion (includes note/annotation).
     pub original_fields: BTreeMap<String, String>,
+    /// Field map after reference expansion / mapping (excludes note/annotation).
+    #[serde(default)]
+    pub expanded_fields: BTreeMap<String, String>,
+    /// Field → ancestor source key for inherited values.
+    #[serde(default)]
+    pub inherited_origins: BTreeMap<String, String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub annotation: Option<String>,
 }
 
 /// Creator not yet matched to a stored person.

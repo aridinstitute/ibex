@@ -111,7 +111,10 @@ pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
         ("Place", detail.place.as_deref()),
         ("Volume", detail.volume.as_deref()),
         ("Issue", detail.issue.as_deref()),
-        ("Pages", detail.pages.as_deref()),
+        (
+            "Pages",
+            detail.pages.as_ref().map(|p| p.as_str()),
+        ),
         ("Total pages", detail.total_pages.as_deref()),
         ("Article number", detail.article_number.as_deref()),
         ("Edition", detail.edition.as_deref()),
@@ -131,13 +134,34 @@ pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
         }
     }
     for (label, values) in [
-        ("ISBN", &detail.isbns),
-        ("ISSN", &detail.issns),
-        ("ISRN", &detail.isrns),
-        ("Keywords", &detail.keywords),
+        (
+            "ISBN",
+            detail
+                .isbns
+                .iter()
+                .map(|id| id.as_str().to_owned())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "ISSN",
+            detail
+                .issns
+                .iter()
+                .map(|id| id.as_str().to_owned())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "ISRN",
+            detail
+                .isrns
+                .iter()
+                .map(|id| id.as_str().to_owned())
+                .collect::<Vec<_>>(),
+        ),
+        ("Keywords", detail.keywords.clone()),
     ] {
         if !values.is_empty() {
-            rows.push((label.into(), values.clone()));
+            rows.push((label.into(), values));
         }
     }
     for (label, date) in [
@@ -295,7 +319,7 @@ mod tests {
         let mut detail = journal_article();
         detail.doi = Some("10.1000/example".into());
         detail.url = Some("https://example.org".into());
-        detail.pages = Some("10–20".into());
+        detail.pages = Some(oeuvre_core::Pages::parse("10–20").unwrap());
         detail.isbns = vec!["978-0-306-40615-7".into()];
         detail.keywords = vec!["history".into(), "computing".into()];
         detail.abstract_text = Some("A summary".into());

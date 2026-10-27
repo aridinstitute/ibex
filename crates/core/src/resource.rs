@@ -1,6 +1,9 @@
 use std::fmt;
 
-use crate::{CollectionId, Name, NonEmptyStr, PersonId, SeriesId, Tag, TagId};
+use crate::{
+    CollectionId, Identifier, Name, NonEmptyStr, Pages, PersonId, SeriesId, Tag, TagId,
+    deserialize_identifiers, deserialize_pages_opt,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ResourceId(ulid::Ulid);
@@ -235,10 +238,43 @@ impl UtcMillis {
     }
 }
 
-/// Stored instant plus optional fuzzy display ("2020", "Summer 397").
+/// How much calendar/time detail a bibliographic date claims.
+///
+/// Missing on legacy rows deserializes as [`DatePrecision::Unspecified`] so
+/// migrations never invent year/month/day from an opaque stored instant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DatePrecision {
+    /// Legacy or unknown; do not infer finer precision from the instant alone.
+    #[default]
+    Unspecified,
+    Year,
+    Month,
+    Day,
+    /// Includes a clock time; only then may an access date claim an exact time.
+    DateTime,
+}
+
+/// Confidence attached to a bibliographic date (BibLaTeX `?` / `~`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DateCertainty {
+    #[default]
+    Exact,
+    Approximate,
+    Uncertain,
+}
+
+/// Stored instant plus precision, optional range end, and fuzzy display ("2020", "Summer 397").
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BibliographicDate {
     instant: UtcMillis,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    end: Option<UtcMillis>,
+    #[serde(default)]
+    precision: DatePrecision,
+    #[serde(default)]
+    certainty: DateCertainty,
     display: Option<NonEmptyStr>,
 }
 
@@ -247,15 +283,55 @@ impl BibliographicDate {
         instant: UtcMillis,
         display: Option<NonEmptyStr>,
     ) -> Result<Self, ResourceError> {
-        Ok(Self { instant, display })
+        Self::try_new_precise(
+            instant,
+            None,
+            DatePrecision::Unspecified,
+            DateCertainty::Exact,
+            display,
+        )
+    }
+
+    pub fn try_new_precise(
+        instant: UtcMillis,
+        end: Option<UtcMillis>,
+        precision: DatePrecision,
+        certainty: DateCertainty,
+        display: Option<NonEmptyStr>,
+    ) -> Result<Self, ResourceError> {
+        Ok(Self {
+            instant,
+            end,
+            precision,
+            certainty,
+            display,
+        })
     }
 
     pub fn instant(&self) -> UtcMillis {
         self.instant
     }
 
+    pub fn end(&self) -> Option<UtcMillis> {
+        self.end
+    }
+
+    pub fn precision(&self) -> DatePrecision {
+        self.precision
+    }
+
+    pub fn certainty(&self) -> DateCertainty {
+        self.certainty
+    }
+
     pub fn display(&self) -> Option<&str> {
         self.display.as_ref().map(NonEmptyStr::as_str)
+    }
+
+    /// Date-only access values must not present as an exact clock time.
+    pub fn claims_exact_time(&self) -> bool {
+        self.precision == DatePrecision::DateTime
+            && self.certainty == DateCertainty::Exact
     }
 }
 
@@ -529,16 +605,16 @@ pub struct ResourceDetail {
     pub place: Option<String>,
     pub volume: Option<String>,
     pub issue: Option<String>,
-    pub pages: Option<String>,
+    pub pages: Option<Pages>,
     pub total_pages: Option<String>,
     pub article_number: Option<String>,
     pub edition: Option<String>,
     pub doi: Option<String>,
     pub url: Option<String>,
     pub eprint: Option<String>,
-    pub isbns: Vec<String>,
-    pub issns: Vec<String>,
-    pub isrns: Vec<String>,
+    pub isbns: Vec<Identifier>,
+    pub issns: Vec<Identifier>,
+    pub isrns: Vec<Identifier>,
     pub original_date: Option<BibliographicDate>,
     pub event_date: Option<BibliographicDate>,
     pub language: Option<String>,
@@ -723,14 +799,34 @@ impl Creator {
     }
 }
 
+/// Provenance for an imported resource, independent of normalized fields.
+///
+/// `original_fields` are captured before reference expansion when the parser
+/// supplies them; migrations never invent missing provenance.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ResourceProvenance {
+    pub format: Option<String>,
+    pub parser_version: Option<u32>,
+    pub entry_type: Option<String>,
+    /// Pre-expansion source fields (includes note/annotation when present).
+    pub original_fields: std::collections::BTreeMap<String, String>,
+    /// Field → ancestor source key for values inherited via crossref/xdata.
+    pub inherited_origins: std::collections::BTreeMap<String, String>,
+    pub note: Option<String>,
+    pub annotation: Option<String>,
+}
+
 /// Import-specific bibliographic fields. Source values retain their original
-/// BibLaTeX spelling alongside the normalized, user-facing fields.
+/// spelling alongside the normalized, user-facing fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ResourceMetadata {
     pub citekey: Option<String>,
     pub venue: Option<String>,
+    /// Post-mapping field map for display/debug (may reflect expansion).
     pub source_fields: std::collections::BTreeMap<String, String>,
+    pub provenance: ResourceProvenance,
 }
 
 /// Resource replacement payload. Optional bibliographic scalars default to absent
@@ -759,7 +855,8 @@ pub struct NewResource {
     pub place: Option<String>,
     pub volume: Option<String>,
     pub issue: Option<String>,
-    pub pages: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_pages_opt")]
+    pub pages: Option<Pages>,
     /// Text preserves Roman preliminaries and other non-numeric extent values.
     pub total_pages: Option<String>,
     pub article_number: Option<String>,
@@ -768,12 +865,12 @@ pub struct NewResource {
     pub url: Option<String>,
     /// Repository identifier as supplied; no identifier normalization at this boundary.
     pub eprint: Option<String>,
-    #[serde(default)]
-    pub isbns: Vec<String>,
-    #[serde(default)]
-    pub issns: Vec<String>,
-    #[serde(default)]
-    pub isrns: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_identifiers")]
+    pub isbns: Vec<Identifier>,
+    #[serde(default, deserialize_with = "deserialize_identifiers")]
+    pub issns: Vec<Identifier>,
+    #[serde(default, deserialize_with = "deserialize_identifiers")]
+    pub isrns: Vec<Identifier>,
     pub original_date: Option<BibliographicDate>,
     pub event_date: Option<BibliographicDate>,
     pub language: Option<String>,
@@ -834,16 +931,16 @@ pub struct Resource {
     pub place: Option<String>,
     pub volume: Option<String>,
     pub issue: Option<String>,
-    pub pages: Option<String>,
+    pub pages: Option<Pages>,
     pub total_pages: Option<String>,
     pub article_number: Option<String>,
     pub edition: Option<String>,
     pub doi: Option<String>,
     pub url: Option<String>,
     pub eprint: Option<String>,
-    pub isbns: Vec<String>,
-    pub issns: Vec<String>,
-    pub isrns: Vec<String>,
+    pub isbns: Vec<Identifier>,
+    pub issns: Vec<Identifier>,
+    pub isrns: Vec<Identifier>,
     pub original_date: Option<BibliographicDate>,
     pub event_date: Option<BibliographicDate>,
     pub language: Option<String>,
@@ -1968,16 +2065,16 @@ mod biblatex_field_tests {
             place: Some("London".into()),
             volume: Some("2".into()),
             issue: Some("4".into()),
-            pages: Some("10-20".into()),
+            pages: Some(Pages::parse("10-20").unwrap()),
             total_pages: Some("250".into()),
             article_number: Some("e123".into()),
             edition: Some("Second".into()),
             doi: Some("10.1234/example".into()),
             url: Some("https://example.org".into()),
             eprint: Some("arXiv:1234.5678".into()),
-            isbns: vec!["978-1".into()],
-            issns: vec!["1234-5678".into()],
-            isrns: vec!["ISRN-1".into()],
+            isbns: vec![Identifier::from("978-1")],
+            issns: vec![Identifier::from("1234-5678")],
+            isrns: vec![Identifier::from("ISRN-1")],
             original_date: None,
             event_date: None,
             language: Some("en".into()),
@@ -1997,6 +2094,6 @@ mod biblatex_field_tests {
         );
         assert_eq!(round_trip.doi.as_deref(), Some("10.1234/example"));
         assert_eq!(round_trip.keywords, ["history", "bibliography"]);
-        assert_eq!(round_trip.isbns, ["978-1"]);
+        assert_eq!(round_trip.isbns[0].as_str(), "978-1");
     }
 }

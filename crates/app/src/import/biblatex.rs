@@ -6,10 +6,11 @@ use std::collections::HashMap;
 
 use biblatex::{Bibliography, ChunksExt, Date, DateValue, Entry, EntryType, RetrievalError};
 use oeuvre_core::{
-    BibliographicDate, CreatorRole, DiagnosticSeverity, EntryProvenance, IMPORT_MAX_SOURCE_BYTES,
-    IMPORT_PARSER_VERSION, ImportDiagnostic, ImportDraft, ImportEntryDraft, ImportFormat,
-    ImportTempId, Name, NewResource, NonEmptyStr, ResourceKind, ResourceMetadata,
-    SourceProvenance, UnresolvedCreator, UtcMillis, import_codes,
+    BibliographicDate, CreatorRole, DateCertainty, DatePrecision, DiagnosticSeverity,
+    EntryProvenance, IMPORT_MAX_SOURCE_BYTES, IMPORT_PARSER_VERSION, Identifier, ImportDiagnostic,
+    ImportDraft, ImportEntryDraft, ImportFormat, ImportTempId, Name, NewResource, NonEmptyStr,
+    Pages, ResourceKind, ResourceMetadata, ResourceProvenance, SourceProvenance, UnresolvedCreator,
+    UtcMillis, import_codes,
 };
 
 /// Fatal parse failure for a whole bibliography source.
@@ -41,7 +42,7 @@ pub fn parse_biblatex(source: &str) -> Result<ImportDraft, ParseError> {
         ));
     }
     let source = source.trim_start_matches('\u{feff}');
-    let bib = parse_bibliography(source)?;
+    let (explicit, bib) = parse_bibliography(source)?;
     let mut draft = ImportDraft {
         provenance: SourceProvenance {
             format: ImportFormat::Biblatex,
@@ -52,10 +53,37 @@ pub fn parse_biblatex(source: &str) -> Result<ImportDraft, ParseError> {
     };
     let mut next_temp = 1u64;
     for entry in bib.iter() {
+        let pre = explicit.get(&entry.key);
+        let original_fields = pre
+            .map(collect_fields_including_notes)
+            .unwrap_or_default();
+        let note = original_fields.get("note").cloned();
+        let annotation = original_fields.get("annotation").cloned();
+        let inherited_origins = pre
+            .map(|before| inherited_field_origins(before, entry))
+            .unwrap_or_default();
         match map_entry(entry) {
             Ok(mapped) => {
-                let had_reference_fields =
-                    entry.get("crossref").is_some() || entry.get("xref").is_some();
+                let had_reference_fields = pre.is_some_and(|e| {
+                    e.get("crossref").is_some() || e.get("xref").is_some() || e.get("xdata").is_some()
+                });
+                for (field, message) in mapped.field_warnings {
+                    draft.diagnostics.push(
+                        ImportDiagnostic::warning(import_codes::INVALID_FIELD, message)
+                            .with_entry(entry.key.clone())
+                            .with_field(field),
+                    );
+                }
+                if mapped.incomplete_creators {
+                    draft.diagnostics.push(
+                        ImportDiagnostic::warning(
+                            import_codes::INVALID_FIELD,
+                            "creator list ends with \"and others\"; no synthetic person created",
+                        )
+                        .with_entry(entry.key.clone())
+                        .with_field("author"),
+                    );
+                }
                 let series_title = value(entry, "series");
                 let series_number = if series_title.is_some() {
                     value(entry, "number")
@@ -85,15 +113,25 @@ pub fn parse_biblatex(source: &str) -> Result<ImportDraft, ParseError> {
                         continue;
                     }
                 };
-                let original_fields = entry
+                let expanded_fields = entry
                     .fields
                     .keys()
                     .filter(|k| !matches!(k.as_str(), "note" | "annotation"))
                     .filter_map(|k| value(entry, k).map(|v| (k.clone(), v)))
                     .collect();
+                let mut resource = mapped.resource;
+                resource.metadata.provenance = ResourceProvenance {
+                    format: Some("biblatex".into()),
+                    parser_version: Some(IMPORT_PARSER_VERSION),
+                    entry_type: Some(format!("{:?}", entry.entry_type)),
+                    original_fields: original_fields.clone(),
+                    inherited_origins: inherited_origins.clone(),
+                    note: note.clone(),
+                    annotation: annotation.clone(),
+                };
                 draft.entries.push(ImportEntryDraft {
                     temp_id: ImportTempId::new(next_temp),
-                    resource: mapped.resource,
+                    resource,
                     unresolved_creators: mapped.creators,
                     series_title,
                     series_number,
@@ -101,6 +139,10 @@ pub fn parse_biblatex(source: &str) -> Result<ImportDraft, ParseError> {
                         source_key: entry.key.clone(),
                         entry_type: Some(format!("{:?}", entry.entry_type)),
                         original_fields,
+                        expanded_fields,
+                        inherited_origins,
+                        note,
+                        annotation,
                     },
                     had_reference_fields,
                 });
@@ -128,6 +170,8 @@ pub fn parse_biblatex(source: &str) -> Result<ImportDraft, ParseError> {
 struct MappedEntry {
     resource: NewResource,
     creators: Vec<UnresolvedCreator>,
+    incomplete_creators: bool,
+    field_warnings: Vec<(String, String)>,
 }
 
 struct MapError {
@@ -167,10 +211,10 @@ fn names(
     entry: &Entry,
     field: &str,
     role: CreatorRole,
-) -> Result<Vec<UnresolvedCreator>, MapError> {
+) -> Result<(Vec<UnresolvedCreator>, bool), MapError> {
     let people = match entry.get_as::<Vec<biblatex::Person>>(field) {
         Ok(people) => people,
-        Err(RetrievalError::Missing(_)) => return Ok(vec![]),
+        Err(RetrievalError::Missing(_)) => return Ok((vec![], false)),
         Err(e) => {
             return Err(map_field_err(
                 import_codes::INVALID_FIELD,
@@ -179,21 +223,59 @@ fn names(
             ));
         }
     };
-    people
-        .into_iter()
-        .map(|p| {
-            let last = if p.prefix.is_empty() {
-                p.name
+    let mut incomplete = false;
+    let mut creators = Vec::new();
+    for p in people {
+        if p.name.eq_ignore_ascii_case("others") && p.given_name.is_empty() {
+            incomplete = true;
+            continue;
+        }
+        let name = if p.given_name.is_empty()
+            && p.prefix.is_empty()
+            && p.suffix.is_empty()
+            && p.name.contains(char::is_whitespace)
+        {
+            Name::corporate(&p.name)
+        } else {
+            let particle = if p.prefix.is_empty() {
+                None
             } else {
-                format!("{} {}", p.prefix, p.name)
+                Some(p.prefix.as_str())
             };
-            Name::try_new(Some(p.given_name), Some(last), Some(p.suffix))
-                .map(|name| UnresolvedCreator { role, name })
-                .map_err(|e| {
-                    map_field_err(import_codes::INVALID_FIELD, field, format!("{field}: {e}"))
-                })
-        })
-        .collect()
+            Name::try_new_parts(
+                Some(p.given_name.as_str()).filter(|s| !s.is_empty()),
+                particle,
+                Some(p.name.as_str()).filter(|s| !s.is_empty()),
+                Some(p.suffix.as_str()).filter(|s| !s.is_empty()),
+            )
+        }
+        .map_err(|e| map_field_err(import_codes::INVALID_FIELD, field, format!("{field}: {e}")))?;
+        creators.push(UnresolvedCreator { role, name });
+    }
+    Ok((creators, incomplete))
+}
+
+fn datetime_to_millis(
+    at: biblatex::Datetime,
+    field: &str,
+) -> Result<(UtcMillis, DatePrecision), MapError> {
+    let month = time::Month::try_from(at.month.unwrap_or(0) + 1)
+        .map_err(|e| map_field_err(import_codes::INVALID_FIELD, field, e.to_string()))?;
+    let day = time::Date::from_calendar_date(at.year, month, at.day.unwrap_or(0) + 1)
+        .map_err(|e| map_field_err(import_codes::INVALID_FIELD, field, e.to_string()))?;
+    let seconds = at.time.map(|t| t.to_utc_seconds() as i64).unwrap_or(0);
+    let instant =
+        UtcMillis::from_unix_ms((day.midnight().assume_utc().unix_timestamp() + seconds) * 1000);
+    let precision = if at.time.is_some() {
+        DatePrecision::DateTime
+    } else if at.day.is_some() {
+        DatePrecision::Day
+    } else if at.month.is_some() {
+        DatePrecision::Month
+    } else {
+        DatePrecision::Year
+    };
+    Ok((instant, precision))
 }
 
 fn date(entry: &Entry, field: &str) -> Result<Option<BibliographicDate>, MapError> {
@@ -223,20 +305,21 @@ fn date(entry: &Entry, field: &str) -> Result<Option<BibliographicDate>, MapErro
             ));
         }
     };
-    // The model stores one instant plus its original display, not a date interval.
-    let at = match date.value {
-        DateValue::At(at)
-        | DateValue::After(at)
-        | DateValue::Before(at)
-        | DateValue::Between(at, _) => at,
+    let (at, end_dt) = match date.value {
+        DateValue::At(at) | DateValue::After(at) | DateValue::Before(at) => (at, None),
+        DateValue::Between(at, end) => (at, Some(end)),
     };
-    let month = time::Month::try_from(at.month.unwrap_or(0) + 1)
-        .map_err(|e| map_field_err(import_codes::INVALID_FIELD, field, e.to_string()))?;
-    let day = time::Date::from_calendar_date(at.year, month, at.day.unwrap_or(0) + 1)
-        .map_err(|e| map_field_err(import_codes::INVALID_FIELD, field, e.to_string()))?;
-    let seconds = at.time.map(|t| t.to_utc_seconds() as i64).unwrap_or(0);
-    let instant =
-        UtcMillis::from_unix_ms((day.midnight().assume_utc().unix_timestamp() + seconds) * 1000);
+    let (instant, precision) = datetime_to_millis(at, field)?;
+    let end = end_dt
+        .map(|dt| datetime_to_millis(dt, field).map(|(ms, _)| ms))
+        .transpose()?;
+    let certainty = if date.uncertain {
+        DateCertainty::Uncertain
+    } else if date.approximate {
+        DateCertainty::Approximate
+    } else {
+        DateCertainty::Exact
+    };
     let display = value(entry, field).or_else(|| {
         if field == "date" {
             value(entry, "year")
@@ -244,8 +327,11 @@ fn date(entry: &Entry, field: &str) -> Result<Option<BibliographicDate>, MapErro
             None
         }
     });
-    BibliographicDate::try_new(
+    BibliographicDate::try_new_precise(
         instant,
+        end,
+        precision,
+        certainty,
         display
             .map(|s| non_empty(&s))
             .transpose()
@@ -253,6 +339,20 @@ fn date(entry: &Entry, field: &str) -> Result<Option<BibliographicDate>, MapErro
     )
     .map(Some)
     .map_err(|e| map_field_err(import_codes::INVALID_FIELD, field, e.to_string()))
+}
+
+fn optional_date(
+    entry: &Entry,
+    field: &str,
+    warnings: &mut Vec<(String, String)>,
+) -> Option<BibliographicDate> {
+    match date(entry, field) {
+        Ok(value) => value,
+        Err(err) => {
+            warnings.push((field.to_owned(), err.message));
+            None
+        }
+    }
 }
 
 fn map_entry(entry: &Entry) -> Result<MappedEntry, MapError> {
@@ -285,12 +385,16 @@ fn map_entry(entry: &Entry) -> Result<MappedEntry, MapError> {
         map_err(import_codes::MISSING_TITLE, "entry needs a title")
     })?;
     let mut creators = Vec::new();
+    let mut incomplete_creators = false;
+    let mut field_warnings = Vec::new();
     for (field, role) in [
         ("author", CreatorRole::Author),
         ("editor", CreatorRole::Editor),
         ("translator", CreatorRole::Translator),
     ] {
-        creators.extend(names(entry, field, role)?);
+        let (part, incomplete) = names(entry, field, role)?;
+        creators.extend(part);
+        incomplete_creators |= incomplete;
     }
     let source_fields = entry
         .fields
@@ -298,13 +402,23 @@ fn map_entry(entry: &Entry) -> Result<MappedEntry, MapError> {
         .filter(|k| !matches!(k.as_str(), "note" | "annotation"))
         .filter_map(|k| value(entry, k).map(|v| (k.clone(), v)))
         .collect();
+    let pages = match value(entry, "pages") {
+        Some(raw) => match Pages::parse(&raw) {
+            Ok(pages) => Some(pages),
+            Err(e) => {
+                field_warnings.push(("pages".into(), format!("pages: {e}")));
+                None
+            }
+        },
+        None => None,
+    };
     let resource = NewResource {
         kind,
         title: non_empty(&title).map_err(|e| map_err(import_codes::INVALID_FIELD, e))?,
         creators: vec![],
         publisher: value(entry, "publisher"),
-        published: date(entry, "date")?,
-        accessed: date(entry, "urldate")?,
+        published: optional_date(entry, "date", &mut field_warnings),
+        accessed: optional_date(entry, "urldate", &mut field_warnings),
         parent_id: None,
         series_id: None,
         series_number: None,
@@ -316,6 +430,7 @@ fn map_entry(entry: &Entry) -> Result<MappedEntry, MapError> {
                 .or_else(|| value(entry, "journaltitle"))
                 .or_else(|| value(entry, "journal")),
             source_fields,
+            provenance: ResourceProvenance::default(),
         },
         subtitle: value(entry, "subtitle")
             .map(|v| non_empty(&v))
@@ -332,18 +447,30 @@ fn map_entry(entry: &Entry) -> Result<MappedEntry, MapError> {
         place: value(entry, "location").or_else(|| value(entry, "address")),
         volume: value(entry, "volume"),
         issue: value(entry, "number").or_else(|| value(entry, "issue")),
-        pages: value(entry, "pages"),
+        pages,
         total_pages: value(entry, "pagetotal"),
         article_number: value(entry, "eid"),
         edition: value(entry, "edition"),
         doi: value(entry, "doi"),
         url: value(entry, "url"),
         eprint: value(entry, "eprint"),
-        isbns: value(entry, "isbn").into_iter().collect(),
-        issns: value(entry, "issn").into_iter().collect(),
-        isrns: value(entry, "isrn").into_iter().collect(),
-        original_date: date(entry, "origdate")?,
-        event_date: date(entry, "eventdate")?,
+        isbns: value(entry, "isbn")
+            .into_iter()
+            .flat_map(|s| split_identifier_list(&s))
+            .map(Identifier::new)
+            .collect(),
+        issns: value(entry, "issn")
+            .into_iter()
+            .flat_map(|s| split_identifier_list(&s))
+            .map(Identifier::new)
+            .collect(),
+        isrns: value(entry, "isrn")
+            .into_iter()
+            .flat_map(|s| split_identifier_list(&s))
+            .map(Identifier::new)
+            .collect(),
+        original_date: optional_date(entry, "origdate", &mut field_warnings),
+        event_date: optional_date(entry, "eventdate", &mut field_warnings),
         language: value(entry, "langid").or_else(|| value(entry, "language")),
         document_type: value(entry, "type").or_else(|| match entry.entry_type {
             MastersThesis => Some("Master's thesis".into()),
@@ -369,10 +496,57 @@ fn map_entry(entry: &Entry) -> Result<MappedEntry, MapError> {
     Ok(MappedEntry {
         resource,
         creators,
+        incomplete_creators,
+        field_warnings,
     })
 }
 
-fn parse_bibliography(source: &str) -> Result<Bibliography, ParseError> {
+fn split_identifier_list(raw: &str) -> Vec<String> {
+    raw.split([',', ';'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn collect_fields_including_notes(entry: &Entry) -> std::collections::BTreeMap<String, String> {
+    entry
+        .fields
+        .keys()
+        .filter_map(|k| value(entry, k).map(|v| (k.clone(), v)))
+        .collect()
+}
+
+fn inherited_field_origins(
+    before: &Entry,
+    after: &Entry,
+) -> std::collections::BTreeMap<String, String> {
+    let mut origins = std::collections::BTreeMap::new();
+    for key in after.fields.keys() {
+        if before.get(key).is_some() {
+            continue;
+        }
+        if matches!(key.as_str(), "crossref" | "xref" | "xdata" | "note" | "annotation") {
+            continue;
+        }
+        // Record that the field appeared only after expansion; ancestor key is
+        // best-effort from explicit crossref/xdata targets.
+        if let Some(origin) = value(before, "crossref")
+            .or_else(|| value(before, "xdata"))
+            .or_else(|| value(before, "xref"))
+        {
+            let origin = origin
+                .split(',')
+                .map(str::trim)
+                .find(|s| !s.is_empty())
+                .unwrap_or(origin.as_str());
+            origins.insert(key.clone(), origin.to_owned());
+        }
+    }
+    origins
+}
+
+fn parse_bibliography(source: &str) -> Result<(Bibliography, Bibliography), ParseError> {
     let syntax = |e: biblatex::ParseError| {
         let message = format!("BibLaTeX syntax: {e}");
         let code = if message.contains("duplicate") {
@@ -566,5 +740,5 @@ fn parse_bibliography(source: &str) -> Result<Bibliography, ParseError> {
     for entry in explicit.iter() {
         resolved.insert(resolve(&entry.key, &explicit, &mut cache));
     }
-    Ok(resolved)
+    Ok((explicit, resolved))
 }
