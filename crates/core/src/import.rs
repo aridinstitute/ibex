@@ -29,6 +29,8 @@ pub mod codes {
     pub const MISSING_TITLE: &str = "import.missing_title";
     pub const INVALID_FIELD: &str = "import.invalid_field";
     pub const AMBIGUOUS_CREATOR: &str = "import.ambiguous_creator";
+    pub const AMBIGUOUS_CONTAINER: &str = "import.ambiguous_container";
+    pub const CONFLICTING_CONTAINER: &str = "import.conflicting_container";
     pub const REFERENCE_NO_PARENT_LINK: &str = "import.reference_no_parent_link";
     pub const ENTRY_SKIPPED: &str = "import.entry_skipped";
 }
@@ -161,8 +163,14 @@ pub struct ImportEntryDraft {
     pub series_title: Option<String>,
     pub series_number: Option<NonEmptyStr>,
     pub provenance: EntryProvenance,
-    /// True when the source used crossref/xref (metadata inheritance only today).
+    /// True when the source used crossref, xref, or xdata.
     pub had_reference_fields: bool,
+    /// crossref/xref citekeys that name publication parents (never xdata).
+    #[serde(default)]
+    pub publication_ref_keys: Vec<String>,
+    /// True when xdata supplied metadata (not a publication parent).
+    #[serde(default)]
+    pub had_xdata: bool,
 }
 
 impl ImportEntryDraft {

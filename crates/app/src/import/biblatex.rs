@@ -64,9 +64,22 @@ pub fn parse_biblatex(source: &str) -> Result<ImportDraft, ParseError> {
             .unwrap_or_default();
         match map_entry(entry) {
             Ok(mapped) => {
-                let had_reference_fields = pre.is_some_and(|e| {
-                    e.get("crossref").is_some() || e.get("xref").is_some() || e.get("xdata").is_some()
-                });
+                let had_xdata = pre.is_some_and(|e| e.get("xdata").is_some());
+                let publication_ref_keys = pre
+                    .map(|e| {
+                        ["crossref", "xref"]
+                            .into_iter()
+                            .filter_map(|field| value(e, field))
+                            .flat_map(|s| {
+                                s.split(',')
+                                    .map(|k| k.trim().to_owned())
+                                    .filter(|k| !k.is_empty())
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let had_reference_fields = had_xdata || !publication_ref_keys.is_empty();
                 for (field, message) in mapped.field_warnings {
                     draft.diagnostics.push(
                         ImportDiagnostic::warning(import_codes::INVALID_FIELD, message)
@@ -145,6 +158,8 @@ pub fn parse_biblatex(source: &str) -> Result<ImportDraft, ParseError> {
                         annotation,
                     },
                     had_reference_fields,
+                    publication_ref_keys,
+                    had_xdata,
                 });
                 next_temp += 1;
             }

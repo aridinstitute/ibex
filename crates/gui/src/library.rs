@@ -1193,7 +1193,7 @@ fn parent_options(
     };
     let mut items: Vec<ParentItem> = rows
         .iter()
-        .filter(|row| row.id != edited && row.kind == expected)
+        .filter(|row| row.id != edited && expected.contains(&row.kind))
         .map(|row| ParentItem {
             label: row.title.as_str().into(),
             id: row.id,
@@ -1531,7 +1531,7 @@ struct EditForm {
     /// The expected parent kind the box's current options target, `None`
     /// when the kind forbids parents or the options have not landed: a
     /// kind change re-keys the box only when this value moves.
-    parent_options_kind: Option<ResourceKind>,
+    parent_options_kind: Option<&'static [ResourceKind]>,
     /// Bumped on every options load; a reply carries the generation it was
     /// issued for, so a late fetch cannot clobber a newer kind's options.
     parent_gen: u64,
@@ -3826,9 +3826,15 @@ impl LibraryApp {
             cx.notify();
             return;
         };
+        // Single expected kind: filter at the store. Multiple (e.g. article →
+        // issue|journal): fetch a broader page and narrow client-side.
         let query = ResourceQuery {
             sort: None,
-            filter: ResourceFilter::by_kind(expected),
+            filter: if expected.len() == 1 {
+                ResourceFilter::by_kind(expected[0])
+            } else {
+                ResourceFilter::none()
+            },
         };
         cx.spawn_in(window, async move |app, window| {
             let mut items: Vec<ParentItem> = Vec::new();
@@ -5941,10 +5947,12 @@ mod parent_options_tests {
         let edited = summary("The edited record");
         let edited_id = edited.id;
 
-        // A journal article's parent is a journal: articles and anything
-        // else never appear among the options, whatever page served them.
+        // A journal article accepts journal or issue parents; other kinds
+        // never appear among the options, whatever page served them.
+        let mut issue = summary("Aaa Issue");
+        issue.kind = ResourceKind::Issue;
         let options = parent_options(
-            &[journal, article, edited],
+            &[journal, article, issue, edited],
             edited_id,
             ResourceKind::JournalArticle.parent_rule(),
         );
@@ -5953,7 +5961,7 @@ mod parent_options_tests {
             .map(ParentItem::title)
             .map(String::from)
             .collect();
-        assert_eq!(labels, ["Zzz Journal"]);
+        assert_eq!(labels, ["Aaa Issue", "Zzz Journal"]);
     }
 }
 

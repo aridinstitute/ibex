@@ -76,6 +76,8 @@ fn book_draft(key: &str, title: &str, author: Name) -> ImportDraft {
                 annotation: None,
             },
             had_reference_fields: false,
+            publication_ref_keys: vec![],
+            had_xdata: false,
         }],
         diagnostics: vec![],
     }

@@ -244,7 +244,22 @@ impl MemoryStore {
                 .collect::<Result<Vec<_>, StoreError>>()?;
 
             let container_title = match row.parent_id {
-                Some(parent_id) => resources.get(&parent_id).map(|parent| parent.title.clone()),
+                Some(parent_id) => match resources.get(&parent_id) {
+                    Some(parent) if parent.kind == ResourceKind::Issue => row
+                        .metadata
+                        .venue
+                        .as_ref()
+                        .and_then(|v| NonEmptyStr::try_new(v).ok())
+                        .or_else(|| {
+                            parent
+                                .parent_id
+                                .and_then(|jid| resources.get(&jid))
+                                .map(|j| j.title.clone())
+                        })
+                        .or_else(|| Some(parent.title.clone())),
+                    Some(parent) => Some(parent.title.clone()),
+                    None => None,
+                },
                 None => row
                     .metadata
                     .venue
@@ -823,6 +838,20 @@ impl Store for MemoryStore {
                 "imported write includes a series but resource.series_id is unset",
             ));
         }
+        for dep in &write.new_dependencies {
+            if let Some(parent_id) = dep.parent_id {
+                let pending = write.new_dependencies.iter().any(|r| r.id == parent_id);
+                if !pending {
+                    self.get_resource(parent_id).await?;
+                }
+            }
+        }
+        if let Some(parent_id) = write.resource.parent_id {
+            let pending = write.new_dependencies.iter().any(|r| r.id == parent_id);
+            if !pending {
+                self.get_resource(parent_id).await?;
+            }
+        }
 
         {
             let mut people = self.people.lock().expect("MemoryStore lock");
@@ -846,6 +875,62 @@ impl Store for MemoryStore {
                 )));
             }
             series_map.insert(series.id, series.clone());
+        }
+        {
+            let mut resources = self.resources.lock().expect("MemoryStore lock");
+            for dep in &write.new_dependencies {
+                if resources.contains_key(&dep.id) {
+                    return Err(StoreError::invalid(format!(
+                        "resource {} already exists",
+                        dep.id
+                    )));
+                }
+                resources.insert(
+                    dep.id,
+                    ResourceRow {
+                        kind: dep.kind,
+                        title: dep.title.clone(),
+                        publisher: dep.publisher.clone(),
+                        published: dep.published.clone(),
+                        accessed: dep.accessed.clone(),
+                        parent_id: dep.parent_id,
+                        series_id: dep.series_id,
+                        series_number: dep.series_number.clone(),
+                        tag_ids: dep.tag_ids.clone(),
+                        collection_ids: dep.collection_ids.clone(),
+                        metadata: dep.metadata.clone(),
+                        subtitle: dep.subtitle.clone(),
+                        title_addon: dep.title_addon.clone(),
+                        short_title: dep.short_title.clone(),
+                        place: dep.place.clone(),
+                        volume: dep.volume.clone(),
+                        issue: dep.issue.clone(),
+                        pages: dep.pages.clone(),
+                        total_pages: dep.total_pages.clone(),
+                        article_number: dep.article_number.clone(),
+                        edition: dep.edition.clone(),
+                        doi: dep.doi.clone(),
+                        url: dep.url.clone(),
+                        eprint: dep.eprint.clone(),
+                        isbns: dep.isbns.clone(),
+                        issns: dep.issns.clone(),
+                        isrns: dep.isrns.clone(),
+                        original_date: dep.original_date.clone(),
+                        event_date: dep.event_date.clone(),
+                        language: dep.language.clone(),
+                        document_type: dep.document_type.clone(),
+                        publication_method: dep.publication_method.clone(),
+                        institution: dep.institution.clone(),
+                        organization: dep.organization.clone(),
+                        school: dep.school.clone(),
+                        abstract_text: dep.abstract_text.clone(),
+                        keywords: dep.keywords.clone(),
+                        favorite: dep.favorite,
+                        date_added: dep.date_added,
+                        date_edited: dep.date_edited,
+                    },
+                );
+            }
         }
         self.create_resource(write.resource).await
     }

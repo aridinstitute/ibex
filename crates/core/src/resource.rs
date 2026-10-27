@@ -57,22 +57,25 @@ pub enum ResourceKind {
     BlogPost,
     PodcastEpisode,
     Journal,
+    /// Intermediate container under a journal; volume/issue labels live here.
+    Issue,
     Podcast,
     Blog,
 }
 
-/// Cardinality rule for `parent_id`. `expected` is the container kind for a later existence check.
+/// Cardinality rule for `parent_id`. `expected` lists allowed container kinds
+/// (existence checked at the command boundary).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParentRule {
     Forbidden,
-    Optional { expected: ResourceKind },
-    Required { expected: ResourceKind },
+    Optional { expected: &'static [ResourceKind] },
+    Required { expected: &'static [ResourceKind] },
 }
 
 impl ResourceKind {
     /// Every kind, for shells that enumerate the whole set (dropdowns,
     /// round-trip tests).
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Book,
         Self::JournalArticle,
         Self::BookSection,
@@ -91,6 +94,7 @@ impl ResourceKind {
         Self::BlogPost,
         Self::PodcastEpisode,
         Self::Journal,
+        Self::Issue,
         Self::Podcast,
         Self::Blog,
     ];
@@ -115,6 +119,7 @@ impl ResourceKind {
             Self::BlogPost => "blogPost",
             Self::PodcastEpisode => "podcastEpisode",
             Self::Journal => "journal",
+            Self::Issue => "issue",
             Self::Podcast => "podcast",
             Self::Blog => "blog",
         }
@@ -142,6 +147,7 @@ impl ResourceKind {
             "blogPost" => Self::BlogPost,
             "podcastEpisode" => Self::PodcastEpisode,
             "journal" => Self::Journal,
+            "issue" => Self::Issue,
             "podcast" => Self::Podcast,
             "blog" => Self::Blog,
             _ => return None,
@@ -149,23 +155,30 @@ impl ResourceKind {
     }
 
     pub fn is_container(self) -> bool {
-        matches!(self, Self::Journal | Self::Podcast | Self::Blog)
+        matches!(
+            self,
+            Self::Journal | Self::Issue | Self::Podcast | Self::Blog
+        )
     }
 
     pub fn parent_rule(self) -> ParentRule {
         match self {
             Self::PodcastEpisode => ParentRule::Required {
-                expected: Self::Podcast,
+                expected: &[Self::Podcast],
             },
             Self::BlogPost => ParentRule::Optional {
-                expected: Self::Blog,
+                expected: &[Self::Blog],
             },
+            // Prefer issue; allow direct journal when issue evidence is weak.
             Self::JournalArticle => ParentRule::Optional {
-                expected: Self::Journal,
+                expected: &[Self::Issue, Self::Journal],
+            },
+            Self::Issue => ParentRule::Required {
+                expected: &[Self::Journal],
             },
             Self::BookSection | Self::DictionaryEntry | Self::EncyclopediaArticle => {
                 ParentRule::Optional {
-                    expected: Self::Book,
+                    expected: &[Self::Book],
                 }
             }
             Self::Journal
@@ -189,7 +202,7 @@ impl ResourceKind {
         match self.parent_rule() {
             ParentRule::Forbidden => Err(ResourceError::ParentKindMismatch),
             ParentRule::Optional { expected } | ParentRule::Required { expected } => {
-                if parent_kind == expected {
+                if expected.contains(&parent_kind) {
                     Ok(())
                 } else {
                     Err(ResourceError::ParentKindMismatch)
@@ -1406,6 +1419,54 @@ mod tests {
             .unwrap();
             assert!(resource.creators.is_empty());
         }
+
+        let journal = ResourceId::generate();
+        let issue = Resource::try_new(
+            ResourceId::generate(),
+            NewResource {
+                kind: ResourceKind::Issue,
+                title: title("Vol. 1, no. 1"),
+                creators: vec![],
+                publisher: None,
+                published: None,
+                accessed: None,
+                parent_id: Some(journal),
+                series_id: None,
+                series_number: None,
+                tag_ids: vec![],
+                collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: Some("1".into()),
+                issue: Some("1".into()),
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
+            },
+        )
+        .unwrap();
+        assert!(issue.creators.is_empty());
+        assert_eq!(issue.parent_id, Some(journal));
     }
 
     #[test]
@@ -1748,8 +1809,34 @@ mod tests {
         assert_eq!(
             ResourceKind::PodcastEpisode.parent_rule(),
             ParentRule::Required {
-                expected: ResourceKind::Podcast
+                expected: &[ResourceKind::Podcast]
             }
+        );
+    }
+
+    #[test]
+    fn parent_rule_issue_required_journal_and_article_accepts_both() {
+        assert_eq!(
+            ResourceKind::Issue.parent_rule(),
+            ParentRule::Required {
+                expected: &[ResourceKind::Journal]
+            }
+        );
+        assert_eq!(
+            ResourceKind::JournalArticle.parent_rule(),
+            ParentRule::Optional {
+                expected: &[ResourceKind::Issue, ResourceKind::Journal]
+            }
+        );
+        assert!(
+            ResourceKind::JournalArticle
+                .accept_parent(ResourceKind::Issue)
+                .is_ok()
+        );
+        assert!(
+            ResourceKind::JournalArticle
+                .accept_parent(ResourceKind::Journal)
+                .is_ok()
         );
     }
 
