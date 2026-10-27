@@ -6,14 +6,15 @@ use std::collections::HashMap;
 
 use biblatex::{Bibliography, ChunksExt, Date, DateValue, Entry, EntryType, RetrievalError};
 use oeuvre_core::{
-    BibliographicDate, CreatorRole, CreatorSpec, Name, NewResource, NewSeries, NonEmptyStr,
-    ResourceId, ResourceKind, ResourceMetadata, SeriesId, UtcMillis,
+    BibliographicDate, CreatorRole, CreatorSpec, ImportedResourceWrite, Name, NewResource,
+    NewSeries, NonEmptyStr, Person, PersonId, ResourceId, ResourceKind, ResourceMetadata, Series,
+    SeriesId, UtcMillis,
 };
 
 use crate::event::{self, Event};
 use crate::{AppState, CommandError, Handler, Outcome};
 
-use super::resource::CreateResource;
+use super::resource::validate_new_resource_refs;
 
 #[derive(Debug, Clone)]
 pub struct ImportBiblatex {
@@ -63,33 +64,69 @@ impl Handler for ImportBiblatex {
             ev.set(event::IMPORT_ENTRY_KEY, entry.key.clone());
             let mapped = map_entry(entry);
             let result = match mapped {
-                Ok((mut new, names)) => {
-                    match resolve_creators(state, names).await {
-                        Ok(creators) => {
-                            new.creators = creators;
-                            if let Some(title) = value(entry, "series") {
-                                let id = if let Some(id) = series.get(&title) {
-                                    *id
-                                } else {
-                                    let created = state
-                                        .store()
-                                        .create_series(NewSeries {
-                                            title: non_empty(&title)?,
-                                        })
-                                        .await?;
-                                    series.insert(title, created.id);
-                                    created.id
-                                };
-                                new.series_id = Some(id);
-                                new.series_number =
-                                    value(entry, "number").map(|v| non_empty(&v)).transpose()?;
-                            }
-                            // Share validation without emitting a completion event per row.
-                            CreateResource { new }.run(state, ev).await.map(|r| r.0)
+                Ok((mut new, names)) => match plan_creators(state, names).await {
+                    Ok((new_people, creators)) => {
+                        new.creators = creators;
+                        let mut new_series = None;
+                        let mut planned_series_title = None;
+                        if let Some(title) = value(entry, "series") {
+                            let id = if let Some(id) = series.get(&title) {
+                                *id
+                            } else {
+                                let planned = Series::try_new(
+                                    SeriesId::generate(),
+                                    NewSeries {
+                                        title: non_empty(&title)?,
+                                    },
+                                );
+                                let id = planned.id;
+                                planned_series_title = Some(title);
+                                new_series = Some(planned);
+                                id
+                            };
+                            new.series_id = Some(id);
+                            new.series_number =
+                                value(entry, "number").map(|v| non_empty(&v)).transpose()?;
                         }
-                        Err(error) => Err(error),
+                        let pending_people: Vec<PersonId> =
+                            new_people.iter().map(|person| person.id).collect();
+                        let pending_series = new_series.as_ref().map(|s| s.id);
+                        // Share validation without emitting a completion event per row.
+                        match validate_new_resource_refs(
+                            state,
+                            &new,
+                            &pending_people,
+                            pending_series,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                match state
+                                    .store()
+                                    .create_imported_resource(ImportedResourceWrite {
+                                        new_people,
+                                        new_series,
+                                        resource: new,
+                                    })
+                                    .await
+                                {
+                                    Ok(resource) => {
+                                        // Only cache series ids that actually committed.
+                                        if let (Some(title), Some(series_id)) =
+                                            (planned_series_title, resource.series_id)
+                                        {
+                                            series.insert(title, series_id);
+                                        }
+                                        Ok(resource)
+                                    }
+                                    Err(error) => Err(CommandError::from(error)),
+                                }
+                            }
+                            Err(error) => Err(error),
+                        }
                     }
-                }
+                    Err(error) => Err(error),
+                },
                 Err(error) => Err(error),
             };
             match result {
@@ -116,11 +153,13 @@ impl Handler for ImportBiblatex {
     }
 }
 
-async fn resolve_creators(
+/// Resolve creator names to existing people or newly planned [`Person`] rows.
+/// Does not write: new people are persisted with the resource atomically.
+async fn plan_creators(
     state: &AppState,
     names: Vec<(CreatorRole, Name)>,
-) -> Result<Vec<CreatorSpec>, CommandError> {
-    // Check all ambiguities before creating any people for this entry.
+) -> Result<(Vec<Person>, Vec<CreatorSpec>), CommandError> {
+    // Check all ambiguities before allocating any people for this entry.
     let mut resolved = Vec::new();
     for (role, name) in names {
         let people = state.store().find_persons_by_name(&name).await?;
@@ -137,15 +176,17 @@ async fn resolve_creators(
         resolved.push((role, name, id));
     }
     let mut creators: Vec<CreatorSpec> = Vec::new();
-    let mut created = Vec::<(Name, oeuvre_core::PersonId)>::new();
+    let mut new_people: Vec<Person> = Vec::new();
     for (role, name, id) in resolved {
         let person_id = if let Some(id) = id {
             id
-        } else if let Some((_, id)) = created.iter().find(|(n, _)| n == &name) {
-            *id
+        } else if let Some(person) = new_people.iter().find(|person| person.name == name) {
+            person.id
         } else {
-            let id = state.store().create_person(name.clone(), vec![]).await?.id;
-            created.push((name, id));
+            let person = Person::try_new(PersonId::generate(), name, vec![])
+                .map_err(|e| CommandError::Invalid(e.to_string()))?;
+            let id = person.id;
+            new_people.push(person);
             id
         };
         if !creators
@@ -159,7 +200,7 @@ async fn resolve_creators(
             });
         }
     }
-    Ok(creators)
+    Ok((new_people, creators))
 }
 
 fn value(entry: &Entry, field: &str) -> Option<String> {

@@ -171,6 +171,79 @@ fn map_store(err: StoreError) -> CommandError {
     }
 }
 
+/// Shared reference checks for ordinary create and import.
+///
+/// `pending_people` / `pending_series` are ids that will be created in the same
+/// atomic write, so they need not already exist in the store.
+pub(crate) async fn validate_new_resource_refs(
+    state: &AppState,
+    new: &NewResource,
+    pending_people: &[PersonId],
+    pending_series: Option<SeriesId>,
+) -> Result<(), CommandError> {
+    for spec in &new.creators {
+        if pending_people.contains(&spec.person_id) {
+            continue;
+        }
+        state
+            .store()
+            .get_person(spec.person_id)
+            .await
+            .map_err(|e| map_person_lookup(e, spec.person_id))?;
+    }
+
+    if let Some(parent_id) = new.parent_id {
+        let parent = state
+            .store()
+            .get_resource(parent_id)
+            .await
+            .map_err(|e| map_resource_lookup(e, parent_id))?;
+        new.kind
+            .accept_parent(parent.kind)
+            .map_err(map_resource_err)?;
+    }
+
+    if let Some(series_id) = new.series_id {
+        if pending_series != Some(series_id) {
+            state
+                .store()
+                .get_series(series_id)
+                .await
+                .map_err(|e| map_series_lookup(e, series_id))?;
+        }
+    }
+
+    for tag_id in &new.tag_ids {
+        state.store().get_tag(*tag_id).await.map_err(|e| {
+            if e.is_not_found() {
+                CommandError::NotFound(tag_id.to_string())
+            } else if e.is_invalid() {
+                CommandError::Invalid(e.message.clone())
+            } else {
+                CommandError::Store(e)
+            }
+        })?;
+    }
+
+    for collection_id in &new.collection_ids {
+        state
+            .store()
+            .get_collection(*collection_id)
+            .await
+            .map_err(|e| {
+                if e.is_not_found() {
+                    CommandError::NotFound(collection_id.to_string())
+                } else if e.is_invalid() {
+                    CommandError::Invalid(e.message.clone())
+                } else {
+                    CommandError::Store(e)
+                }
+            })?;
+    }
+
+    Ok(())
+}
+
 /// Field names that differ between the stored record and its replacement,
 /// in a fixed column order. The update's wide event joins them into
 /// `resource.changed_fields`; an empty vec means the write is a no-op.
@@ -309,61 +382,7 @@ impl Handler for CreateResource {
     }
 
     async fn run(self, state: &AppState, ev: &mut Event) -> Result<Created, CommandError> {
-        for spec in &self.new.creators {
-            state
-                .store()
-                .get_person(spec.person_id)
-                .await
-                .map_err(|e| map_person_lookup(e, spec.person_id))?;
-        }
-
-        if let Some(parent_id) = self.new.parent_id {
-            let parent = state
-                .store()
-                .get_resource(parent_id)
-                .await
-                .map_err(|e| map_resource_lookup(e, parent_id))?;
-            self.new
-                .kind
-                .accept_parent(parent.kind)
-                .map_err(map_resource_err)?;
-        }
-
-        if let Some(series_id) = self.new.series_id {
-            state
-                .store()
-                .get_series(series_id)
-                .await
-                .map_err(|e| map_series_lookup(e, series_id))?;
-        }
-
-        for tag_id in &self.new.tag_ids {
-            state.store().get_tag(*tag_id).await.map_err(|e| {
-                if e.is_not_found() {
-                    CommandError::NotFound(tag_id.to_string())
-                } else if e.is_invalid() {
-                    CommandError::Invalid(e.message.clone())
-                } else {
-                    CommandError::Store(e)
-                }
-            })?;
-        }
-
-        for collection_id in &self.new.collection_ids {
-            state
-                .store()
-                .get_collection(*collection_id)
-                .await
-                .map_err(|e| {
-                    if e.is_not_found() {
-                        CommandError::NotFound(collection_id.to_string())
-                    } else if e.is_invalid() {
-                        CommandError::Invalid(e.message.clone())
-                    } else {
-                        CommandError::Store(e)
-                    }
-                })?;
-        }
+        validate_new_resource_refs(state, &self.new, &[], None).await?;
 
         let resource = state
             .store()

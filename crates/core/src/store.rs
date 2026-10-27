@@ -6,6 +6,18 @@ use crate::{
     ResourceQuery, ResourceSummary, Series, SeriesId, SortedResourcePage, Tag, TagId,
 };
 
+/// One imported resource together with people/series that must be created with it.
+///
+/// Existing people and series are referenced by id only and are neither created
+/// nor deleted. Callers allocate ids for [`Self::new_people`] /
+/// [`Self::new_series`] up front so [`Self::resource`] can point at them.
+#[derive(Debug, Clone)]
+pub struct ImportedResourceWrite {
+    pub new_people: Vec<Person>,
+    pub new_series: Option<Series>,
+    pub resource: NewResource,
+}
+
 /// Storage backend. Grows one method per capability a command needs.
 #[async_trait::async_trait]
 pub trait Store: Send + Sync + 'static {
@@ -110,6 +122,17 @@ pub trait Store: Send + Sync + 'static {
     /// Does **not** load/validate parent kind or series existence — caller
     /// (`CreateResource`) does that before invoke.
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError>;
+
+    /// Persist one imported resource and the people/series newly required for it
+    /// as a single atomic unit. On failure, none of those new rows or edges remain.
+    ///
+    /// Shared entities already in the store (referenced but not listed in
+    /// [`ImportedResourceWrite::new_people`] / `new_series`) are left untouched.
+    /// Does **not** validate parent kind — the import/command layer does that.
+    async fn create_imported_resource(
+        &self,
+        write: ImportedResourceWrite,
+    ) -> Result<Resource, StoreError>;
 
     /// Replace every stored field of `id` with `new`: the row's content plus
     /// its whole creator list. Missing → [`StoreError::not_found`].

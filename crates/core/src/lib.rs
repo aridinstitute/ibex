@@ -23,5 +23,5 @@ pub use resource::{
     primary_creator_sort_key, published_label_from, utc_year_from_millis,
 };
 pub use series::{NewSeries, Series, SeriesId};
-pub use store::{Store, StoreError, StoreHealth};
+pub use store::{ImportedResourceWrite, Store, StoreError, StoreHealth};
 pub use tag::{Tag, TagId};

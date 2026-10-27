@@ -3,13 +3,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use oeuvre_core::{
-    BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole, Name,
-    NameKey, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceCounts,
-    ResourceFilter, ResourceId, ResourceKind, ResourceMetadata, ResourcePage, ResourceQuery,
-    ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store,
-    StoreError, StoreHealth, Tag, TagId, UtcMillis, build_collection_forest,
-    collection_descendant_closure, creator_label_name, format_creators_label,
-    primary_creator_sort_key, published_label_from,
+    BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole,
+    ImportedResourceWrite, Name, NameKey, NewResource, NewSeries, NonEmptyStr, Person, PersonId,
+    Resource, ResourceCounts, ResourceFilter, ResourceId, ResourceKind, ResourceMetadata,
+    ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
+    SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId, UtcMillis,
+    build_collection_forest, collection_descendant_closure, creator_label_name,
+    format_creators_label, primary_creator_sort_key, published_label_from,
 };
 
 use crate::event::{EventSink, FinishedEvent};
@@ -795,6 +795,61 @@ impl Store for MemoryStore {
         Ok(resource)
     }
 
+    async fn create_imported_resource(
+        &self,
+        write: ImportedResourceWrite,
+    ) -> Result<Resource, StoreError> {
+        // Validate every creator against the pending people or the store before
+        // any write, so a failed unit leaves no partial MemoryStore state.
+        for creator in &write.resource.creators {
+            let pending = write
+                .new_people
+                .iter()
+                .any(|person| person.id == creator.person_id);
+            if !pending {
+                self.get_person(creator.person_id).await?;
+            }
+        }
+        if let Some(series_id) = write.resource.series_id {
+            let pending = write
+                .new_series
+                .as_ref()
+                .is_some_and(|series| series.id == series_id);
+            if !pending {
+                self.get_series(series_id).await?;
+            }
+        } else if write.new_series.is_some() {
+            return Err(StoreError::invalid(
+                "imported write includes a series but resource.series_id is unset",
+            ));
+        }
+
+        {
+            let mut people = self.people.lock().expect("MemoryStore lock");
+            for person in &write.new_people {
+                if people.by_id.contains_key(&person.id) {
+                    return Err(StoreError::invalid(format!(
+                        "person {} already exists",
+                        person.id
+                    )));
+                }
+                people.by_id.insert(person.id, person.clone());
+                people.reindex_person(None, Some(person));
+            }
+        }
+        if let Some(series) = &write.new_series {
+            let mut series_map = self.series.lock().expect("MemoryStore lock");
+            if series_map.contains_key(&series.id) {
+                return Err(StoreError::invalid(format!(
+                    "series {} already exists",
+                    series.id
+                )));
+            }
+            series_map.insert(series.id, series.clone());
+        }
+        self.create_resource(write.resource).await
+    }
+
     async fn update_resource(
         &self,
         id: ResourceId,
@@ -1225,6 +1280,13 @@ impl Store for StubStore {
 
     async fn create_resource(&self, _new: NewResource) -> Result<Resource, StoreError> {
         Err(unsupported("create_resource"))
+    }
+
+    async fn create_imported_resource(
+        &self,
+        _write: ImportedResourceWrite,
+    ) -> Result<Resource, StoreError> {
+        Err(unsupported("create_imported_resource"))
     }
 
     async fn update_resource(

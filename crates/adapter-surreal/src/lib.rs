@@ -3,12 +3,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use oeuvre_core::{
-    BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole, Name,
-    NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceCounts,
-    ResourceFilter, ResourceId, ResourceKind, ResourceMetadata, ResourcePage, ResourceQuery,
-    ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store,
-    StoreError, StoreHealth, Tag, TagId, UtcMillis, build_collection_forest,
-    collection_descendant_closure, creator_label_name, format_creators_label, published_label_from,
+    BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole,
+    ImportedResourceWrite, Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource,
+    ResourceCounts, ResourceFilter, ResourceId, ResourceKind, ResourceMetadata, ResourcePage,
+    ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
+    SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId, UtcMillis,
+    build_collection_forest, collection_descendant_closure, creator_label_name,
+    format_creators_label, published_label_from,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -267,6 +268,23 @@ impl SurrealStore {
     }
 
     async fn ensure_schema(&self) -> Result<(), StoreError> {
+        // Base tables before relation DDL or indexes that would otherwise
+        // implicitly create `created` as a plain table (skipping ENFORCED).
+        let _ = self
+            .db
+            .query("DEFINE TABLE IF NOT EXISTS person SCHEMALESS")
+            .await;
+        let _ = self
+            .db
+            .query("DEFINE TABLE IF NOT EXISTS series SCHEMALESS")
+            .await;
+        let _ = self
+            .db
+            .query("DEFINE TABLE IF NOT EXISTS resource SCHEMALESS")
+            .await;
+
+        self.ensure_created_relation_table().await?;
+
         // Best-effort NONUNIQUE index. Mem engines may reject DEFINE; find still
         // uses CONTAINS over name_keys.
         let _ = self
@@ -335,21 +353,6 @@ impl SurrealStore {
 
         let _ = self
             .db
-            .query("DEFINE TABLE IF NOT EXISTS series SCHEMALESS")
-            .await;
-        let _ = self
-            .db
-            .query("DEFINE TABLE IF NOT EXISTS resource SCHEMALESS")
-            .await;
-        let _ = self
-            .db
-            .query(
-                "DEFINE TABLE IF NOT EXISTS created TYPE RELATION IN person OUT resource ENFORCED",
-            )
-            .await;
-
-        let _ = self
-            .db
             .query("DEFINE TABLE IF NOT EXISTS tag SCHEMALESS")
             .await;
         let _ = self
@@ -402,6 +405,94 @@ impl SurrealStore {
             .map_err(map_err)?;
 
         Ok(())
+    }
+
+    /// Ensure `created` is an ENFORCED person→resource relation.
+    ///
+    /// Indexes defined on `created` before the relation DDL silently create a
+    /// plain table; `DEFINE TABLE IF NOT EXISTS … TYPE RELATION` then no-ops.
+    /// Existing libraries with that plain table are rebuilt in place.
+    async fn ensure_created_relation_table(&self) -> Result<(), StoreError> {
+        let definition = self.created_table_definition().await?;
+        let enforced = definition
+            .as_deref()
+            .is_some_and(|def| def.contains("TYPE RELATION") && def.contains("ENFORCED"));
+        if enforced {
+            return Ok(());
+        }
+
+        // CreatedEdgeRow omits `out`; migration needs both endpoints.
+        #[derive(Debug, SurrealValue)]
+        struct EdgeCopy {
+            #[surreal(rename = "in")]
+            person: RecordId,
+            out: RecordId,
+            #[surreal(wrap)]
+            role: CreatorRole,
+            order: u32,
+            credited_as: Option<String>,
+        }
+        let edges: Vec<EdgeCopy> = if definition.is_some() {
+            let mut response = self
+                .db
+                .query("SELECT in, out, role, order, credited_as FROM created")
+                .await
+                .map_err(map_err)?;
+            response.take(0).map_err(map_err)?
+        } else {
+            Vec::new()
+        };
+
+        if definition.is_some() {
+            self.db
+                .query("REMOVE TABLE created")
+                .await
+                .map_err(map_err)?
+                .check()
+                .map_err(map_err)?;
+        }
+
+        self.db
+            .query(
+                "DEFINE TABLE created TYPE RELATION IN person OUT resource ENFORCED",
+            )
+            .await
+            .map_err(map_err)?
+            .check()
+            .map_err(map_err)?;
+
+        for edge in edges {
+            self.db
+                .query(
+                    "RELATE $from -> created -> $to \
+                     SET role = $role, order = $order, credited_as = $credited",
+                )
+                .bind(("from", edge.person))
+                .bind(("to", edge.out))
+                .bind(("role", SerdeWrapper(edge.role)))
+                .bind(("order", edge.order))
+                .bind(("credited", edge.credited_as))
+                .await
+                .map_err(map_err)?
+                .check()
+                .map_err(map_err)?;
+        }
+        Ok(())
+    }
+
+    async fn created_table_definition(&self) -> Result<Option<String>, StoreError> {
+        let mut response = self.db.query("INFO FOR DB").await.map_err(map_err)?;
+        let info: Option<surrealdb::types::Value> = response.take(0).map_err(map_err)?;
+        let Some(surrealdb::types::Value::Object(db)) = info else {
+            return Ok(None);
+        };
+        let Some(surrealdb::types::Value::Object(tables)) = db.get("tables").cloned() else {
+            return Ok(None);
+        };
+        match tables.get("created") {
+            Some(surrealdb::types::Value::String(def)) => Ok(Some(def.clone())),
+            _ => Ok(None),
+        }
     }
 
     /// Persist record-keeping stamps for rows written before those fields
@@ -679,8 +770,35 @@ impl SurrealStore {
     }
 
     /// RELATE one `created` edge per creator with role / order / credited_as.
-    /// Callers own the surrounding transaction; this only writes the new
-    /// edges (deleting stale ones is the updater's job).
+    /// Callers own the surrounding SDK transaction; statement errors are
+    /// surfaced via [`IndexedResults::check`] so a failed edge cannot report success.
+    async fn relate_creators_in_txn(
+        txn: &surrealdb::method::Transaction<Db>,
+        id: ResourceId,
+        creators: &[Creator],
+    ) -> Result<(), StoreError> {
+        for creator in creators {
+            let credited = creator.credited_as.as_ref().map(|s| s.as_str().to_owned());
+            txn.query(
+                "RELATE $from -> created -> $to \
+                 SET role = $role, order = $order, credited_as = $credited",
+            )
+            .bind(("from", Self::person_key(creator.person_id)))
+            .bind(("to", Self::resource_key(id)))
+            .bind(("role", SerdeWrapper(creator.role)))
+            .bind(("order", creator.order))
+            .bind(("credited", credited))
+            .await
+            .map_err(map_err)?
+            .check()
+            .map_err(map_err)?;
+        }
+        Ok(())
+    }
+
+    /// Test helper: attach creators outside a multi-row write. Still checks
+    /// statement results so a bad RELATE cannot look like success.
+    #[cfg(test)]
     async fn relate_creators(
         &self,
         id: ResourceId,
@@ -699,6 +817,8 @@ impl SurrealStore {
                 .bind(("order", creator.order))
                 .bind(("credited", credited))
                 .await
+                .map_err(map_err)?
+                .check()
                 .map_err(map_err)?;
         }
         Ok(())
@@ -1189,12 +1309,10 @@ impl Store for SurrealStore {
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError> {
         let id = ResourceId::generate();
         let resource = Resource::try_new(id, new)?;
-
-        self.db.query("BEGIN TRANSACTION").await.map_err(map_err)?;
+        let txn = self.db.clone().begin().await.map_err(map_err)?;
 
         let persist = async {
-            let created: Option<ResourceDoc> = self
-                .db
+            let created: Option<ResourceDoc> = txn
                 .create(Self::resource_key(id))
                 .content(Self::resource_doc_from(&resource))
                 .await
@@ -1204,19 +1322,82 @@ impl Store for SurrealStore {
                     "create_resource returned empty for {id}"
                 )));
             }
-
-            self.relate_creators(id, &resource.creators).await?;
+            Self::relate_creators_in_txn(&txn, id, &resource.creators).await?;
             Ok(())
         }
         .await;
 
         match persist {
             Ok(()) => {
-                self.db.query("COMMIT TRANSACTION").await.map_err(map_err)?;
+                let _ = txn.commit().await.map_err(map_err)?;
                 Ok(resource)
             }
             Err(err) => {
-                let _ = self.db.query("CANCEL TRANSACTION").await;
+                let _ = txn.cancel().await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn create_imported_resource(
+        &self,
+        write: ImportedResourceWrite,
+    ) -> Result<Resource, StoreError> {
+        let id = ResourceId::generate();
+        let resource = Resource::try_new(id, write.resource)?;
+        let txn = self.db.clone().begin().await.map_err(map_err)?;
+
+        let persist = async {
+            for person in &write.new_people {
+                let created: Option<PersonDoc> = txn
+                    .create(Self::person_key(person.id))
+                    .content(Self::doc_from_person(person))
+                    .await
+                    .map_err(map_err)?;
+                if created.is_none() {
+                    return Err(StoreError::new(format!(
+                        "create_person returned empty for {}",
+                        person.id
+                    )));
+                }
+            }
+            if let Some(series) = &write.new_series {
+                let created: Option<SeriesDoc> = txn
+                    .create(Self::series_key(series.id))
+                    .content(SeriesDoc {
+                        title: series.title.clone(),
+                    })
+                    .await
+                    .map_err(map_err)?;
+                if created.is_none() {
+                    return Err(StoreError::new(format!(
+                        "create_series returned empty for {}",
+                        series.id
+                    )));
+                }
+            }
+            let created: Option<ResourceDoc> = txn
+                .create(Self::resource_key(id))
+                .content(Self::resource_doc_from(&resource))
+                .await
+                .map_err(map_err)?;
+            if created.is_none() {
+                return Err(StoreError::new(format!(
+                    "create_resource returned empty for {id}"
+                )));
+            }
+            Self::relate_creators_in_txn(&txn, id, &resource.creators).await?;
+            Ok(())
+        }
+        .await;
+
+        match persist {
+            Ok(()) => {
+                let _ = txn.commit().await.map_err(map_err)?;
+                Ok(resource)
+            }
+            Err(err) => {
+                let _ = txn.cancel().await;
                 Err(err)
             }
         }
@@ -1246,11 +1427,10 @@ impl Store for SurrealStore {
         // Bibliographic replace never clears the star.
         resource.favorite = existing_doc.favorite.unwrap_or(false);
 
-        self.db.query("BEGIN TRANSACTION").await.map_err(map_err)?;
+        let txn = self.db.clone().begin().await.map_err(map_err)?;
 
         let persist = async {
-            let updated: Option<ResourceDoc> = self
-                .db
+            let updated: Option<ResourceDoc> = txn
                 .update(Self::resource_key(id))
                 .content(Self::resource_doc_from(&resource))
                 .await
@@ -1263,23 +1443,24 @@ impl Store for SurrealStore {
 
             // Creators are replaced wholesale: the stale edges go before the
             // new list lands, so an update can never leave both behind.
-            self.db
-                .query("DELETE created WHERE out = $resource")
+            txn.query("DELETE created WHERE out = $resource")
                 .bind(("resource", Self::resource_key(id)))
                 .await
+                .map_err(map_err)?
+                .check()
                 .map_err(map_err)?;
-            self.relate_creators(id, &resource.creators).await?;
+            Self::relate_creators_in_txn(&txn, id, &resource.creators).await?;
             Ok(())
         }
         .await;
 
         match persist {
             Ok(()) => {
-                self.db.query("COMMIT TRANSACTION").await.map_err(map_err)?;
+                let _ = txn.commit().await.map_err(map_err)?;
                 Ok(resource)
             }
             Err(err) => {
-                let _ = self.db.query("CANCEL TRANSACTION").await;
+                let _ = txn.cancel().await;
                 Err(err)
             }
         }
