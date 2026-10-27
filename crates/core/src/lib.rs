@@ -3,6 +3,7 @@
 //! Ports and shared domain types. Application runtime lives in `oeuvre-app`.
 
 mod collection;
+mod import;
 mod person;
 mod resource;
 mod series;
@@ -12,6 +13,12 @@ mod tag;
 pub use collection::{
     Collection, CollectionId, CollectionTreeNode, build_collection_forest,
     collection_descendant_closure,
+};
+pub use import::{
+    codes as import_codes, DiagnosticSeverity, EntryProvenance, IMPORT_MAX_SOURCE_BYTES,
+    IMPORT_PARSER_VERSION, ImportDiagnostic, ImportDraft, ImportEntryDraft,
+    ImportEntryOutcomeKind, ImportFormat, ImportIssue, ImportReport, ImportTempId, ImportedEntry,
+    SourceProvenance, UnresolvedCreator,
 };
 pub use person::{Name, NameError, NameKey, NonEmptyStr, Person, PersonError, PersonId};
 pub use resource::{
