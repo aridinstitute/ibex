@@ -5,6 +5,7 @@
 mod collection;
 mod identifier;
 mod import;
+mod inheritance;
 mod pages;
 mod person;
 mod resource;
@@ -17,6 +18,11 @@ pub use collection::{
     collection_descendant_closure,
 };
 pub use identifier::{Identifier, deserialize_identifiers};
+pub use inheritance::{
+    Effective, EffectiveValues, InheritanceError, InheritableField, ValueOrigin,
+    INHERITANCE_MAX_DEPTH, fields_inherited_from, gather_ancestors, is_never_inherited,
+    never_inherited, resolve_effective,
+};
 pub use import::{
     codes as import_codes, DiagnosticSeverity, EntryProvenance, IMPORT_MAX_SOURCE_BYTES,
     IMPORT_PARSER_VERSION, ImportDiagnostic, ImportDraft, ImportEntryDraft,

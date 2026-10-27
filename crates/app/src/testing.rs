@@ -9,7 +9,7 @@ use oeuvre_core::{
     ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
     SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId, UtcMillis,
     build_collection_forest, collection_descendant_closure, creator_label_name,
-    format_creators_label, primary_creator_sort_key, published_label_from,
+    format_creators_label, primary_creator_sort_key, published_label_from, resolve_effective,
 };
 
 use crate::event::{EventSink, FinishedEvent};
@@ -75,6 +75,7 @@ impl PeopleState {
     }
 }
 
+#[derive(Clone)]
 struct ResourceRow {
     subtitle: Option<NonEmptyStr>,
     title_addon: Option<NonEmptyStr>,
@@ -116,6 +117,58 @@ struct ResourceRow {
     favorite: bool,
     date_added: UtcMillis,
     date_edited: UtcMillis,
+}
+
+impl ResourceRow {
+    /// Domain resource for inheritance resolution (creators omitted).
+    fn to_resource(&self, id: ResourceId) -> Result<Resource, StoreError> {
+        let mut resource = Resource::from_stored(
+            id,
+            self.kind,
+            self.title.clone(),
+            vec![],
+            self.publisher.clone(),
+            self.published.clone(),
+            self.accessed.clone(),
+            self.parent_id,
+            self.series_id,
+            self.series_number.clone(),
+            self.tag_ids.clone(),
+            self.collection_ids.clone(),
+            self.metadata.clone(),
+            self.favorite,
+            self.date_added,
+            self.date_edited,
+        )
+        .map_err(StoreError::from)?;
+        resource.subtitle = self.subtitle.clone();
+        resource.title_addon = self.title_addon.clone();
+        resource.short_title = self.short_title.clone();
+        resource.place = self.place.clone();
+        resource.volume = self.volume.clone();
+        resource.issue = self.issue.clone();
+        resource.pages = self.pages.clone();
+        resource.total_pages = self.total_pages.clone();
+        resource.article_number = self.article_number.clone();
+        resource.edition = self.edition.clone();
+        resource.doi = self.doi.clone();
+        resource.url = self.url.clone();
+        resource.eprint = self.eprint.clone();
+        resource.isbns = self.isbns.clone();
+        resource.issns = self.issns.clone();
+        resource.isrns = self.isrns.clone();
+        resource.original_date = self.original_date.clone();
+        resource.event_date = self.event_date.clone();
+        resource.language = self.language.clone();
+        resource.document_type = self.document_type.clone();
+        resource.publication_method = self.publication_method.clone();
+        resource.institution = self.institution.clone();
+        resource.organization = self.organization.clone();
+        resource.school = self.school.clone();
+        resource.abstract_text = self.abstract_text.clone();
+        resource.keywords = self.keywords.clone();
+        Ok(resource)
+    }
 }
 
 struct CreatedEdge {
@@ -243,38 +296,33 @@ impl MemoryStore {
                 })
                 .collect::<Result<Vec<_>, StoreError>>()?;
 
-            let container_title = match row.parent_id {
-                Some(parent_id) => match resources.get(&parent_id) {
-                    Some(parent) if parent.kind == ResourceKind::Issue => row
-                        .metadata
-                        .venue
-                        .as_ref()
-                        .and_then(|v| NonEmptyStr::try_new(v).ok())
-                        .or_else(|| {
-                            parent
-                                .parent_id
-                                .and_then(|jid| resources.get(&jid))
-                                .map(|j| j.title.clone())
-                        })
-                        .or_else(|| Some(parent.title.clone())),
-                    Some(parent) => Some(parent.title.clone()),
-                    None => None,
-                },
-                None => row
-                    .metadata
-                    .venue
-                    .as_ref()
-                    .and_then(|v| NonEmptyStr::try_new(v).ok()),
-            };
+            let child = row.to_resource(*id)?;
+            let mut ancestor_buf: Vec<Resource> = Vec::new();
+            let mut next = child.parent_id;
+            while let Some(parent_id) = next {
+                if ancestor_buf.len() >= oeuvre_core::INHERITANCE_MAX_DEPTH {
+                    return Err(StoreError::invalid("inheritance depth exceeded"));
+                }
+                let Some(parent_row) = resources.get(&parent_id) else {
+                    return Err(StoreError::invalid(format!(
+                        "expected parent {parent_id} missing"
+                    )));
+                };
+                let parent = parent_row.to_resource(parent_id)?;
+                next = parent.parent_id;
+                ancestor_buf.push(parent);
+            }
+            let effective = resolve_effective(&child, &ancestor_buf)
+                .map_err(|e| StoreError::invalid(e.to_string()))?;
 
             summaries.push(ResourceSummary {
                 id: *id,
                 kind: row.kind,
                 title: row.title.clone(),
                 creators_label: format_creators_label(&names),
-                published_label: published_label_from(row.published.as_ref()),
-                publisher: row.publisher.clone(),
-                container_title,
+                published_label: published_label_from(effective.published.value.as_ref()),
+                publisher: effective.publisher.value,
+                container_title: effective.container_title.value,
                 date_added: row.date_added,
                 date_edited: row.date_edited,
             });
