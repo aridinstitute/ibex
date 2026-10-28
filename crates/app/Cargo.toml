@@ -22,4 +22,10 @@ biblatex = { workspace = true }
 time = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 tokio = { workspace = true }
+
+[[bench]]
+name = "import_pipeline"
+harness = false
+required-features = ["testing"]
