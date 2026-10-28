@@ -288,6 +288,10 @@ struct ContainerTitleRow {
     id: RecordId,
     #[surreal(wrap)]
     title: NonEmptyStr,
+    #[surreal(wrap)]
+    kind: ResourceKind,
+    #[surreal(default)]
+    parent: Option<RecordId>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -1024,13 +1028,20 @@ impl SurrealStore {
         }
 
         let mut title_by_id: HashMap<ResourceId, NonEmptyStr> = HashMap::with_capacity(rows.len());
+        let mut kind_by_id: HashMap<ResourceId, ResourceKind> = HashMap::with_capacity(rows.len());
+        let mut parent_of: HashMap<ResourceId, ResourceId> = HashMap::new();
         for (row, id) in rows.iter().zip(&ids) {
             title_by_id.insert(*id, row.title.clone());
+            kind_by_id.insert(*id, row.kind);
+            if let Some(parent) = &row.parent {
+                parent_of.insert(*id, Self::thing_to_resource_id(parent)?);
+            }
         }
 
         // Parents usually live outside the page (they must exist before their
         // children), so resolve container titles the page itself missed with
-        // one follow-up query.
+        // one follow-up query. Include kind/parent so Issue rows can surface
+        // the journal name until Task 05 inheritance.
         let mut missing: Vec<ResourceId> = Vec::new();
         for row in &rows {
             if let Some(parent) = &row.parent {
@@ -1045,13 +1056,44 @@ impl SurrealStore {
                 missing.iter().map(|id| Self::resource_key(*id)).collect();
             let mut response = self
                 .db
-                .query("SELECT id, title FROM resource WHERE id IN $ids")
+                .query("SELECT id, title, kind, parent FROM resource WHERE id IN $ids")
                 .bind(("ids", parent_things))
                 .await
                 .map_err(map_err)?;
             let title_rows: Vec<ContainerTitleRow> = response.take(0).map_err(map_err)?;
+            let mut grandparents: Vec<ResourceId> = Vec::new();
             for title_row in title_rows {
-                title_by_id.insert(Self::thing_to_resource_id(&title_row.id)?, title_row.title);
+                let id = Self::thing_to_resource_id(&title_row.id)?;
+                title_by_id.insert(id, title_row.title);
+                kind_by_id.insert(id, title_row.kind);
+                if let Some(parent) = title_row.parent {
+                    let parent_id = Self::thing_to_resource_id(&parent)?;
+                    parent_of.insert(id, parent_id);
+                    if title_row.kind == ResourceKind::Issue
+                        && !title_by_id.contains_key(&parent_id)
+                        && !grandparents.contains(&parent_id)
+                    {
+                        grandparents.push(parent_id);
+                    }
+                }
+            }
+            if !grandparents.is_empty() {
+                let gp_things: Vec<RecordId> = grandparents
+                    .iter()
+                    .map(|id| Self::resource_key(*id))
+                    .collect();
+                let mut response = self
+                    .db
+                    .query("SELECT id, title, kind, parent FROM resource WHERE id IN $ids")
+                    .bind(("ids", gp_things))
+                    .await
+                    .map_err(map_err)?;
+                let gp_rows: Vec<ContainerTitleRow> = response.take(0).map_err(map_err)?;
+                for title_row in gp_rows {
+                    let id = Self::thing_to_resource_id(&title_row.id)?;
+                    title_by_id.insert(id, title_row.title);
+                    kind_by_id.insert(id, title_row.kind);
+                }
             }
         }
 
@@ -1066,7 +1108,19 @@ impl SurrealStore {
             let container_title = match row.parent {
                 Some(ref thing) => {
                     let parent_id = Self::thing_to_resource_id(thing)?;
-                    title_by_id.get(&parent_id).cloned()
+                    if kind_by_id.get(&parent_id) == Some(&ResourceKind::Issue) {
+                        row.venue
+                            .as_ref()
+                            .and_then(|v| NonEmptyStr::try_new(v).ok())
+                            .or_else(|| {
+                                parent_of
+                                    .get(&parent_id)
+                                    .and_then(|jid| title_by_id.get(jid).cloned())
+                            })
+                            .or_else(|| title_by_id.get(&parent_id).cloned())
+                    } else {
+                        title_by_id.get(&parent_id).cloned()
+                    }
                 }
                 None => row
                     .venue
@@ -1527,6 +1581,19 @@ impl Store for SurrealStore {
                     return Err(StoreError::new(format!(
                         "create_series returned empty for {}",
                         series.id
+                    )));
+                }
+            }
+            for dep in &write.new_dependencies {
+                let created: Option<ResourceDoc> = txn
+                    .create(Self::resource_key(dep.id))
+                    .content(Self::resource_doc_from(dep))
+                    .await
+                    .map_err(map_err)?;
+                if created.is_none() {
+                    return Err(StoreError::new(format!(
+                        "create_resource returned empty for {}",
+                        dep.id
                     )));
                 }
             }

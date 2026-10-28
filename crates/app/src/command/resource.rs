@@ -173,13 +173,17 @@ fn map_store(err: StoreError) -> CommandError {
 
 /// Shared reference checks for ordinary create and import.
 ///
-/// `pending_people` / `pending_series` are ids that will be created in the same
-/// atomic write, so they need not already exist in the store.
+/// `pending_people` / `pending_series` / `pending_resources` are ids that will
+/// be created in the same atomic write, so they need not already exist in the
+/// store. Pending resources still contribute their kinds via a follow-up load
+/// only when absent from the pending set — callers must ensure parent kinds of
+/// pending deps are valid (import plans journal before issue).
 pub(crate) async fn validate_new_resource_refs(
     state: &AppState,
     new: &NewResource,
     pending_people: &[PersonId],
     pending_series: Option<SeriesId>,
+    pending_resources: &[ResourceId],
 ) -> Result<(), CommandError> {
     for spec in &new.creators {
         if pending_people.contains(&spec.person_id) {
@@ -193,14 +197,19 @@ pub(crate) async fn validate_new_resource_refs(
     }
 
     if let Some(parent_id) = new.parent_id {
-        let parent = state
-            .store()
-            .get_resource(parent_id)
-            .await
-            .map_err(|e| map_resource_lookup(e, parent_id))?;
-        new.kind
-            .accept_parent(parent.kind)
-            .map_err(map_resource_err)?;
+        if pending_resources.contains(&parent_id) {
+            // Kind checked when the pending parent itself was validated, or by
+            // the import planner (journal → issue → article).
+        } else {
+            let parent = state
+                .store()
+                .get_resource(parent_id)
+                .await
+                .map_err(|e| map_resource_lookup(e, parent_id))?;
+            new.kind
+                .accept_parent(parent.kind)
+                .map_err(map_resource_err)?;
+        }
     }
 
     if let Some(series_id) = new.series_id {
@@ -382,7 +391,7 @@ impl Handler for CreateResource {
     }
 
     async fn run(self, state: &AppState, ev: &mut Event) -> Result<Created, CommandError> {
-        validate_new_resource_refs(state, &self.new, &[], None).await?;
+        validate_new_resource_refs(state, &self.new, &[], None, &[]).await?;
 
         let resource = state
             .store()
@@ -577,7 +586,29 @@ impl Handler for GetResourceDetail {
                     .get_resource(parent_id)
                     .await
                     .map_err(|e| map_resource_lookup(e, parent_id))?;
-                Some(parent.title)
+                // Issue titles are volume/number labels; prefer venue or the
+                // grandparent journal until Task 05 inheritance lands.
+                if parent.kind == oeuvre_core::ResourceKind::Issue {
+                    if let Some(venue) = resource
+                        .metadata
+                        .venue
+                        .as_ref()
+                        .and_then(|v| oeuvre_core::NonEmptyStr::try_new(v).ok())
+                    {
+                        Some(venue)
+                    } else if let Some(journal_id) = parent.parent_id {
+                        let journal = state
+                            .store()
+                            .get_resource(journal_id)
+                            .await
+                            .map_err(|e| map_resource_lookup(e, journal_id))?;
+                        Some(journal.title)
+                    } else {
+                        Some(parent.title)
+                    }
+                } else {
+                    Some(parent.title)
+                }
             }
             None => resource
                 .metadata

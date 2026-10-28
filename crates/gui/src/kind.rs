@@ -91,6 +91,7 @@ pub fn kind_icon(kind: ResourceKind) -> IconName {
         ResourceKind::BlogPost => IconName::PenLine,
         ResourceKind::PodcastEpisode => IconName::Mic,
         ResourceKind::Journal => IconName::NotebookText,
+        ResourceKind::Issue => IconName::BookOpenText,
         ResourceKind::Podcast => IconName::Radio,
         ResourceKind::Blog => IconName::Rss,
     }
@@ -116,6 +117,7 @@ pub fn kind_symbol(kind: ResourceKind) -> gpui_kit::component::Icon {
         ResourceKind::BlogPost => "square.and.pencil",
         ResourceKind::PodcastEpisode => "mic",
         ResourceKind::Journal => "text.book.closed",
+        ResourceKind::Issue => "book.pages",
         ResourceKind::Podcast => "dot.radiowaves.left.and.right",
         ResourceKind::Blog => "antenna.radiowaves.left.and.right",
     };
@@ -161,7 +163,9 @@ pub fn kind_family(kind: ResourceKind) -> KindFamily {
         ResourceKind::Webpage | ResourceKind::BlogPost => KindFamily::Web,
         ResourceKind::PodcastEpisode => KindFamily::Audio,
         ResourceKind::Dataset | ResourceKind::ComputerProgram => KindFamily::Data,
-        ResourceKind::Journal | ResourceKind::Podcast | ResourceKind::Blog => KindFamily::Serial,
+        ResourceKind::Journal | ResourceKind::Issue | ResourceKind::Podcast | ResourceKind::Blog => {
+            KindFamily::Serial
+        }
     }
 }
 
@@ -197,7 +201,7 @@ mod tests {
     use gpui_kit::Rgba;
 
     /// Every kind, so the family and color tables are checked exhaustively.
-    const ALL_KINDS: [ResourceKind; 20] = [
+    const ALL_KINDS: [ResourceKind; 21] = [
         ResourceKind::Book,
         ResourceKind::JournalArticle,
         ResourceKind::BookSection,
@@ -216,6 +220,7 @@ mod tests {
         ResourceKind::BlogPost,
         ResourceKind::PodcastEpisode,
         ResourceKind::Journal,
+        ResourceKind::Issue,
         ResourceKind::Podcast,
         ResourceKind::Blog,
     ];

@@ -4,6 +4,7 @@
 //! [`save_draft`] owns entity matching and persistence for every format.
 
 mod biblatex;
+mod link;
 mod save;
 
 pub use biblatex::{ParseError, parse_biblatex};

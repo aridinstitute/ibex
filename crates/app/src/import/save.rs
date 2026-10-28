@@ -1,15 +1,20 @@
-//! Shared import orchestration: resolve people/series and persist drafts.
+//! Shared import orchestration: resolve people/series/containers and persist drafts.
 
 use std::collections::HashMap;
 
 use oeuvre_core::{
     CreatorRole, CreatorSpec, ImportedEntry, ImportedResourceWrite, ImportDraft, ImportIssue,
-    ImportReport, Name, NewSeries, NonEmptyStr, Person, PersonId, Series, SeriesId, import_codes,
+    ImportReport, Name, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceId,
+    ResourceKind, Series, SeriesId, import_codes,
 };
 
 use crate::command::resource::validate_new_resource_refs;
 use crate::event::{self, Event};
 use crate::{AppState, CommandError};
+
+use super::link::{
+    ContainerDecision, ImportEntityIndex, plan_parent_for_entry, resolve_explicit_container,
+};
 
 /// Resolve entities in `draft` and persist through the shared store path.
 pub async fn save_draft(
@@ -45,25 +50,54 @@ pub(crate) async fn save_draft_inner(
         }
     }
 
+    let mut index = ImportEntityIndex::default();
+    seed_index_from_store(state, &mut index).await?;
+
     let mut series = HashMap::<String, SeriesId>::new();
     for entry in draft.entries {
         let entry_key = entry.provenance.source_key.clone();
         let had_reference_fields = entry.had_reference_fields;
+        let had_xdata = entry.had_xdata;
         if let Some(ev) = ev.as_mut() {
             ev.set(event::IMPORT_ENTRY_KEY, entry_key.clone());
         }
+
+        // Explicit journal/book entries may already exist as inferred containers.
+        if let Some(decision) = resolve_explicit_container(&entry, &mut index)? {
+            match decision {
+                ContainerDecision::Reuse(id) => {
+                    index.by_citekey.insert(entry_key.clone(), id);
+                    report.reused.push(ImportedEntry {
+                        entry_key: entry_key.clone(),
+                        resource_id: id,
+                    });
+                    // Still attach series if the reused book needs it? Skip — already committed.
+                    continue;
+                }
+                ContainerDecision::Conflict(issue) => {
+                    report.conflicted.push(issue);
+                    continue;
+                }
+                ContainerDecision::Create(_) => {
+                    // Fall through to normal create using the entry's own fields.
+                }
+            }
+        }
+
         let names: Vec<_> = entry
             .unresolved_creators
-            .into_iter()
-            .map(|c| (c.role, c.name))
+            .iter()
+            .map(|c| (c.role, c.name.clone()))
             .collect();
+        let publication_refs = entry.publication_ref_keys.clone();
         let result = async {
             let (new_people, creators) = plan_creators(state, names).await?;
-            let mut new = entry.resource;
+            let mut new = entry.resource.clone();
             new.creators = creators;
+
             let mut new_series = None;
             let mut planned_series_title = None;
-            if let Some(title) = entry.series_title {
+            if let Some(title) = entry.series_title.clone() {
                 let id = if let Some(id) = series.get(&title) {
                     *id
                 } else {
@@ -80,41 +114,93 @@ pub(crate) async fn save_draft_inner(
                     id
                 };
                 new.series_id = Some(id);
-                new.series_number = entry.series_number;
+                new.series_number = entry.series_number.clone();
             }
+
+            let parent_plan = plan_parent_for_entry(&entry, &mut index)?;
+            for conflict in parent_plan.conflicts {
+                // Surface conflicts without inventing a parent link.
+                return Ok(EntrySave::Conflicted(conflict));
+            }
+            new.parent_id = parent_plan.parent_id;
+            let new_dependencies = parent_plan.new_dependencies;
+            let linked = parent_plan.linked;
+
             let pending_people: Vec<PersonId> =
                 new_people.iter().map(|person| person.id).collect();
             let pending_series = new_series.as_ref().map(|s| s.id);
-            validate_new_resource_refs(state, &new, &pending_people, pending_series).await?;
+            let pending_resources: Vec<ResourceId> =
+                new_dependencies.iter().map(|r| r.id).collect();
+            // Validate deps (issue→journal) then child.
+            for dep in &new_dependencies {
+                validate_new_resource_refs(
+                    state,
+                    &dep.to_new(),
+                    &[],
+                    None,
+                    &pending_resources,
+                )
+                .await?;
+            }
+            validate_new_resource_refs(
+                state,
+                &new,
+                &pending_people,
+                pending_series,
+                &pending_resources,
+            )
+            .await?;
+
             let resource = state
                 .store()
                 .create_imported_resource(ImportedResourceWrite {
                     new_people,
                     new_series,
+                    new_dependencies,
                     resource: new,
                 })
                 .await?;
             if let (Some(title), Some(series_id)) = (planned_series_title, resource.series_id) {
                 series.insert(title, series_id);
             }
-            Ok::<_, CommandError>(resource)
+            Ok(EntrySave::Imported {
+                resource,
+                linked,
+                had_reference_fields,
+                had_xdata,
+                publication_refs,
+            })
         }
         .await;
+
         match result {
-            Ok(resource) => {
+            Ok(EntrySave::Imported {
+                resource,
+                linked,
+                had_reference_fields,
+                had_xdata,
+                publication_refs,
+            }) => {
+                index.register_committed(&entry_key, &resource);
                 report.imported.push(ImportedEntry {
                     entry_key: entry_key.clone(),
                     resource_id: resource.id,
                 });
-                if had_reference_fields {
+                if had_reference_fields && !linked {
+                    // xdata-only, or unresolved publication refs.
+                    let message = if had_xdata && publication_refs.is_empty() {
+                        "xdata metadata was resolved/preserved; xdata is not a parent-resource link"
+                    } else {
+                        "Reference metadata was resolved/preserved; no parent-resource link was created"
+                    };
                     report.warnings.push(
-                        ImportIssue::new(
-                            Some(entry_key),
-                            "Reference metadata was resolved/preserved; no parent-resource link was created",
-                        )
-                        .with_code(import_codes::REFERENCE_NO_PARENT_LINK),
+                        ImportIssue::new(Some(entry_key), message)
+                            .with_code(import_codes::REFERENCE_NO_PARENT_LINK),
                     );
                 }
+            }
+            Ok(EntrySave::Conflicted(issue)) => {
+                report.conflicted.push(issue);
             }
             Err(CommandError::Invalid(message)) => {
                 let code = if message.starts_with("ambiguous creator") {
@@ -137,6 +223,36 @@ pub(crate) async fn save_draft_inner(
         }
     }
     Ok(report)
+}
+
+enum EntrySave {
+    Imported {
+        resource: Resource,
+        linked: bool,
+        had_reference_fields: bool,
+        had_xdata: bool,
+        publication_refs: Vec<String>,
+    },
+    Conflicted(ImportIssue),
+}
+
+async fn seed_index_from_store(
+    state: &AppState,
+    index: &mut ImportEntityIndex,
+) -> Result<(), CommandError> {
+    let rows = state.store().list_resources().await?;
+    let mut details = Vec::new();
+    for row in &rows {
+        if matches!(
+            row.kind,
+            ResourceKind::Journal | ResourceKind::Issue | ResourceKind::Book
+        ) {
+            let resource = state.store().get_resource(row.id).await?;
+            details.push((row.id, resource));
+        }
+    }
+    index.seed_from_store(&rows, &details);
+    Ok(())
 }
 
 /// Resolve creator names to existing people or newly planned [`Person`] rows.

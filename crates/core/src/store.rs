@@ -6,15 +6,22 @@ use crate::{
     ResourceQuery, ResourceSummary, Series, SeriesId, SortedResourcePage, Tag, TagId,
 };
 
-/// One imported resource together with people/series that must be created with it.
+/// One imported resource together with people/series/containers that must be
+/// created with it.
 ///
-/// Existing people and series are referenced by id only and are neither created
-/// nor deleted. Callers allocate ids for [`Self::new_people`] /
-/// [`Self::new_series`] up front so [`Self::resource`] can point at them.
+/// Existing people, series, and resources are referenced by id only and are
+/// neither created nor deleted. Callers allocate ids for [`Self::new_people`] /
+/// [`Self::new_series`] / [`Self::new_dependencies`] up front so
+/// [`Self::resource`] (and nested dependency parents) can point at them.
+///
+/// [`Self::new_dependencies`] are persisted in order before the main resource
+/// (parents before children). On failure, none of the new rows or edges remain.
 #[derive(Debug, Clone)]
 pub struct ImportedResourceWrite {
     pub new_people: Vec<Person>,
     pub new_series: Option<Series>,
+    /// Newly required containers (journal, issue, book, …), parents first.
+    pub new_dependencies: Vec<Resource>,
     pub resource: NewResource,
 }
 
@@ -123,11 +130,13 @@ pub trait Store: Send + Sync + 'static {
     /// (`CreateResource`) does that before invoke.
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError>;
 
-    /// Persist one imported resource and the people/series newly required for it
-    /// as a single atomic unit. On failure, none of those new rows or edges remain.
+    /// Persist one imported resource and the people/series/containers newly
+    /// required for it as a single atomic unit. On failure, none of those new
+    /// rows or edges remain.
     ///
     /// Shared entities already in the store (referenced but not listed in
-    /// [`ImportedResourceWrite::new_people`] / `new_series`) are left untouched.
+    /// [`ImportedResourceWrite::new_people`] / `new_series` /
+    /// `new_dependencies`) are left untouched.
     /// Does **not** validate parent kind — the import/command layer does that.
     async fn create_imported_resource(
         &self,

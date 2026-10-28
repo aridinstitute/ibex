@@ -247,6 +247,7 @@ async fn imported_resource_write_rolls_back_new_deps_and_keeps_shared() {
         .create_imported_resource(ImportedResourceWrite {
             new_people: vec![new_person.clone()],
             new_series: Some(new_series.clone()),
+            new_dependencies: vec![],
             resource: NewResource {
                 kind: ResourceKind::Book,
                 title: NonEmptyStr::try_new("Failed unit").unwrap(),
