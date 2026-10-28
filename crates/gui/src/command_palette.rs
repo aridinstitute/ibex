@@ -17,12 +17,25 @@ pub enum PaletteRequest {
     /// Resource, additions, removals (relative to the opening snapshot).
     EditTags(ResourceId, Vec<TagId>, Vec<TagId>),
     EditCollections(ResourceId, Vec<CollectionId>, Vec<CollectionId>),
+    /// Targets, memberships to add to all, memberships to remove from all.
+    EditTagsBulk(Vec<ResourceId>, Vec<TagId>, Vec<TagId>),
+    EditCollectionsBulk(Vec<ResourceId>, Vec<CollectionId>, Vec<CollectionId>),
 }
 
 impl PaletteRequest {
     pub fn resource_id(&self) -> ResourceId {
         match self {
             Self::EditTags(id, _, _) | Self::EditCollections(id, _, _) => *id,
+            Self::EditTagsBulk(ids, _, _) | Self::EditCollectionsBulk(ids, _, _) => {
+                *ids.first().expect("bulk requests require a target")
+            }
+        }
+    }
+
+    pub fn resource_ids(&self) -> Vec<ResourceId> {
+        match self {
+            Self::EditTags(id, _, _) | Self::EditCollections(id, _, _) => vec![*id],
+            Self::EditTagsBulk(ids, _, _) | Self::EditCollectionsBulk(ids, _, _) => ids.clone(),
         }
     }
 }
@@ -41,7 +54,7 @@ pub struct CommandPalette {
     state: Entity<InputState>,
     highlighted: Option<usize>,
     scroll: ScrollHandle,
-    target: Option<ResourceId>,
+    targets: Vec<ResourceId>,
     title: String,
     screen: Screen,
     tags: Vec<Tag>,
@@ -50,9 +63,16 @@ pub struct CommandPalette {
     existing_collections: HashSet<CollectionId>,
     selected_tags: HashSet<TagId>,
     selected_collections: HashSet<CollectionId>,
+    // Existing/selected contain the union; unresolved mixed rows are not edits.
+    original_mixed_tags: HashSet<TagId>,
+    original_mixed_collections: HashSet<CollectionId>,
+    mixed_tags: HashSet<TagId>,
+    mixed_collections: HashSet<CollectionId>,
     ready: bool,
     grouped: bool,
     saving: bool,
+    // A partially persisted draft may only be retried unchanged or dismissed.
+    submitted: bool,
     error: Option<String>,
 }
 
@@ -66,6 +86,17 @@ impl CommandPalette {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_for_targets(target.into_iter().collect(), grouped, window, cx)
+    }
+
+    pub fn new_for_targets(
+        mut targets: Vec<ResourceId>,
+        grouped: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut seen = HashSet::new();
+        targets.retain(|id| seen.insert(*id));
         ensure_palette_bindings(cx);
         let state = cx.new(|cx| InputState::new(window, cx).placeholder("Type a command…"));
         cx.subscribe_in(&state, window, |this, _, event: &InputEvent, _, cx| {
@@ -80,23 +111,28 @@ impl CommandPalette {
             state,
             highlighted: Some(0),
             scroll: ScrollHandle::new(),
-            target,
-            title: if target.is_some() {
+            title: if !targets.is_empty() {
                 "Loading resource…"
             } else {
                 "Select a resource to edit tags or collections"
             }
             .into(),
             screen: Screen::Commands,
+            targets,
             tags: Vec::new(),
             collections: Vec::new(),
             existing_tags: HashSet::new(),
             existing_collections: HashSet::new(),
             selected_tags: HashSet::new(),
             selected_collections: HashSet::new(),
+            original_mixed_tags: HashSet::new(),
+            original_mixed_collections: HashSet::new(),
+            mixed_tags: HashSet::new(),
+            mixed_collections: HashSet::new(),
             ready: false,
             grouped,
             saving: false,
+            submitted: false,
             error: None,
         }
     }
@@ -112,9 +148,60 @@ impl CommandPalette {
         collections: Vec<Collection>,
         cx: &mut Context<Self>,
     ) {
-        self.title = record.title.as_str().to_owned();
-        self.existing_tags = record.tag_ids.into_iter().collect();
-        self.existing_collections = record.collection_ids.into_iter().collect();
+        self.loaded_resources(vec![record], tags, collections, cx);
+    }
+
+    /// Load the complete opening snapshot; partial target loads cannot be edited.
+    pub fn loaded_resources(
+        &mut self,
+        resources: Vec<Resource>,
+        tags: Vec<Tag>,
+        collections: Vec<Collection>,
+        cx: &mut Context<Self>,
+    ) {
+        let records: Vec<_> = self
+            .targets
+            .iter()
+            .filter_map(|id| resources.iter().find(|resource| resource.id == *id))
+            .collect();
+        if records.is_empty() || records.len() != self.targets.len() {
+            self.ready = false;
+            self.failed("Unable to load all selected resources".into(), cx);
+            return;
+        }
+        self.title = if records.len() == 1 {
+            records[0].title.as_str().to_owned()
+        } else {
+            format!("{} resources selected", records.len())
+        };
+        self.existing_tags = records
+            .iter()
+            .flat_map(|record| record.tag_ids.iter().copied())
+            .collect();
+        self.existing_collections = records
+            .iter()
+            .flat_map(|record| record.collection_ids.iter().copied())
+            .collect();
+        self.original_mixed_tags = self
+            .existing_tags
+            .iter()
+            .copied()
+            .filter(|id| !records.iter().all(|record| record.tag_ids.contains(id)))
+            .collect();
+        self.original_mixed_collections = self
+            .existing_collections
+            .iter()
+            .copied()
+            .filter(|id| {
+                !records
+                    .iter()
+                    .all(|record| record.collection_ids.contains(id))
+            })
+            .collect();
+        self.mixed_tags = self.original_mixed_tags.clone();
+        self.mixed_collections = self.original_mixed_collections.clone();
+        self.error = None;
+        self.saving = false;
         self.selected_tags = self.existing_tags.clone();
         self.selected_collections = self.existing_collections.clone();
         self.tags = tags;
@@ -154,8 +241,9 @@ impl CommandPalette {
 
     fn option_disabled(&self, row: usize) -> bool {
         self.saving
+            || self.submitted
             || (!(self.screen == Screen::Commands && row == 2)
-                && (!self.ready || self.target.is_none()))
+                && (!self.ready || self.targets.is_empty()))
     }
 
     fn visible_options(&self, cx: &App) -> Vec<(usize, SharedString, bool)> {
@@ -173,8 +261,12 @@ impl CommandPalette {
                 .map(|(row, tag)| {
                     (
                         row,
-                        SharedString::from(tag.text.as_str().to_owned()),
-                        self.selected_tags.contains(&tag.id),
+                        SharedString::from(if self.mixed_tags.contains(&tag.id) {
+                            format!("{} (some)", tag.text.as_str())
+                        } else {
+                            tag.text.as_str().to_owned()
+                        }),
+                        self.selected_tags.contains(&tag.id) && !self.mixed_tags.contains(&tag.id),
                     )
                 })
                 .collect(),
@@ -185,8 +277,13 @@ impl CommandPalette {
                 .map(|(row, collection)| {
                     (
                         row,
-                        SharedString::from(collection.name.as_str().to_owned()),
-                        self.selected_collections.contains(&collection.id),
+                        SharedString::from(if self.mixed_collections.contains(&collection.id) {
+                            format!("{} (some)", collection.name.as_str())
+                        } else {
+                            collection.name.as_str().to_owned()
+                        }),
+                        self.selected_collections.contains(&collection.id)
+                            && !self.mixed_collections.contains(&collection.id),
                     )
                 })
                 .collect(),
@@ -225,7 +322,7 @@ impl CommandPalette {
         if self.saving {
             return;
         }
-        if self.screen == Screen::Commands {
+        if self.screen == Screen::Commands || self.submitted {
             window.close_dialog(cx);
         } else {
             self.navigate(Screen::Commands, window, cx);
@@ -245,6 +342,7 @@ impl CommandPalette {
             },
             Screen::Tags => {
                 if let Some(tag) = self.tags.get(row)
+                    && !self.mixed_tags.remove(&tag.id)
                     && !self.selected_tags.insert(tag.id)
                 {
                     self.selected_tags.remove(&tag.id);
@@ -252,6 +350,7 @@ impl CommandPalette {
             }
             Screen::Collections => {
                 if let Some(collection) = self.collections.get(row)
+                    && !self.mixed_collections.remove(&collection.id)
                     && !self.selected_collections.insert(collection.id)
                 {
                     self.selected_collections.remove(&collection.id);
@@ -264,19 +363,31 @@ impl CommandPalette {
     fn change_count(&self) -> usize {
         match self.screen {
             Screen::Commands => 0,
-            Screen::Tags => self
-                .selected_tags
-                .symmetric_difference(&self.existing_tags)
-                .count(),
-            Screen::Collections => self
-                .selected_collections
-                .symmetric_difference(&self.existing_collections)
-                .count(),
+            Screen::Tags => {
+                self.selected_tags
+                    .symmetric_difference(&self.existing_tags)
+                    .count()
+                    + self
+                        .original_mixed_tags
+                        .difference(&self.mixed_tags)
+                        .filter(|id| self.selected_tags.contains(id))
+                        .count()
+            }
+            Screen::Collections => {
+                self.selected_collections
+                    .symmetric_difference(&self.existing_collections)
+                    .count()
+                    + self
+                        .original_mixed_collections
+                        .difference(&self.mixed_collections)
+                        .filter(|id| self.selected_collections.contains(id))
+                        .count()
+            }
         }
     }
 
     fn apply(&mut self, cx: &mut Context<Self>) {
-        let Some(id) = self.target else {
+        let Some(&id) = self.targets.first() else {
             return;
         };
         if !self.ready || self.saving || self.change_count() == 0 {
@@ -289,7 +400,9 @@ impl CommandPalette {
                     .iter()
                     .filter(|tag| {
                         self.selected_tags.contains(&tag.id)
-                            && !self.existing_tags.contains(&tag.id)
+                            && (!self.existing_tags.contains(&tag.id)
+                                || (self.original_mixed_tags.contains(&tag.id)
+                                    && !self.mixed_tags.contains(&tag.id)))
                     })
                     .map(|tag| tag.id)
                     .collect(),
@@ -304,7 +417,9 @@ impl CommandPalette {
                     .iter()
                     .filter(|collection| {
                         self.selected_collections.contains(&collection.id)
-                            && !self.existing_collections.contains(&collection.id)
+                            && (!self.existing_collections.contains(&collection.id)
+                                || (self.original_mixed_collections.contains(&collection.id)
+                                    && !self.mixed_collections.contains(&collection.id)))
                     })
                     .map(|collection| collection.id)
                     .collect(),
@@ -315,7 +430,21 @@ impl CommandPalette {
             ),
             Screen::Commands => return,
         };
+        let request = if self.targets.len() > 1 {
+            match request {
+                PaletteRequest::EditTags(_, added, removed) => {
+                    PaletteRequest::EditTagsBulk(self.targets.clone(), added, removed)
+                }
+                PaletteRequest::EditCollections(_, added, removed) => {
+                    PaletteRequest::EditCollectionsBulk(self.targets.clone(), added, removed)
+                }
+                request => request,
+            }
+        } else {
+            request
+        };
         self.saving = true;
+        self.submitted = true;
         self.error = None;
         cx.emit(request);
         cx.notify();
@@ -363,6 +492,17 @@ impl CommandPalette {
     ) -> AnyElement {
         let disabled = self.option_disabled(row);
         let highlighted = self.highlighted == Some(row) && !disabled;
+        let mixed = match self.screen {
+            Screen::Tags => self
+                .tags
+                .get(row)
+                .is_some_and(|tag| self.mixed_tags.contains(&tag.id)),
+            Screen::Collections => self
+                .collections
+                .get(row)
+                .is_some_and(|collection| self.mixed_collections.contains(&collection.id)),
+            Screen::Commands => false,
+        };
         h_flex()
             .id(("palette-row", row))
             .test_support()
@@ -406,7 +546,8 @@ impl CommandPalette {
                     .justify_center()
                     .when(checked, |slot| {
                         slot.child(Icon::new(IconName::Check).size_3())
-                    }),
+                    })
+                    .when(mixed, |slot| slot.child("—")),
             )
             .into_any_element()
     }
@@ -415,7 +556,7 @@ impl CommandPalette {
 impl Render for CommandPalette {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let options = self.visible_options(cx);
-        let unavailable = !self.ready || self.saving || self.target.is_none();
+        let unavailable = !self.ready || self.saving || self.targets.is_empty();
         let heading = match self.screen {
             Screen::Commands => "Commands",
             Screen::Tags => "Commands / Edit tags",
@@ -515,14 +656,14 @@ impl Render for CommandPalette {
                         Button::new("palette-back")
                             .ghost()
                             .text_base()
-                            .label(if self.screen == Screen::Commands {
+                            .label(if self.screen == Screen::Commands || self.submitted {
                                 "Cancel"
                             } else {
                                 "Back"
                             })
                             .disabled(self.saving)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                if this.screen == Screen::Commands {
+                                if this.screen == Screen::Commands || this.submitted {
                                     window.close_dialog(cx);
                                 } else {
                                     this.navigate(Screen::Commands, window, cx);
@@ -534,7 +675,11 @@ impl Render for CommandPalette {
                             div()
                                 .text_base()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("↵ Toggle · ⌘↵ Apply"),
+                                .child(if self.submitted {
+                                    "⌘↵ Retry · Esc Cancel"
+                                } else {
+                                    "↵ Toggle · ⌘↵ Apply"
+                                }),
                         )
                         .child(
                             Button::new("palette-apply")
@@ -542,6 +687,8 @@ impl Render for CommandPalette {
                                 .text_base()
                                 .label(if self.saving {
                                     "Saving…".to_owned()
+                                } else if self.submitted {
+                                    "Retry".to_owned()
                                 } else {
                                     format!("Apply ({})", self.change_count())
                                 })
@@ -582,6 +729,15 @@ mod tests {
     }
 
     fn open(cx: &mut TestAppContext, selected: bool, loaded: bool) -> Fixture {
+        open_with_bulk(cx, selected, loaded, false)
+    }
+
+    fn open_with_bulk(
+        cx: &mut TestAppContext,
+        selected: bool,
+        loaded: bool,
+        bulk: bool,
+    ) -> Fixture {
         let tags: Vec<_> = ["Existing", "Methods", "Research"]
             .into_iter()
             .map(|text| Tag::try_new(TagId::generate(), NonEmptyStr::try_new(text).unwrap()))
@@ -598,7 +754,7 @@ mod tests {
         let tag_ids = tags.iter().map(|tag| tag.id).collect();
         let collection_ids = collections.iter().map(|collection| collection.id).collect();
         let id = ResourceId::generate();
-        let record = Resource::try_new(
+        let mut record = Resource::try_new(
             id,
             NewResource {
                 kind: ResourceKind::Book,
@@ -642,6 +798,14 @@ mod tests {
             },
         )
         .unwrap();
+        if bulk {
+            record.tag_ids.push(tags[2].id);
+            record.collection_ids.push(collections[2].id);
+        }
+        let mut second = record.clone();
+        second.id = ResourceId::generate();
+        second.tag_ids = vec![tags[2].id];
+        second.collection_ids = vec![collections[2].id];
         let requests = Rc::new(RefCell::new(Vec::new()));
         let sink = requests.clone();
         let (window, host) = cx.update(|cx| {
@@ -657,10 +821,22 @@ mod tests {
                 cx,
                 |window, cx| {
                     let palette = cx.new(|cx| {
-                        let mut palette =
-                            CommandPalette::new(selected.then_some(id), true, window, cx);
+                        let mut palette = if bulk {
+                            CommandPalette::new_for_targets(vec![id, second.id], true, window, cx)
+                        } else {
+                            CommandPalette::new(selected.then_some(id), true, window, cx)
+                        };
                         if loaded {
-                            palette.loaded(record, tags, collections, cx);
+                            if bulk {
+                                palette.loaded_resources(
+                                    vec![record, second],
+                                    tags,
+                                    collections,
+                                    cx,
+                                );
+                            } else {
+                                palette.loaded(record, tags, collections, cx);
+                            }
                         }
                         palette
                     });
@@ -704,6 +880,184 @@ mod tests {
         }
     }
 
+    #[gpui_kit::test]
+    fn bulk_editors_preserve_untouched_mixed_membership(cx: &mut TestAppContext) {
+        for collections in [false, true] {
+            let f = open_with_bulk(cx, true, true, true);
+            cx.update_window(f.window, |_, window, cx| {
+                if collections {
+                    window.press("down", cx);
+                }
+                window.press("enter", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(f.window, |_, window, cx| {
+                assert_eq!(f.palette.read(cx).change_count(), 0);
+                assert!(
+                    f.palette.read(cx).visible_options(cx)[0]
+                        .1
+                        .contains("(some)")
+                );
+                window.click("palette-apply", cx);
+                window.press("cmd-enter", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            assert!(f.requests.borrow().is_empty());
+            cx.update_window(f.window, |_, window, cx| {
+                window.click(("palette-row", 1usize), cx)
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(f.window, |_, window, cx| window.click("palette-apply", cx))
+                .unwrap();
+            cx.run_until_parked();
+            let requests = f.requests.borrow();
+            if collections {
+                assert!(
+                    matches!(&requests[..], [PaletteRequest::EditCollectionsBulk(ids, added, removed)]
+                if ids.len() == 2 && added == &vec![f.collections[1]] && removed.is_empty())
+                );
+            } else {
+                assert!(
+                    matches!(&requests[..], [PaletteRequest::EditTagsBulk(ids, added, removed)]
+                if ids.len() == 2 && added == &vec![f.tags[1]] && removed.is_empty())
+                );
+            }
+            assert_eq!(requests[0].resource_ids().len(), 2);
+            assert_eq!(requests[0].resource_id(), requests[0].resource_ids()[0]);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn bulk_mixed_rows_resolve_to_all_then_none(cx: &mut TestAppContext) {
+        for collections in [false, true] {
+            for remove in [false, true] {
+                let f = open_with_bulk(cx, true, true, true);
+                cx.update_window(f.window, |_, window, cx| {
+                    if collections {
+                        window.press("down", cx);
+                    }
+                    window.press("enter", cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+                cx.update_window(f.window, |_, window, cx| {
+                    let options = f.palette.read(cx).visible_options(cx);
+                    assert!(options[0].1.contains("(some)"));
+                    assert!(!options[1].2);
+                    assert!(options[2].2);
+                    assert_eq!(f.palette.read(cx).change_count(), 0);
+                    window.click(("palette-row", 0usize), cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+                cx.update_window(f.window, |_, window, cx| {
+                    let options = f.palette.read(cx).visible_options(cx);
+                    assert!(!options[0].1.contains("(some)"));
+                    assert!(options[0].2);
+                    assert_eq!(f.palette.read(cx).change_count(), 1);
+                    if remove {
+                        window.press("enter", cx);
+                    }
+                })
+                .unwrap();
+                cx.run_until_parked();
+                // None/all rows still revert to no change after two toggles.
+                for row in [1usize, 2] {
+                    for _ in 0..2 {
+                        cx.update_window(f.window, |_, window, cx| {
+                            window.click(("palette-row", row), cx);
+                        })
+                        .unwrap();
+                        cx.run_until_parked();
+                    }
+                }
+                cx.update_window(f.window, |_, window, cx| {
+                    assert_eq!(f.palette.read(cx).change_count(), 1);
+                    assert_eq!(f.palette.read(cx).visible_options(cx)[0].2, !remove);
+                    window.press("cmd-enter", cx);
+                })
+                .unwrap();
+                cx.run_until_parked();
+                let requests = f.requests.borrow();
+                assert_eq!(requests.len(), 1);
+                match &requests[0] {
+                    PaletteRequest::EditTagsBulk(ids, added, removed) if !collections => {
+                        assert_eq!(ids.len(), 2);
+                        assert_eq!(added, &if remove { vec![] } else { vec![f.tags[0]] });
+                        assert_eq!(removed, &if remove { vec![f.tags[0]] } else { vec![] });
+                    }
+                    PaletteRequest::EditCollectionsBulk(ids, added, removed) if collections => {
+                        assert_eq!(ids.len(), 2);
+                        assert_eq!(
+                            added,
+                            &if remove {
+                                vec![]
+                            } else {
+                                vec![f.collections[0]]
+                            }
+                        );
+                        assert_eq!(
+                            removed,
+                            &if remove {
+                                vec![f.collections[0]]
+                            } else {
+                                vec![]
+                            }
+                        );
+                    }
+                    request => panic!("unexpected request: {request:?}"),
+                }
+            }
+        }
+    }
+
+    #[gpui_kit::test]
+    fn grouping_remains_available_without_loaded_targets(cx: &mut TestAppContext) {
+        let f = open(cx, false, false);
+        let toggles = Rc::new(RefCell::new(0));
+        let sink = toggles.clone();
+        cx.update_window(f.window, |_, window, cx| {
+            f.palette.update(cx, |_, cx| {
+                cx.subscribe(
+                    &f.palette,
+                    move |_, _, _: &super::ToggleResourceGrouping, _| {
+                        *sink.borrow_mut() += 1;
+                    },
+                )
+                .detach();
+            });
+            window.input("group", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.window, |_, window, cx| window.press("enter", cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(*toggles.borrow(), 1);
+        assert!(f.requests.borrow().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn incomplete_bulk_snapshot_disables_editing(cx: &mut TestAppContext) {
+        let f = open_with_bulk(cx, true, true, true);
+        cx.update_window(f.window, |_, window, cx| {
+            f.palette.update(cx, |palette, cx| {
+                palette.loaded_resources(vec![], vec![], vec![], cx);
+            });
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.window, |_, _, cx| {
+            assert!(!f.palette.read(cx).ready);
+            assert!(f.palette.read(cx).screen == Screen::Commands);
+        })
+        .unwrap();
+        assert!(f.requests.borrow().is_empty());
+    }
     #[gpui_kit::test]
     fn nested_tags_search_toggle_and_apply(cx: &mut TestAppContext) {
         let f = open(cx, true, true);
@@ -856,6 +1210,12 @@ mod tests {
                 palette.failed("Save failed; try again".into(), cx)
             });
             window.render_frame(cx);
+            window.press("enter", cx);
+            assert_eq!(
+                f.palette.read(cx).change_count(),
+                1,
+                "failed saves must only retry the unchanged draft"
+            );
             assert_eq!(f.palette.read(cx).change_count(), 1);
             window.click("palette-apply", cx);
         })

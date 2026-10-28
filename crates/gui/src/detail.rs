@@ -1,5 +1,6 @@
 //! Right-side detail panel: identity and actions above a labelled metadata list.
 
+use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::description_list::{DescriptionItem, DescriptionList};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -27,6 +28,8 @@ pub enum DetailFetch {
 pub enum DetailView<'a> {
     /// No row is selected.
     Empty,
+    /// Multi-selection shows its scope rather than one resource's fields.
+    Multiple(usize),
     Loading,
     Failed(&'a str),
     Fields(&'a ResourceDetail),
@@ -214,6 +217,17 @@ pub fn render_panel(
     let danger = cx.theme().danger;
 
     let content: AnyElement = match view {
+        DetailView::Multiple(count) => {
+            let label = format!("{count} resources selected");
+            div()
+                .id("detail-selection-count")
+                .test_support()
+                .aria_label(label.clone())
+                .text_size(px(18.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(label)
+                .into_any_element()
+        }
         DetailView::Empty => div()
             .text_color(muted)
             .child("Select a resource to see its details.")
