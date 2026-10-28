@@ -28,8 +28,9 @@ pub use import::{
     DiagnosticSeverity, EntryChoice, EntryPreview, EntryProposal, EntryProvenance,
     IMPORT_MAX_SOURCE_BYTES, IMPORT_PARSER_VERSION, ImportChoices, ImportConflict,
     ImportDiagnostic, ImportDraft, ImportEntryDraft, ImportEntryOutcomeKind, ImportFormat,
-    ImportIssue, ImportPreview, ImportReport, ImportTempId, ImportedEntry, PersonCandidate,
-    PersonChoice, PersonMatchPreview, SeriesPreview, SourceProvenance, UnresolvedCreator,
+    ImportIssue, ImportPreview, ImportProgress, ImportReport, ImportTempId, ImportedEntry,
+    PersonCandidate, PersonChoice, PersonMatchPreview, SeriesPreview, SourceProvenance,
+    UnresolvedCreator,
 };
 pub use pages::{PageBound, PageSpan, Pages, deserialize_pages_opt};
 pub use person::{Name, NameError, NameKey, NonEmptyStr, Person, PersonError, PersonId};

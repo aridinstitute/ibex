@@ -1,11 +1,14 @@
 //! Shared import orchestration: resolve people/series/containers and persist drafts.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use oeuvre_core::{
     CreatorRole, CreatorSpec, EntryChoice, ImportedEntry, ImportedResourceWrite, ImportChoices,
-    ImportDraft, ImportEntryDraft, ImportIssue, ImportReport, Name, NewSeries, NonEmptyStr, Person,
-    PersonChoice, PersonId, Resource, ResourceId, ResourceKind, Series, SeriesId, import_codes,
+    ImportDraft, ImportEntryDraft, ImportIssue, ImportProgress, ImportReport, Name, NameKey,
+    NewSeries, NonEmptyStr, Person, PersonChoice, PersonId, Resource, ResourceId, ResourceKind,
+    Series, SeriesId, import_codes,
 };
 
 use crate::command::resource::validate_new_resource_refs;
@@ -15,6 +18,13 @@ use crate::{AppState, CommandError};
 use super::link::{
     ContainerDecision, ImportEntityIndex, plan_parent_for_entry, resolve_explicit_container,
 };
+
+/// Optional cancel flag and progress callback for bounded import units.
+#[derive(Default, Clone)]
+pub struct ImportHooks {
+    pub cancel: Option<Arc<AtomicBool>>,
+    pub on_progress: Option<Arc<dyn Fn(ImportProgress) + Send + Sync>>,
+}
 
 /// Library identities used for retry idempotency and publication duplicates.
 #[derive(Debug, Default)]
@@ -106,7 +116,17 @@ pub async fn save_draft_with_choices(
     draft: ImportDraft,
     choices: ImportChoices,
 ) -> Result<ImportReport, CommandError> {
-    save_draft_inner(state, draft, choices, None).await
+    save_draft_inner(state, draft, choices, None, ImportHooks::default()).await
+}
+
+/// Persist `draft` with progress/cancellation hooks between committed units.
+pub async fn save_draft_with_hooks(
+    state: &AppState,
+    draft: ImportDraft,
+    choices: ImportChoices,
+    hooks: ImportHooks,
+) -> Result<ImportReport, CommandError> {
+    save_draft_inner(state, draft, choices, None, hooks).await
 }
 
 pub(crate) async fn save_draft_inner(
@@ -114,6 +134,7 @@ pub(crate) async fn save_draft_inner(
     draft: ImportDraft,
     choices: ImportChoices,
     mut ev: Option<&mut Event>,
+    hooks: ImportHooks,
 ) -> Result<ImportReport, CommandError> {
     if let Some(ev) = ev.as_mut() {
         ev.set(event::IMPORT_IMPORTED_COUNT, 0u64);
@@ -137,9 +158,15 @@ pub(crate) async fn save_draft_inner(
         }
     }
 
-    let mut identity = seed_identity_index(state).await?;
+    let library_resources = state.store().list_resources_for_import().await?;
+    let mut identity = IdentityIndex::default();
+    for resource in &library_resources {
+        identity.remember_resource(resource);
+    }
     let mut index = ImportEntityIndex::default();
-    seed_index_from_store(state, &mut index).await?;
+    seed_index_from_resources(&mut index, &library_resources);
+
+    let mut person_cache = PersonLookupCache::load(state).await?;
 
     let mut series = HashMap::<String, SeriesId>::new();
     let entry_keys: Vec<String> = draft
@@ -147,7 +174,23 @@ pub(crate) async fn save_draft_inner(
         .iter()
         .map(|e| e.provenance.source_key.clone())
         .collect();
+    let total_entries = draft.entries.len();
     for (entry_pos, entry) in draft.entries.into_iter().enumerate() {
+        if hooks
+            .cancel
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::SeqCst))
+        {
+            for key in entry_keys.iter().skip(entry_pos) {
+                report.not_attempted.push(
+                    ImportIssue::new(Some(key.clone()), "not attempted because import was cancelled")
+                        .with_code(import_codes::CANCELLED),
+                );
+            }
+            sync_event_counts(ev.as_deref_mut(), &report);
+            return Ok(report);
+        }
+
         let entry_key = entry.provenance.source_key.clone();
         let had_reference_fields = entry.had_reference_fields;
         let had_xdata = entry.had_xdata;
@@ -246,7 +289,7 @@ pub(crate) async fn save_draft_inner(
         let publication_refs = entry.publication_ref_keys.clone();
         let result = async {
             let (new_people, creators) =
-                plan_creators(state, &entry_key, &names, &choices).await?;
+                plan_creators(state, &person_cache, &entry_key, &names, &choices).await?;
             let mut new = entry.resource.clone();
             new.creators = creators;
             if let Some(fp) = fingerprint.as_ref() {
@@ -313,13 +356,14 @@ pub(crate) async fn save_draft_inner(
             let resource = state
                 .store()
                 .create_imported_resource(ImportedResourceWrite {
-                    new_people,
+                    new_people: new_people.clone(),
                     new_series,
                     new_dependencies,
                     resource: new,
                 })
                 .await
                 .map_err(CommandError::from)?;
+            person_cache.remember_new(&new_people);
             if let (Some(title), Some(series_id)) = (planned_series_title, resource.series_id) {
                 series.insert(title, series_id);
             }
@@ -354,9 +398,16 @@ pub(crate) async fn save_draft_inner(
                         "Reference metadata was resolved/preserved; no parent-resource link was created"
                     };
                     report.warnings.push(
-                        ImportIssue::new(Some(entry_key), message)
+                        ImportIssue::new(Some(entry_key.clone()), message)
                             .with_code(import_codes::REFERENCE_NO_PARENT_LINK),
                     );
+                }
+                if let Some(cb) = hooks.on_progress.as_ref() {
+                    cb(ImportProgress {
+                        completed_entries: entry_pos + 1,
+                        total_entries,
+                        last_entry_key: Some(entry_key),
+                    });
                 }
             }
             Ok(EntrySave::Conflicted(issue)) => {
@@ -446,9 +497,7 @@ pub(crate) async fn seed_identity_index(
     state: &AppState,
 ) -> Result<IdentityIndex, CommandError> {
     let mut identity = IdentityIndex::default();
-    let rows = state.store().list_resources().await?;
-    for row in rows {
-        let resource = state.store().get_resource(row.id).await?;
+    for resource in state.store().list_resources_for_import().await? {
         identity.remember_resource(&resource);
     }
     Ok(identity)
@@ -458,47 +507,113 @@ pub(crate) async fn seed_index_from_store(
     state: &AppState,
     index: &mut ImportEntityIndex,
 ) -> Result<(), CommandError> {
-    let rows = state.store().list_resources().await?;
-    let mut details = Vec::new();
-    for row in &rows {
-        if matches!(
-            row.kind,
-            ResourceKind::Journal | ResourceKind::Issue | ResourceKind::Book
-        ) {
-            let resource = state.store().get_resource(row.id).await?;
-            details.push((row.id, resource));
+    let resources = state.store().list_resources_for_import().await?;
+    seed_index_from_resources(index, &resources);
+    Ok(())
+}
+
+fn seed_index_from_resources(index: &mut ImportEntityIndex, resources: &[Resource]) {
+    let rows: Vec<_> = resources
+        .iter()
+        .map(|r| oeuvre_core::ResourceSummary {
+            id: r.id,
+            kind: r.kind,
+            title: r.title.clone(),
+            creators_label: String::new(),
+            published_label: None,
+            publisher: r.publisher.clone(),
+            container_title: None,
+            date_added: r.date_added,
+            date_edited: r.date_edited,
+        })
+        .collect();
+    let details: Vec<_> = resources
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.kind,
+                ResourceKind::Journal | ResourceKind::Issue | ResourceKind::Book
+            )
+        })
+        .map(|r| (r.id, r.clone()))
+        .collect();
+    index.seed_from_store(&rows, &details);
+}
+
+/// Per-import person resolution cache (avoids N find_persons_by_name calls).
+#[derive(Debug, Default)]
+pub(crate) struct PersonLookupCache {
+    by_key: HashMap<NameKey, Vec<Person>>,
+    by_id: HashMap<PersonId, Person>,
+}
+
+impl PersonLookupCache {
+    pub async fn load(state: &AppState) -> Result<Self, CommandError> {
+        let people = state.store().list_persons().await?;
+        let mut by_key: HashMap<NameKey, Vec<Person>> = HashMap::new();
+        let mut by_id = HashMap::new();
+        for person in people {
+            by_id.insert(person.id, person.clone());
+            for key in person.name_keys() {
+                by_key.entry(key).or_default().push(person.clone());
+            }
+        }
+        // Deduplicate people per key (primary + alias may share).
+        for list in by_key.values_mut() {
+            list.sort_by(|a, b| a.id.to_string().cmp(&b.id.to_string()));
+            list.dedup_by(|a, b| a.id == b.id);
+        }
+        Ok(Self { by_key, by_id })
+    }
+
+    pub(crate) fn find_by_name(&self, name: &Name) -> Vec<Person> {
+        self.by_key.get(&name.key()).cloned().unwrap_or_default()
+    }
+
+    fn get(&self, id: PersonId) -> Option<&Person> {
+        self.by_id.get(&id)
+    }
+
+    /// Remember people created earlier in this import so later entries reuse them.
+    fn remember_new(&mut self, people: &[Person]) {
+        for person in people {
+            self.by_id.insert(person.id, person.clone());
+            for key in person.name_keys() {
+                let list = self.by_key.entry(key).or_default();
+                if !list.iter().any(|p| p.id == person.id) {
+                    list.push(person.clone());
+                }
+            }
         }
     }
-    index.seed_from_store(&rows, &details);
-    Ok(())
 }
 
 /// Resolve creator names to existing people or newly planned [`Person`] rows.
 /// Does not write: new people are persisted with the resource atomically.
 async fn plan_creators(
     state: &AppState,
+    cache: &PersonLookupCache,
     entry_key: &str,
     names: &[(CreatorRole, Name)],
     choices: &ImportChoices,
 ) -> Result<(Vec<Person>, Vec<CreatorSpec>), CommandError> {
     let mut resolved = Vec::new();
     for (i, (role, name)) in names.iter().enumerate() {
-        let people = state.store().find_persons_by_name(name).await?;
+        let people = cache.find_by_name(name);
         let choice = choices.people.get(&ImportChoices::person_key(entry_key, i));
         let id = match (people.as_slice(), choice) {
             (_, Some(PersonChoice::UseExisting {
                 person_id,
                 expected_name_key,
             })) => {
-                let person = state
-                    .store()
-                    .get_person(*person_id)
-                    .await
-                    .map_err(|_| {
+                let person = match cache.get(*person_id) {
+                    Some(p) => p.clone(),
+                    None => state.store().get_person(*person_id).await.map_err(|_| {
                         CommandError::Invalid(format!(
                             "stale preview: person {person_id} no longer exists"
                         ))
-                    })?;
+                    })?,
+                };
                 if person.name.key().as_str() != expected_name_key {
                     return Err(CommandError::Invalid(format!(
                         "stale preview: person {person_id} name no longer matches preview"

@@ -96,6 +96,9 @@ struct TagCountRow {
 
 #[derive(Debug, Clone, SurrealValue)]
 struct ResourceDoc {
+    /// Present on `SELECT *` rows; absent when constructing docs for writes.
+    #[surreal(default)]
+    id: Option<RecordId>,
     #[surreal(default, wrap)]
     subtitle: Option<NonEmptyStr>,
     #[surreal(default, wrap)]
@@ -826,8 +829,92 @@ impl SurrealStore {
         Ok(())
     }
 
+    fn resource_from_doc(
+        id: ResourceId,
+        doc: ResourceDoc,
+        creators: Vec<Creator>,
+    ) -> Result<Resource, StoreError> {
+        let parent_id = match doc.parent {
+            Some(ref thing) => Some(Self::thing_to_resource_id(thing)?),
+            None => None,
+        };
+        let series_id = match doc.series {
+            Some(ref thing) => Some(Self::thing_to_series_id(thing)?),
+            None => None,
+        };
+        let series_number = match doc.series_number {
+            Some(s) => {
+                Some(NonEmptyStr::try_new(s).map_err(|e| StoreError::invalid(e.to_string()))?)
+            }
+            None => None,
+        };
+        let tag_ids = match doc.tags {
+            Some(refs) => refs
+                .iter()
+                .map(Self::thing_to_tag_id)
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
+        let collection_ids = match doc.collections {
+            Some(refs) => refs
+                .iter()
+                .map(Self::thing_to_collection_id)
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
+        let (date_added, date_edited) = Self::recorded_dates(doc.date_added, doc.date_edited, id);
+
+        let mut resource = Resource::from_stored(
+            id,
+            doc.kind,
+            doc.title,
+            creators,
+            doc.publisher,
+            doc.published,
+            doc.accessed.map(|a| a.into_bibliographic()).transpose()?,
+            parent_id,
+            series_id,
+            series_number,
+            tag_ids,
+            collection_ids,
+            doc.metadata.unwrap_or_default(),
+            doc.favorite.unwrap_or(false),
+            date_added,
+            date_edited,
+        )
+        .map_err(StoreError::from)?;
+        resource.subtitle = doc.subtitle;
+        resource.title_addon = doc.title_addon;
+        resource.short_title = doc.short_title;
+        resource.place = doc.place;
+        resource.volume = doc.volume;
+        resource.issue = doc.issue;
+        resource.pages = doc.pages;
+        resource.total_pages = doc.total_pages;
+        resource.article_number = doc.article_number;
+        resource.edition = doc.edition;
+        resource.doi = doc.doi;
+        resource.url = doc.url;
+        resource.eprint = doc.eprint;
+        resource.isbns = doc.isbns;
+        resource.issns = doc.issns;
+        resource.isrns = doc.isrns;
+        resource.original_date = doc.original_date;
+        resource.event_date = doc.event_date;
+        resource.language = doc.language;
+        resource.document_type = doc.document_type;
+        resource.publication_method = doc.publication_method;
+        resource.institution = doc.institution;
+        resource.organization = doc.organization;
+        resource.school = doc.school;
+        resource.abstract_text = doc.abstract_text;
+        resource.keywords = doc.keywords;
+        Ok(resource)
+    }
+
     fn resource_doc_from(resource: &Resource) -> ResourceDoc {
         ResourceDoc {
+            id: None,
             subtitle: resource.subtitle.clone(),
             title_addon: resource.title_addon.clone(),
             short_title: resource.short_title.clone(),
@@ -1808,83 +1895,7 @@ impl Store for SurrealStore {
         let doc: Option<ResourceDoc> = response.take(0).map_err(map_err)?;
         let doc = doc.ok_or_else(|| StoreError::not_found(format!("resource {id}")))?;
         let creators = self.load_creators_from_edges(id).await?;
-
-        let parent_id = match doc.parent {
-            Some(ref thing) => Some(Self::thing_to_resource_id(thing)?),
-            None => None,
-        };
-        let series_id = match doc.series {
-            Some(ref thing) => Some(Self::thing_to_series_id(thing)?),
-            None => None,
-        };
-        let series_number = match doc.series_number {
-            Some(s) => {
-                Some(NonEmptyStr::try_new(s).map_err(|e| StoreError::invalid(e.to_string()))?)
-            }
-            None => None,
-        };
-        let tag_ids = match doc.tags {
-            Some(refs) => refs
-                .iter()
-                .map(Self::thing_to_tag_id)
-                .collect::<Result<Vec<_>, _>>()?,
-            None => Vec::new(),
-        };
-        let collection_ids = match doc.collections {
-            Some(refs) => refs
-                .iter()
-                .map(Self::thing_to_collection_id)
-                .collect::<Result<Vec<_>, _>>()?,
-            None => Vec::new(),
-        };
-        let (date_added, date_edited) = Self::recorded_dates(doc.date_added, doc.date_edited, id);
-
-        let mut resource = Resource::from_stored(
-            id,
-            doc.kind,
-            doc.title,
-            creators,
-            doc.publisher,
-            doc.published,
-            doc.accessed.map(|a| a.into_bibliographic()).transpose()?,
-            parent_id,
-            series_id,
-            series_number,
-            tag_ids,
-            collection_ids,
-            doc.metadata.unwrap_or_default(),
-            doc.favorite.unwrap_or(false),
-            date_added,
-            date_edited,
-        )
-        .map_err(StoreError::from)?;
-        resource.subtitle = doc.subtitle;
-        resource.title_addon = doc.title_addon;
-        resource.short_title = doc.short_title;
-        resource.place = doc.place;
-        resource.volume = doc.volume;
-        resource.issue = doc.issue;
-        resource.pages = doc.pages;
-        resource.total_pages = doc.total_pages;
-        resource.article_number = doc.article_number;
-        resource.edition = doc.edition;
-        resource.doi = doc.doi;
-        resource.url = doc.url;
-        resource.eprint = doc.eprint;
-        resource.isbns = doc.isbns;
-        resource.issns = doc.issns;
-        resource.isrns = doc.isrns;
-        resource.original_date = doc.original_date;
-        resource.event_date = doc.event_date;
-        resource.language = doc.language;
-        resource.document_type = doc.document_type;
-        resource.publication_method = doc.publication_method;
-        resource.institution = doc.institution;
-        resource.organization = doc.organization;
-        resource.school = doc.school;
-        resource.abstract_text = doc.abstract_text;
-        resource.keywords = doc.keywords;
-        Ok(resource)
+        Self::resource_from_doc(id, doc, creators)
     }
 
     async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError> {
@@ -1892,6 +1903,27 @@ impl Store for SurrealStore {
         // projection path serves both reads.
         let page = self.list_resources_page(None, u32::MAX).await?;
         Ok(page.rows)
+    }
+
+    async fn list_resources_for_import(&self) -> Result<Vec<Resource>, StoreError> {
+        // One full-table read for import identity/container seeding. Creators
+        // are omitted — matching only needs identifiers and container fields.
+        let mut response = self
+            .db
+            .query("SELECT * OMIT primary_creator_last_name FROM resource")
+            .await
+            .map_err(map_err)?;
+        let docs: Vec<ResourceDoc> = response.take(0).map_err(map_err)?;
+        let mut out = Vec::with_capacity(docs.len());
+        for doc in docs {
+            let id = doc
+                .id
+                .as_ref()
+                .ok_or_else(|| StoreError::new("resource row missing id"))
+                .and_then(Self::thing_to_resource_id)?;
+            out.push(Self::resource_from_doc(id, doc, vec![])?);
+        }
+        Ok(out)
     }
 
     async fn resource_counts(&self) -> Result<ResourceCounts, StoreError> {

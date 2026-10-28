@@ -1,13 +1,15 @@
-//! Compatibility command: BibLaTeX parse + shared import save.
+//! Compatibility commands: format parse + shared import save.
 //!
-//! Parsing lives in [`crate::import::parse_biblatex`]; persistence in
-//! [`crate::import::save_draft`]. Preview and choice-aware save are available
-//! for review flows (Task 06).
+//! Parsing lives in [`crate::import`]; persistence in [`crate::import::save_draft`].
+//! Preview and choice-aware save are available for review flows (Task 06+).
 
 use oeuvre_core::{ImportChoices, ImportPreview, ImportReport};
 
 use crate::event::Event;
-use crate::import::{parse_biblatex, preview_draft, save_draft_inner, save_draft_with_choices};
+use crate::import::{
+    parse_biblatex, parse_csl_json, preview_draft, save_draft_inner, save_draft_with_choices,
+    ImportHooks,
+};
 use crate::{AppState, CommandError, Handler, Outcome};
 
 pub use oeuvre_core::{ImportIssue, ImportedEntry};
@@ -43,8 +45,63 @@ impl Handler for ImportBiblatex {
 
     async fn run(self, state: &AppState, ev: &mut Event) -> Result<Imported, CommandError> {
         let draft = parse_biblatex(&self.source_text).map_err(|e| CommandError::Invalid(e.message))?;
-        let report = save_draft_inner(state, draft, self.choices, Some(ev)).await?;
+        let report =
+            save_draft_inner(state, draft, self.choices, Some(ev), ImportHooks::default()).await?;
         Ok(Imported(report))
+    }
+}
+
+/// Import a CSL-JSON bibliography through the shared save path.
+#[derive(Debug, Clone)]
+pub struct ImportCslJson {
+    pub source_text: String,
+    pub choices: ImportChoices,
+}
+
+pub(crate) struct ImportedCsl(pub ImportReport);
+
+impl From<ImportedCsl> for Outcome {
+    fn from(ImportedCsl(report): ImportedCsl) -> Self {
+        Outcome::ImportCslJson(report)
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for ImportCslJson {
+    const NAME: &'static str = "import_csl_json";
+    type Output = ImportedCsl;
+
+    async fn run(self, state: &AppState, ev: &mut Event) -> Result<ImportedCsl, CommandError> {
+        let draft = parse_csl_json(&self.source_text).map_err(|e| CommandError::Invalid(e.message))?;
+        let report =
+            save_draft_inner(state, draft, self.choices, Some(ev), ImportHooks::default()).await?;
+        Ok(ImportedCsl(report))
+    }
+}
+
+/// Preview a CSL-JSON source without writing.
+#[derive(Debug, Clone)]
+pub struct PreviewCslJson {
+    pub source_text: String,
+}
+
+pub(crate) struct PreviewedCsl(pub ImportPreview);
+
+impl From<PreviewedCsl> for Outcome {
+    fn from(PreviewedCsl(preview): PreviewedCsl) -> Self {
+        Outcome::PreviewCslJson(preview)
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for PreviewCslJson {
+    const NAME: &'static str = "preview_csl_json";
+    type Output = PreviewedCsl;
+
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<PreviewedCsl, CommandError> {
+        let draft = parse_csl_json(&self.source_text).map_err(|e| CommandError::Invalid(e.message))?;
+        let preview = preview_draft(state, draft).await?;
+        Ok(PreviewedCsl(preview))
     }
 }
 

@@ -14,7 +14,7 @@ use crate::{AppState, CommandError};
 use super::link::{
     ContainerDecision, ImportEntityIndex, plan_parent_for_entry, resolve_explicit_container,
 };
-use super::save::{seed_identity_index, seed_index_from_store};
+use super::save::{seed_identity_index, seed_index_from_store, PersonLookupCache};
 
 /// Inspect `draft` against the library without persisting.
 pub async fn preview_draft(
@@ -28,6 +28,7 @@ pub async fn preview_draft(
     let identity = seed_identity_index(state).await?;
     let mut index = ImportEntityIndex::default();
     seed_index_from_store(state, &mut index).await?;
+    let person_cache = PersonLookupCache::load(state).await?;
 
     let mut series_seen = std::collections::HashMap::<String, bool>::new();
     let mut entries = Vec::with_capacity(draft.entries.len());
@@ -61,7 +62,7 @@ pub async fn preview_draft(
 
         let mut people = Vec::new();
         for (index_i, creator) in entry.unresolved_creators.iter().enumerate() {
-            let found = state.store().find_persons_by_name(&creator.name).await?;
+            let found = person_cache.find_by_name(&creator.name);
             let match_ = match found.as_slice() {
                 [] => PersonMatchPreview::NoMatch,
                 [person] => PersonMatchPreview::Unique {
