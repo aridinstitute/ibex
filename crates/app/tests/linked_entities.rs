@@ -17,6 +17,7 @@ async fn import(source: &str) -> (AppState, oeuvre_core::ImportReport) {
     let Outcome::ImportBiblatex(report) = state
         .execute(Command::ImportBiblatex(ImportBiblatex {
             source_text: source.into(),
+            choices: Default::default(),
         }))
         .await
         .unwrap()
@@ -315,6 +316,7 @@ async fn ambiguous_journal_titles_conflict_rather_than_merge() {
                 @periodical{j2, title={Common Name}, issn={2222-2222}}
             "#
             .into(),
+            choices: Default::default(),
         }))
         .await
         .unwrap()
@@ -330,6 +332,7 @@ async fn ambiguous_journal_titles_conflict_rather_than_merge() {
                   journaltitle={Common Name}, volume={1}, number={1}}
             "#
             .into(),
+            choices: Default::default(),
         }))
         .await
         .unwrap()
@@ -363,6 +366,7 @@ async fn conflicting_issn_does_not_overwrite_existing_journal() {
     let Outcome::ImportBiblatex(_) = state
         .execute(Command::ImportBiblatex(ImportBiblatex {
             source_text: "@periodical{j1, title={Original Title}, issn={9999-9999}}".into(),
+            choices: Default::default(),
         }))
         .await
         .unwrap()
@@ -377,6 +381,7 @@ async fn conflicting_issn_does_not_overwrite_existing_journal() {
                   journaltitle={Different Title}, issn={9999-9999}, volume={1}, number={1}}
             "#
             .into(),
+            choices: Default::default(),
         }))
         .await
         .unwrap()

@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use oeuvre_core::{
-    CreatorRole, CreatorSpec, ImportedEntry, ImportedResourceWrite, ImportDraft, ImportIssue,
-    ImportReport, Name, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceId,
-    ResourceKind, Series, SeriesId, import_codes,
+    CreatorRole, CreatorSpec, EntryChoice, ImportedEntry, ImportedResourceWrite, ImportChoices,
+    ImportDraft, ImportEntryDraft, ImportIssue, ImportReport, Name, NewSeries, NonEmptyStr, Person,
+    PersonChoice, PersonId, Resource, ResourceId, ResourceKind, Series, SeriesId, import_codes,
 };
 
 use crate::command::resource::validate_new_resource_refs;
@@ -16,17 +16,103 @@ use super::link::{
     ContainerDecision, ImportEntityIndex, plan_parent_for_entry, resolve_explicit_container,
 };
 
+/// Library identities used for retry idempotency and publication duplicates.
+#[derive(Debug, Default)]
+pub(crate) struct IdentityIndex {
+    /// (source_fingerprint, citekey) → committed resource.
+    pub by_source_entry: HashMap<(String, String), ResourceId>,
+    /// Normalized DOI → resource ids.
+    pub by_doi: HashMap<String, Vec<ResourceId>>,
+    /// Normalized ISBN → resource ids.
+    pub by_isbn: HashMap<String, Vec<ResourceId>>,
+}
+
+impl IdentityIndex {
+    pub fn remember_resource(&mut self, resource: &Resource) {
+        if let (Some(fp), Some(key)) = (
+            resource.metadata.provenance.source_fingerprint.as_ref(),
+            resource.metadata.citekey.as_ref(),
+        ) {
+            self.by_source_entry
+                .insert((fp.clone(), key.clone()), resource.id);
+        }
+        if let Some(doi) = resource.doi.as_ref() {
+            let key = normalize_doi(doi);
+            if !key.is_empty() {
+                self.by_doi.entry(key).or_default().push(resource.id);
+            }
+        }
+        for isbn in &resource.isbns {
+            self.by_isbn
+                .entry(isbn.lookup_key().to_owned())
+                .or_default()
+                .push(resource.id);
+        }
+    }
+
+    pub fn find_publication_duplicate(
+        &self,
+        entry: &ImportEntryDraft,
+    ) -> Option<(ResourceId, String)> {
+        if let Some(doi) = entry.resource.doi.as_ref() {
+            let key = normalize_doi(doi);
+            if let Some(ids) = self.by_doi.get(&key) {
+                if let Some(id) = ids.first() {
+                    return Some((
+                        *id,
+                        format!("publication DOI already in library ({doi})"),
+                    ));
+                }
+            }
+        }
+        // ISBN identity applies to books only. Chapters often inherit a parent
+        // ISBN via crossref and must not be treated as book duplicates.
+        if entry.kind() == ResourceKind::Book {
+            for isbn in &entry.resource.isbns {
+                let key = isbn.lookup_key();
+                if let Some(ids) = self.by_isbn.get(key) {
+                    if let Some(id) = ids.first() {
+                        return Some((
+                            *id,
+                            format!("publication ISBN already in library ({isbn})"),
+                        ));
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+fn normalize_doi(doi: &str) -> String {
+    doi.trim().trim_start_matches("https://doi.org/")
+        .trim_start_matches("http://doi.org/")
+        .trim_start_matches("doi:")
+        .trim()
+        .to_ascii_lowercase()
+}
+
 /// Resolve entities in `draft` and persist through the shared store path.
 pub async fn save_draft(
     state: &AppState,
     draft: ImportDraft,
 ) -> Result<ImportReport, CommandError> {
-    save_draft_inner(state, draft, None).await
+    save_draft_with_choices(state, draft, ImportChoices::default()).await
+}
+
+/// Persist `draft` applying explicit review choices (revalidated at save time).
+pub async fn save_draft_with_choices(
+    state: &AppState,
+    draft: ImportDraft,
+    choices: ImportChoices,
+) -> Result<ImportReport, CommandError> {
+    save_draft_inner(state, draft, choices, None).await
 }
 
 pub(crate) async fn save_draft_inner(
     state: &AppState,
     draft: ImportDraft,
+    choices: ImportChoices,
     mut ev: Option<&mut Event>,
 ) -> Result<ImportReport, CommandError> {
     if let Some(ev) = ev.as_mut() {
@@ -35,6 +121,7 @@ pub(crate) async fn save_draft_inner(
         ev.set(event::IMPORT_WARNING_COUNT, 0u64);
     }
 
+    let fingerprint = draft.source_fingerprint.clone();
     let mut report = ImportReport::default();
     for diagnostic in draft.diagnostics {
         let issue = ImportIssue {
@@ -50,16 +137,86 @@ pub(crate) async fn save_draft_inner(
         }
     }
 
+    let mut identity = seed_identity_index(state).await?;
     let mut index = ImportEntityIndex::default();
     seed_index_from_store(state, &mut index).await?;
 
     let mut series = HashMap::<String, SeriesId>::new();
-    for entry in draft.entries {
+    let entry_keys: Vec<String> = draft
+        .entries
+        .iter()
+        .map(|e| e.provenance.source_key.clone())
+        .collect();
+    for (entry_pos, entry) in draft.entries.into_iter().enumerate() {
         let entry_key = entry.provenance.source_key.clone();
         let had_reference_fields = entry.had_reference_fields;
         let had_xdata = entry.had_xdata;
         if let Some(ev) = ev.as_mut() {
             ev.set(event::IMPORT_ENTRY_KEY, entry_key.clone());
+        }
+
+        let entry_choice = choices
+            .entries
+            .get(&entry_key)
+            .cloned()
+            .unwrap_or(EntryChoice::Accept);
+
+        if matches!(entry_choice, EntryChoice::Skip) {
+            report.skipped.push(
+                ImportIssue::new(Some(entry_key), "skipped by review choice")
+                    .with_code(import_codes::ENTRY_SKIPPED),
+            );
+            continue;
+        }
+
+        // Source-entry idempotency: same fingerprint + citekey → reuse.
+        if let Some(fp) = fingerprint.as_ref() {
+            if let Some(id) = identity
+                .by_source_entry
+                .get(&(fp.clone(), entry_key.clone()))
+                .copied()
+            {
+                if !matches!(entry_choice, EntryChoice::IntentionalDuplicate) {
+                    index.by_citekey.insert(entry_key.clone(), id);
+                    report.reused.push(ImportedEntry {
+                        entry_key: entry_key.clone(),
+                        resource_id: id,
+                    });
+                    continue;
+                }
+            }
+        }
+
+        // Publication duplicate from a different source.
+        let pub_dup = identity.find_publication_duplicate(&entry);
+        match (&entry_choice, pub_dup) {
+            (EntryChoice::Reuse { resource_id }, _) => {
+                match revalidate_reuse(state, *resource_id).await {
+                    Ok(()) => {
+                        index.by_citekey.insert(entry_key.clone(), *resource_id);
+                        report.reused.push(ImportedEntry {
+                            entry_key,
+                            resource_id: *resource_id,
+                        });
+                        continue;
+                    }
+                    Err(mut issue) => {
+                        issue.entry_key = Some(entry_key);
+                        report.conflicted.push(issue);
+                        continue;
+                    }
+                }
+            }
+            (EntryChoice::Accept, Some((id, reason))) => {
+                report.conflicted.push(
+                    ImportIssue::new(Some(entry_key), reason)
+                        .with_code(import_codes::PUBLICATION_DUPLICATE),
+                );
+                let _ = id;
+                continue;
+            }
+            (EntryChoice::IntentionalDuplicate, _) | (EntryChoice::Accept, None) => {}
+            (EntryChoice::Skip, _) => unreachable!("handled above"),
         }
 
         // Explicit journal/book entries may already exist as inferred containers.
@@ -71,16 +228,13 @@ pub(crate) async fn save_draft_inner(
                         entry_key: entry_key.clone(),
                         resource_id: id,
                     });
-                    // Still attach series if the reused book needs it? Skip — already committed.
                     continue;
                 }
                 ContainerDecision::Conflict(issue) => {
                     report.conflicted.push(issue);
                     continue;
                 }
-                ContainerDecision::Create(_) => {
-                    // Fall through to normal create using the entry's own fields.
-                }
+                ContainerDecision::Create(_) => {}
             }
         }
 
@@ -91,9 +245,16 @@ pub(crate) async fn save_draft_inner(
             .collect();
         let publication_refs = entry.publication_ref_keys.clone();
         let result = async {
-            let (new_people, creators) = plan_creators(state, names).await?;
+            let (new_people, creators) =
+                plan_creators(state, &entry_key, &names, &choices).await?;
             let mut new = entry.resource.clone();
             new.creators = creators;
+            if let Some(fp) = fingerprint.as_ref() {
+                new.metadata.provenance.source_fingerprint = Some(fp.clone());
+            }
+            if new.metadata.citekey.is_none() {
+                new.metadata.citekey = Some(entry_key.clone());
+            }
 
             let mut new_series = None;
             let mut planned_series_title = None;
@@ -119,7 +280,6 @@ pub(crate) async fn save_draft_inner(
 
             let parent_plan = plan_parent_for_entry(&entry, &mut index)?;
             for conflict in parent_plan.conflicts {
-                // Surface conflicts without inventing a parent link.
                 return Ok(EntrySave::Conflicted(conflict));
             }
             new.parent_id = parent_plan.parent_id;
@@ -131,7 +291,6 @@ pub(crate) async fn save_draft_inner(
             let pending_series = new_series.as_ref().map(|s| s.id);
             let pending_resources: Vec<ResourceId> =
                 new_dependencies.iter().map(|r| r.id).collect();
-            // Validate deps (issue→journal) then child.
             for dep in &new_dependencies {
                 validate_new_resource_refs(
                     state,
@@ -159,7 +318,8 @@ pub(crate) async fn save_draft_inner(
                     new_dependencies,
                     resource: new,
                 })
-                .await?;
+                .await
+                .map_err(CommandError::from)?;
             if let (Some(title), Some(series_id)) = (planned_series_title, resource.series_id) {
                 series.insert(title, series_id);
             }
@@ -181,13 +341,13 @@ pub(crate) async fn save_draft_inner(
                 had_xdata,
                 publication_refs,
             }) => {
+                identity.remember_resource(&resource);
                 index.register_committed(&entry_key, &resource);
                 report.imported.push(ImportedEntry {
                     entry_key: entry_key.clone(),
                     resource_id: resource.id,
                 });
                 if had_reference_fields && !linked {
-                    // xdata-only, or unresolved publication refs.
                     let message = if had_xdata && publication_refs.is_empty() {
                         "xdata metadata was resolved/preserved; xdata is not a parent-resource link"
                     } else {
@@ -205,24 +365,56 @@ pub(crate) async fn save_draft_inner(
             Err(CommandError::Invalid(message)) => {
                 let code = if message.starts_with("ambiguous creator") {
                     Some(import_codes::AMBIGUOUS_CREATOR.to_owned())
+                } else if message.starts_with("stale preview") {
+                    Some(import_codes::STALE_PREVIEW.to_owned())
                 } else {
                     Some(import_codes::ENTRY_SKIPPED.to_owned())
                 };
-                report.skipped.push(ImportIssue {
+                let is_stale = code.as_deref() == Some(import_codes::STALE_PREVIEW);
+                let is_ambiguous = code.as_deref() == Some(import_codes::AMBIGUOUS_CREATOR);
+                let issue = ImportIssue {
                     entry_key: Some(entry_key),
                     code,
                     message,
-                });
+                };
+                if is_stale || is_ambiguous {
+                    report.conflicted.push(issue);
+                } else {
+                    report.skipped.push(issue);
+                }
+            }
+            Err(CommandError::Store(err)) => {
+                // Truthful partial report: keep prior commits; mark this failed
+                // and remaining entries not-attempted.
+                report.failed.push(
+                    ImportIssue::new(Some(entry_key), err.to_string())
+                        .with_code(import_codes::ENTRY_FAILED),
+                );
+                for key in entry_keys.iter().skip(entry_pos + 1) {
+                    report.not_attempted.push(
+                        ImportIssue::new(
+                            Some(key.clone()),
+                            "not attempted because an earlier storage operation failed",
+                        )
+                        .with_code(import_codes::ENTRY_NOT_ATTEMPTED),
+                    );
+                }
+                sync_event_counts(ev.as_deref_mut(), &report);
+                return Ok(report);
             }
             Err(error) => return Err(error),
         }
-        if let Some(ev) = ev.as_mut() {
-            ev.set(event::IMPORT_IMPORTED_COUNT, report.imported.len());
-            ev.set(event::IMPORT_SKIPPED_COUNT, report.skipped.len());
-            ev.set(event::IMPORT_WARNING_COUNT, report.warnings.len());
-        }
+        sync_event_counts(ev.as_deref_mut(), &report);
     }
     Ok(report)
+}
+
+fn sync_event_counts(ev: Option<&mut Event>, report: &ImportReport) {
+    if let Some(ev) = ev {
+        ev.set(event::IMPORT_IMPORTED_COUNT, report.imported.len());
+        ev.set(event::IMPORT_SKIPPED_COUNT, report.skipped.len());
+        ev.set(event::IMPORT_WARNING_COUNT, report.warnings.len());
+    }
 }
 
 enum EntrySave {
@@ -236,7 +428,33 @@ enum EntrySave {
     Conflicted(ImportIssue),
 }
 
-async fn seed_index_from_store(
+async fn revalidate_reuse(
+    state: &AppState,
+    resource_id: ResourceId,
+) -> Result<(), ImportIssue> {
+    match state.store().get_resource(resource_id).await {
+        Ok(_) => Ok(()),
+        Err(_) => Err(ImportIssue::new(
+            None,
+            format!("stale preview: resource {resource_id} no longer exists"),
+        )
+        .with_code(import_codes::STALE_PREVIEW)),
+    }
+}
+
+pub(crate) async fn seed_identity_index(
+    state: &AppState,
+) -> Result<IdentityIndex, CommandError> {
+    let mut identity = IdentityIndex::default();
+    let rows = state.store().list_resources().await?;
+    for row in rows {
+        let resource = state.store().get_resource(row.id).await?;
+        identity.remember_resource(&resource);
+    }
+    Ok(identity)
+}
+
+pub(crate) async fn seed_index_from_store(
     state: &AppState,
     index: &mut ImportEntityIndex,
 ) -> Result<(), CommandError> {
@@ -259,23 +477,46 @@ async fn seed_index_from_store(
 /// Does not write: new people are persisted with the resource atomically.
 async fn plan_creators(
     state: &AppState,
-    names: Vec<(CreatorRole, Name)>,
+    entry_key: &str,
+    names: &[(CreatorRole, Name)],
+    choices: &ImportChoices,
 ) -> Result<(Vec<Person>, Vec<CreatorSpec>), CommandError> {
-    // Check all ambiguities before allocating any people for this entry.
     let mut resolved = Vec::new();
-    for (role, name) in names {
-        let people = state.store().find_persons_by_name(&name).await?;
-        let id = match people.as_slice() {
-            [person] => Some(person.id),
-            [] => None,
-            _ => {
+    for (i, (role, name)) in names.iter().enumerate() {
+        let people = state.store().find_persons_by_name(name).await?;
+        let choice = choices.people.get(&ImportChoices::person_key(entry_key, i));
+        let id = match (people.as_slice(), choice) {
+            (_, Some(PersonChoice::UseExisting {
+                person_id,
+                expected_name_key,
+            })) => {
+                let person = state
+                    .store()
+                    .get_person(*person_id)
+                    .await
+                    .map_err(|_| {
+                        CommandError::Invalid(format!(
+                            "stale preview: person {person_id} no longer exists"
+                        ))
+                    })?;
+                if person.name.key().as_str() != expected_name_key {
+                    return Err(CommandError::Invalid(format!(
+                        "stale preview: person {person_id} name no longer matches preview"
+                    )));
+                }
+                Some(*person_id)
+            }
+            (_, Some(PersonChoice::CreateNew)) => None,
+            ([person], None) => Some(person.id),
+            ([], None) => None,
+            ([_, ..], None) => {
                 return Err(CommandError::Invalid(format!(
                     "ambiguous creator name: {}",
                     name.display()
                 )));
             }
         };
-        resolved.push((role, name, id));
+        resolved.push((*role, name.clone(), id));
     }
     let mut creators: Vec<CreatorSpec> = Vec::new();
     let mut new_people: Vec<Person> = Vec::new();

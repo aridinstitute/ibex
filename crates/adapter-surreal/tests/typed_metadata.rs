@@ -36,6 +36,7 @@ async fn dates_pages_names_and_provenance_round_trip_through_real_adapter() {
     let Outcome::ImportBiblatex(report) = state
         .execute(Command::ImportBiblatex(ImportBiblatex {
             source_text: source.into(),
+            choices: Default::default(),
         }))
         .await
         .unwrap()

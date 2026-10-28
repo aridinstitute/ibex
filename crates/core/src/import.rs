@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::{
-    CreatorRole, Name, NewResource, NonEmptyStr, ResourceId, ResourceKind,
+    CreatorRole, Name, NewResource, NonEmptyStr, PersonId, ResourceId, ResourceKind,
 };
 
 /// Parser/schema version stamped on drafts from this crate revision.
@@ -33,6 +33,27 @@ pub mod codes {
     pub const CONFLICTING_CONTAINER: &str = "import.conflicting_container";
     pub const REFERENCE_NO_PARENT_LINK: &str = "import.reference_no_parent_link";
     pub const ENTRY_SKIPPED: &str = "import.entry_skipped";
+    pub const PUBLICATION_DUPLICATE: &str = "import.publication_duplicate";
+    pub const STALE_PREVIEW: &str = "import.stale_preview";
+    pub const ENTRY_FAILED: &str = "import.entry_failed";
+    pub const ENTRY_NOT_ATTEMPTED: &str = "import.entry_not_attempted";
+    pub const ALREADY_COMMITTED: &str = "import.already_committed";
+}
+
+/// Stable fingerprint for one import source (format + bytes). Citekeys are
+/// local to this fingerprint, not globally unique.
+pub fn source_fingerprint(format: ImportFormat, source: &str) -> String {
+    // FNV-1a 64-bit — stable across runs; not a cryptographic hash.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let tag = match format {
+        ImportFormat::Biblatex => b"biblatex\0" as &[u8],
+        ImportFormat::Test => b"test\0" as &[u8],
+    };
+    for byte in tag.iter().copied().chain(source.as_bytes().iter().copied()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}:{}", source.len())
 }
 
 /// Temporary identity local to one [`ImportDraft`].
@@ -191,6 +212,9 @@ impl ImportEntryDraft {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImportDraft {
     pub provenance: SourceProvenance,
+    /// Fingerprint of the raw source; keys identity for retry idempotency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fingerprint: Option<String>,
     pub entries: Vec<ImportEntryDraft>,
     pub diagnostics: Vec<ImportDiagnostic>,
 }
@@ -202,9 +226,15 @@ impl ImportDraft {
                 format,
                 parser_version: IMPORT_PARSER_VERSION,
             },
+            source_fingerprint: None,
             entries: Vec::new(),
             diagnostics: Vec::new(),
         }
+    }
+
+    pub fn with_source_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.source_fingerprint = Some(fingerprint.into());
+        self
     }
 }
 
@@ -265,4 +295,170 @@ pub struct ImportReport {
     #[serde(default)]
     pub not_attempted: Vec<ImportIssue>,
     pub warnings: Vec<ImportIssue>,
+}
+
+/// Caller decisions applied at save time (revalidated; never reserved by preview).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImportChoices {
+    /// Decisions keyed by source entry key.
+    #[serde(default)]
+    pub entries: BTreeMap<String, EntryChoice>,
+    /// Person resolutions keyed by `"entry_key#creator_index"`.
+    #[serde(default)]
+    pub people: BTreeMap<String, PersonChoice>,
+}
+
+impl ImportChoices {
+    pub fn person_key(entry_key: &str, creator_index: usize) -> String {
+        format!("{entry_key}#{creator_index}")
+    }
+}
+
+/// Per-entry duplicate / create policy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum EntryChoice {
+    /// Follow automatic policy (create, or reuse same-source commitment).
+    Accept,
+    Skip,
+    /// Create a new resource even when a publication duplicate exists.
+    IntentionalDuplicate,
+    /// Attach to / reuse an existing library resource (no overwrite).
+    Reuse { resource_id: ResourceId },
+}
+
+/// Explicit resolution when several people share a name.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum PersonChoice {
+    UseExisting {
+        person_id: PersonId,
+        /// Name key observed at preview time; save rejects mismatches.
+        expected_name_key: String,
+    },
+    CreateNew,
+}
+
+/// Proposed action for one draft entry before save.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum EntryProposal {
+    Create,
+    /// Same source fingerprint + citekey already committed.
+    AlreadyCommitted {
+        resource_id: ResourceId,
+        reason: String,
+    },
+    /// Same publication identity from a different source.
+    PublicationDuplicate {
+        resource_id: ResourceId,
+        reason: String,
+    },
+    Skip { reason: String },
+}
+
+/// How a creator name matches the library.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum PersonMatchPreview {
+    NoMatch,
+    Unique {
+        person_id: PersonId,
+        reason: String,
+    },
+    Ambiguous {
+        candidates: Vec<PersonCandidate>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PersonCandidate {
+    pub person_id: PersonId,
+    pub display: String,
+    pub name_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CreatorPreview {
+    pub index: usize,
+    pub role: CreatorRole,
+    pub name: Name,
+    pub match_: PersonMatchPreview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ContainerPreview {
+    Absent,
+    Reuse {
+        resource_id: ResourceId,
+        reason: String,
+    },
+    Create {
+        resource_kind: ResourceKind,
+        title: String,
+        reason: String,
+    },
+    Conflict {
+        code: String,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SeriesPreview {
+    pub title: String,
+    pub reuse: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImportConflict {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EntryPreview {
+    pub temp_id: ImportTempId,
+    pub entry_key: String,
+    pub title: String,
+    pub kind: ResourceKind,
+    pub proposal: EntryProposal,
+    pub people: Vec<CreatorPreview>,
+    pub container: ContainerPreview,
+    pub series: Option<SeriesPreview>,
+    pub conflicts: Vec<ImportConflict>,
+}
+
+impl EntryPreview {
+    pub fn needs_review(&self) -> bool {
+        // Same-source retry commitments do not require review.
+        if matches!(self.proposal, EntryProposal::AlreadyCommitted { .. }) {
+            return false;
+        }
+        !self.conflicts.is_empty()
+            || matches!(self.proposal, EntryProposal::PublicationDuplicate { .. })
+            || self
+                .people
+                .iter()
+                .any(|p| matches!(p.match_, PersonMatchPreview::Ambiguous { .. }))
+            || matches!(self.container, ContainerPreview::Conflict { .. })
+    }
+}
+
+/// Preview of an import: proposed creates/reuses and unresolved conflicts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImportPreview {
+    pub source_fingerprint: String,
+    pub entries: Vec<EntryPreview>,
+    pub diagnostics: Vec<ImportDiagnostic>,
+}
+
+impl ImportPreview {
+    pub fn needs_review(&self) -> bool {
+        self.entries.iter().any(EntryPreview::needs_review)
+    }
 }

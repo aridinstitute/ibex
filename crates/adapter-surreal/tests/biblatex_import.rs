@@ -17,6 +17,7 @@ async fn imported_metadata_is_visible_in_library_rows_and_details() {
         .build();
     let Outcome::ImportBiblatex(report) = state.execute(Command::ImportBiblatex(ImportBiblatex {
         source_text: "@article{paper,title={An imported paper},author={Hopper, Grace},journaltitle={Example Journal},doi={10.1000/paper},keywords={history, computing},date={2024-03-15}}".into(),
+        choices: Default::default(),
     })).await.unwrap() else { panic!("import"); };
     assert_eq!(report.imported.len(), 1);
     let Outcome::GetResourceDetail(detail) = state
@@ -98,6 +99,7 @@ async fn import_persists_people_roles_order_and_survives_reopen() {
     let Outcome::ImportBiblatex(report) = state
         .execute(Command::ImportBiblatex(ImportBiblatex {
             source_text: source.into(),
+            choices: Default::default(),
         }))
         .await
         .unwrap()

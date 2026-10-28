@@ -7,19 +7,31 @@ use oeuvre_app::command::{
     ListPersons, ListResourcesPage, ListResourcesQueryPage, ListTags, RemoveCollectionParent,
     RenameCollection, SetResourceFavorite, UpdateResource,
 };
-use oeuvre_app::command::{ImportBiblatex, ImportReport};
+use oeuvre_app::command::{ImportBiblatex, ImportReport, PreviewBiblatex};
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
-    Collection, CollectionId, CollectionTreeNode, Name, NewResource, NonEmptyStr, Person, Resource,
-    ResourceCounts, ResourceDetail, ResourceId, ResourcePage, ResourceQuery, SortedResourcePage,
-    Tag,
+    Collection, CollectionId, CollectionTreeNode, ImportChoices, ImportPreview, Name, NewResource,
+    NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId, ResourcePage,
+    ResourceQuery, SortedResourcePage, Tag,
 };
 use std::{io::Read as _, path::PathBuf};
 use tokio::sync::oneshot;
 
+/// File contents plus preview for the GUI review step.
+#[derive(Debug, Clone)]
+pub struct BiblatexImportPlan {
+    pub source_text: String,
+    pub preview: ImportPreview,
+}
+
 pub enum DbRequest {
-    ImportBiblatex {
+    PreviewBiblatex {
         path: PathBuf,
+        reply: oneshot::Sender<Result<BiblatexImportPlan, String>>,
+    },
+    ImportBiblatex {
+        source_text: String,
+        choices: ImportChoices,
         reply: oneshot::Sender<Result<ImportReport, String>>,
     },
     ListPage {
@@ -111,11 +123,29 @@ pub struct DbWorker {
 }
 
 impl DbWorker {
-    /// Read and import a UTF-8 bibliography file on the database worker.
-    pub async fn import_biblatex(&self, path: PathBuf) -> Result<ImportReport, String> {
+    /// Read a bibliography and build a shared preview (no writes).
+    pub async fn preview_biblatex(&self, path: PathBuf) -> Result<BiblatexImportPlan, String> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(DbRequest::ImportBiblatex { path, reply: tx })
+            .send(DbRequest::PreviewBiblatex { path, reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    /// Persist a previously previewed bibliography with review choices.
+    pub async fn import_biblatex(
+        &self,
+        source_text: String,
+        choices: ImportChoices,
+    ) -> Result<ImportReport, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::ImportBiblatex {
+                source_text,
+                choices,
+                reply: tx,
+            })
             .map_err(|_| "db worker stopped".to_string())?;
         rx.await
             .map_err(|_| "db worker dropped the request".to_string())?
@@ -135,27 +165,38 @@ impl DbWorker {
                 rt.block_on(async move {
                     for req in rx {
                         match req {
-                            DbRequest::ImportBiblatex { path, reply } => {
+                            DbRequest::PreviewBiblatex { path, reply } => {
                                 let result = async {
-                                    // File I/O and parsing stay on this worker, never GPUI's executor.
-                                    let file = std::fs::File::open(&path)
-                                        .map_err(|e| format!("Unable to open bibliography: {e}"))?;
-                                    let mut bytes = Vec::new();
-                                    const MAX_BYTES: u64 = 16 * 1024 * 1024;
-                                    file.take(MAX_BYTES + 1)
-                                        .read_to_end(&mut bytes)
-                                        .map_err(|e| format!("Unable to read bibliography: {e}"))?;
-                                    if bytes.len() as u64 > MAX_BYTES {
-                                        return Err(
-                                            "Bibliography exceeds the 16 MiB import limit".into()
-                                        );
+                                    let source_text = read_bibliography_file(&path)?;
+                                    match state
+                                        .execute(Command::PreviewBiblatex(PreviewBiblatex {
+                                            source_text: source_text.clone(),
+                                        }))
+                                        .await
+                                        .map_err(|e| e.to_string())?
+                                    {
+                                        Outcome::PreviewBiblatex(preview) => {
+                                            Ok(BiblatexImportPlan {
+                                                source_text,
+                                                preview,
+                                            })
+                                        }
+                                        _ => Err("unexpected outcome from preview_biblatex".into()),
                                     }
-                                    let source_text = String::from_utf8(bytes).map_err(|_| {
-                                        "Bibliography must be UTF-8 text".to_string()
-                                    })?;
+                                }
+                                .await;
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::ImportBiblatex {
+                                source_text,
+                                choices,
+                                reply,
+                            } => {
+                                let result = async {
                                     match state
                                         .execute(Command::ImportBiblatex(ImportBiblatex {
                                             source_text,
+                                            choices,
                                         }))
                                         .await
                                         .map_err(|e| e.to_string())?
@@ -727,6 +768,21 @@ impl DbWorker {
         rx.blocking_recv()
             .map_err(|_| "db worker dropped the request".to_string())?
     }
+}
+
+fn read_bibliography_file(path: &PathBuf) -> Result<String, String> {
+    // File I/O stays on the db worker, never GPUI's executor.
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("Unable to open bibliography: {e}"))?;
+    let mut bytes = Vec::new();
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    file.take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Unable to read bibliography: {e}"))?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err("Bibliography exceeds the 16 MiB import limit".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "Bibliography must be UTF-8 text".to_string())
 }
 
 #[cfg(test)]

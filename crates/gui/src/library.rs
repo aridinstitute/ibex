@@ -28,10 +28,11 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Focusable as _, *};
 
 use oeuvre_core::{
-    Collection, CollectionId, CollectionTreeNode, NonEmptyStr, ParentRule, Person, PersonId,
-    PublishedRange, Resource, ResourceCounts, ResourceDetail, ResourceFilter, ResourceId,
-    ResourceKind, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, SortDirection, Tag,
-    TagId, UtcMillis, format_recorded_date,
+    Collection, CollectionId, CollectionTreeNode, EntryChoice, EntryProposal, ImportChoices,
+    NonEmptyStr, ParentRule, Person, PersonChoice as ImportPersonChoice, PersonId,
+    PersonMatchPreview, PublishedRange, Resource, ResourceCounts, ResourceDetail, ResourceFilter,
+    ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary,
+    SortDirection, Tag, TagId, UtcMillis, format_recorded_date,
 };
 
 use crate::collections::{CollectionChoice, CollectionDelegate, flatten_collections};
@@ -58,6 +59,65 @@ use oeuvre_app::command::ImportReport;
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
 /// enough that the demo library spans several pages.
 pub const PAGE_SIZE: u32 = 50;
+
+/// Skip entries that still need review; create new people for ambiguous names.
+fn safe_skip_choices(preview: &oeuvre_core::ImportPreview) -> ImportChoices {
+    let mut choices = ImportChoices::default();
+    for entry in &preview.entries {
+        if !entry.needs_review() {
+            continue;
+        }
+        choices
+            .entries
+            .insert(entry.entry_key.clone(), EntryChoice::Skip);
+        for person in &entry.people {
+            if matches!(person.match_, PersonMatchPreview::Ambiguous { .. }) {
+                choices.people.insert(
+                    ImportChoices::person_key(&entry.entry_key, person.index),
+                    ImportPersonChoice::CreateNew,
+                );
+            }
+        }
+    }
+    choices
+}
+
+/// Import publication duplicates explicitly; create new people when ambiguous.
+fn intentional_duplicate_choices(preview: &oeuvre_core::ImportPreview) -> ImportChoices {
+    let mut choices = ImportChoices::default();
+    for entry in &preview.entries {
+        if matches!(
+            entry.proposal,
+            EntryProposal::PublicationDuplicate { .. }
+        ) {
+            choices
+                .entries
+                .insert(entry.entry_key.clone(), EntryChoice::IntentionalDuplicate);
+        } else if entry.needs_review()
+            && !matches!(entry.proposal, EntryProposal::AlreadyCommitted { .. })
+        {
+            // Container / other conflicts: skip rather than invent merges.
+            if entry
+                .conflicts
+                .iter()
+                .any(|c| c.code != oeuvre_core::import_codes::AMBIGUOUS_CREATOR)
+            {
+                choices
+                    .entries
+                    .insert(entry.entry_key.clone(), EntryChoice::Skip);
+            }
+        }
+        for person in &entry.people {
+            if matches!(person.match_, PersonMatchPreview::Ambiguous { .. }) {
+                choices.people.insert(
+                    ImportChoices::person_key(&entry.entry_key, person.index),
+                    ImportPersonChoice::CreateNew,
+                );
+            }
+        }
+    }
+    choices
+}
 
 /// Visible sidebar rows from a collection forest, respecting expand state.
 /// The `Option<CollectionId>` is the tree parent that placed this row (`None` for roots).
@@ -2203,7 +2263,7 @@ impl LibraryApp {
         });
         let worker = self.table.read(cx).delegate().worker().clone();
         self.import_task = Some(cx.spawn_in(window, async move |app, window| {
-            let result: Result<Option<ImportReport>, String> = async {
+            let result: Result<Option<crate::db::BiblatexImportPlan>, String> = async {
                 let paths = paths
                     .await
                     .map_err(|e| format!("File picker closed: {e}"))?
@@ -2216,14 +2276,22 @@ impl LibraryApp {
                     cx.notify();
                 })
                 .map_err(|e| e.to_string())?;
-                worker.import_biblatex(path).await.map(Some)
+                worker.preview_biblatex(path).await.map(Some)
             }
             .await;
             _ = app.update_in(window, |app, window, cx| {
                 app.import_state = ImportState::Idle;
                 match result {
                     Ok(None) => {}
-                    Ok(Some(report)) => app.show_import_report(Ok(report), window, cx),
+                    Ok(Some(plan)) if !plan.preview.needs_review() => {
+                        app.commit_biblatex_import(
+                            plan.source_text,
+                            ImportChoices::default(),
+                            window,
+                            cx,
+                        );
+                    }
+                    Ok(Some(plan)) => app.show_import_review(plan, window, cx),
                     Err(error) => app.show_import_report(Err(error), window, cx),
                 }
                 cx.notify();
@@ -2232,13 +2300,146 @@ impl LibraryApp {
         cx.notify();
     }
 
+    fn commit_biblatex_import(
+        &mut self,
+        source_text: String,
+        choices: ImportChoices,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.import_state = ImportState::Importing;
+        let worker = self.table.read(cx).delegate().worker().clone();
+        self.import_task = Some(cx.spawn_in(window, async move |app, window| {
+            let result = worker.import_biblatex(source_text, choices).await;
+            _ = app.update_in(window, |app, window, cx| {
+                app.import_state = ImportState::Idle;
+                app.show_import_report(result, window, cx);
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn show_import_review(
+        &mut self,
+        plan: crate::db::BiblatexImportPlan,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let review_lines: Vec<String> = plan
+            .preview
+            .entries
+            .iter()
+            .filter(|e| e.needs_review())
+            .flat_map(|e| {
+                e.conflicts.iter().map(move |c| {
+                    format!(
+                        "{} — {}: {}",
+                        e.entry_key,
+                        c.code,
+                        c.message
+                    )
+                })
+            })
+            .take(100)
+            .collect();
+        let summary = format!(
+            "{} entr{} need review before saving",
+            plan.preview.entries.iter().filter(|e| e.needs_review()).count(),
+            if plan.preview.entries.iter().filter(|e| e.needs_review()).count() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        );
+        let source_text = plan.source_text.clone();
+        let preview = plan.preview.clone();
+        let app = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let source_skip = source_text.clone();
+            let preview_skip = preview.clone();
+            let source_dup = source_text.clone();
+            let preview_dup = preview.clone();
+            let app_skip = app.clone();
+            let app_dup = app.clone();
+            dialog
+                .title("Review import conflicts")
+                .entrance(gpui_kit::component::dialog::DialogEntrance::None)
+                .width(px(560.))
+                .child(
+                    v_flex()
+                        .id("biblatex-import-review")
+                        .test_support()
+                        .aria_label(summary.clone())
+                        .gap_3()
+                        .child(summary.clone())
+                        .child(
+                            div()
+                                .id("biblatex-import-review-issues")
+                                .max_h(px(280.))
+                                .overflow_y_scroll()
+                                .child(v_flex().gap_2().children(
+                                    review_lines.iter().map(|line| {
+                                        div().text_size(px(12.)).child(line.clone())
+                                    }),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(
+                                    "Choices are applied by the shared import pipeline and revalidated on save. Citekeys stay local to this source.",
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("import-skip-conflicts")
+                                        .label("Skip conflicted")
+                                        .on_click(move |_, window, cx| {
+                                            window.close_dialog(cx);
+                                            let choices = safe_skip_choices(&preview_skip);
+                                            let _ = app_skip.update(cx, |this, cx| {
+                                                this.commit_biblatex_import(
+                                                    source_skip.clone(),
+                                                    choices,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    Button::new("import-intentional-dups")
+                                        .label("Import duplicates")
+                                        .on_click(move |_, window, cx| {
+                                            window.close_dialog(cx);
+                                            let choices =
+                                                intentional_duplicate_choices(&preview_dup);
+                                            let _ = app_dup.update(cx, |this, cx| {
+                                                this.commit_biblatex_import(
+                                                    source_dup.clone(),
+                                                    choices,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }),
+                                ),
+                        ),
+                )
+        });
+    }
+
     fn show_import_report(
         &mut self,
         result: Result<ImportReport, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A failed storage operation may follow successful entries, so refresh on errors too.
+        // Refresh even when later units failed — earlier commits remain.
         self.refresh_counts(window, cx);
         let selected = self.selected;
         self.table.update(cx, |table, cx| {
@@ -2248,16 +2449,53 @@ impl LibraryApp {
         });
         let (title, summary, issues) = match result {
             Ok(report) => {
-                let summary = format!("{} imported · {} skipped · {} warnings", report.imported.len(), report.skipped.len(), report.warnings.len());
-                let count = report.skipped.len() + report.warnings.len();
-                let mut issues: Vec<String> = report.skipped.iter().map(|issue| ("Skipped", issue))
+                let summary = format!(
+                    "{} imported · {} reused · {} skipped · {} conflicted · {} failed · {} not attempted · {} warnings",
+                    report.imported.len(),
+                    report.reused.len(),
+                    report.skipped.len(),
+                    report.conflicted.len(),
+                    report.failed.len(),
+                    report.not_attempted.len(),
+                    report.warnings.len()
+                );
+                let count = report.skipped.len()
+                    + report.warnings.len()
+                    + report.conflicted.len()
+                    + report.failed.len()
+                    + report.not_attempted.len();
+                let mut issues: Vec<String> = report
+                    .skipped
+                    .iter()
+                    .map(|issue| ("Skipped", issue))
+                    .chain(report.conflicted.iter().map(|issue| ("Conflict", issue)))
+                    .chain(report.failed.iter().map(|issue| ("Failed", issue)))
+                    .chain(
+                        report
+                            .not_attempted
+                            .iter()
+                            .map(|issue| ("Not attempted", issue)),
+                    )
                     .chain(report.warnings.iter().map(|issue| ("Warning", issue)))
                     .take(100)
-                    .map(|(kind, issue)| format!("{kind} — {}: {}", issue.entry_key.as_deref().unwrap_or("bibliography"), issue.message)).collect();
-                if count > 100 { issues.push(format!("Showing the first 100 of {count} issues.")); }
+                    .map(|(kind, issue)| {
+                        format!(
+                            "{kind} — {}: {}",
+                            issue.entry_key.as_deref().unwrap_or("bibliography"),
+                            issue.message
+                        )
+                    })
+                    .collect();
+                if count > 100 {
+                    issues.push(format!("Showing the first 100 of {count} issues."));
+                }
                 ("BibLaTeX import complete", summary, issues)
-            },
-            Err(error) => ("BibLaTeX import failed", error, vec!["If a storage error stopped the import, earlier entries may already have been added.".into()]),
+            }
+            Err(error) => (
+                "BibLaTeX import failed",
+                error,
+                vec!["The import could not start; no entries were written.".into()],
+            ),
         };
         window.open_dialog(cx, move |dialog, _, cx| {
             dialog.title(title).entrance(gpui_kit::component::dialog::DialogEntrance::None).width(px(560.)).child(
@@ -2266,10 +2504,11 @@ impl LibraryApp {
                     .child(div().id("biblatex-import-issues").max_h(px(320.)).overflow_y_scroll()
                         .child(v_flex().gap_2().children(issues.iter().map(|issue| div().text_size(px(12.)).child(issue.clone())))))
                     .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground)
-                        .child("Imports add new entries; existing records are not overwritten. Current library filters still apply."))
+                        .child("Existing records are not overwritten. Same-source retries reuse committed entries. Current library filters still apply."))
             )
         });
     }
+
     fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.import_state != ImportState::Idle {
             window.push_notification("Wait for the bibliography import to finish", cx);
