@@ -33,8 +33,7 @@ async fn csl_json_import_and_retry_through_surreal() {
       }
     ]"#;
 
-    let fingerprint =
-        oeuvre_core::source_fingerprint(oeuvre_core::ImportFormat::CslJson, source);
+    let fingerprint = oeuvre_core::source_fingerprint(oeuvre_core::ImportFormat::CslJson, source);
     let Outcome::ImportCslJson(first) = state
         .execute(Command::ImportCslJson(ImportCslJson {
             source_text: source.to_owned(),

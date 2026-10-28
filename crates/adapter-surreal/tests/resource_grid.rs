@@ -296,3 +296,152 @@ async fn grid_siblings_keep_existing_sort_missing_value_and_tie_semantics() {
             .is_invalid()
     );
 }
+
+#[tokio::test]
+async fn expansion_returns_all_children_and_marks_only_non_leaves() {
+    let store = SurrealStore::open_memory().await.unwrap();
+    let mut new = bare(ResourceKind::Journal, "Journal", None);
+    new.publisher = Some("Inherited Press".into());
+    let root = store.create_resource(new).await.unwrap();
+    let mut expected = Vec::new();
+    for ix in 0..64 {
+        let title = format!("Issue {ix:02}");
+        let issue = store
+            .create_resource(bare(ResourceKind::Issue, &title, Some(root.id)))
+            .await
+            .unwrap();
+        expected.push((issue.id, ix % 2 == 0));
+        if ix % 2 == 0 {
+            store
+                .create_resource(bare(
+                    ResourceKind::JournalArticle,
+                    "Article",
+                    Some(issue.id),
+                ))
+                .await
+                .unwrap();
+        }
+    }
+    let page = store
+        .list_resource_grid_page(
+            ResourceGridParent::Children(root.id),
+            &ResourceQuery {
+                sort: Some((ResourceSort::Title, SortDirection::Ascending)),
+                filter: ResourceFilter::none(),
+            },
+            0,
+            u32::MAX,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.rows.len(), 64);
+    assert!(page.next_offset.is_none());
+    assert_eq!(
+        page.rows
+            .iter()
+            .map(|row| (row.summary.id, row.has_children))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(
+        page.rows
+            .iter()
+            .all(|row| row.summary.publisher.as_deref() == Some("Inherited Press"))
+    );
+}
+
+/// Run with `cargo test -p oeuvre-adapter-surreal --release --test resource_grid grid_loading_timings -- --ignored --nocapture`.
+/// Measures fully materialized pages, excluding fixture creation and store opening.
+#[tokio::test]
+#[ignore = "opt-in loading performance comparison"]
+async fn grid_loading_timings() {
+    use std::time::Instant;
+
+    let store = SurrealStore::open_memory().await.unwrap();
+    let mut groups = Vec::new();
+    // Many roots exercise initial loading; a wide group exercises all-child expansion.
+    for ix in 0..1_000 {
+        let mut new = bare(ResourceKind::Journal, &format!("Journal {ix:04}"), None);
+        new.publisher = Some("Inherited Press".into());
+        groups.push(store.create_resource(new).await.unwrap().id);
+    }
+    let parent = groups[0];
+    for ix in 0..1_000 {
+        let child = store
+            .create_resource(bare(
+                ResourceKind::Issue,
+                &format!("Chapter {ix:04}"),
+                Some(parent),
+            ))
+            .await
+            .unwrap();
+        // Many non-leaves also exercise has_children membership checks.
+        if ix % 2 == 0 {
+            store
+                .create_resource(bare(
+                    ResourceKind::JournalArticle,
+                    "Nested chapter",
+                    Some(child.id),
+                ))
+                .await
+                .unwrap();
+        }
+    }
+
+    for (name, scope, limit, expected) in [
+        ("roots_50", ResourceGridParent::Roots, 50, 50),
+        ("roots_200", ResourceGridParent::Roots, 200, 200),
+        (
+            "children_all",
+            ResourceGridParent::Children(parent),
+            u32::MAX,
+            1_000,
+        ),
+    ] {
+        for (sort_name, sort) in [
+            ("newest", None),
+            (
+                "title",
+                Some((ResourceSort::Title, SortDirection::Ascending)),
+            ),
+        ] {
+            let query = ResourceQuery {
+                sort,
+                filter: ResourceFilter::none(),
+            };
+            let mut elapsed = Vec::new();
+            for sample in 0..18 {
+                let started = Instant::now();
+                let page = store
+                    .list_resource_grid_page(scope, &query, 0, limit)
+                    .await
+                    .unwrap();
+                let duration = started.elapsed();
+                assert_eq!(page.rows.len(), expected);
+                if scope == ResourceGridParent::Children(parent) {
+                    assert!(
+                        page.next_offset.is_none(),
+                        "expansion must return every child"
+                    );
+                    assert_eq!(page.rows.iter().filter(|row| row.has_children).count(), 500);
+                    assert!(
+                        page.rows
+                            .iter()
+                            .all(|row| row.summary.publisher.as_deref() == Some("Inherited Press"))
+                    );
+                } else {
+                    assert!(page.next_offset.is_some());
+                }
+                std::hint::black_box(page);
+                if sample >= 3 {
+                    elapsed.push(duration);
+                }
+            }
+            elapsed.sort();
+            eprintln!(
+                "grid_loading/{name}/{sort_name}: median={:?} min={:?} max={:?}",
+                elapsed[7], elapsed[0], elapsed[14]
+            );
+        }
+    }
+}

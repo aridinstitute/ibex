@@ -94,10 +94,7 @@ fn safe_skip_choices(preview: &oeuvre_core::ImportPreview) -> ImportChoices {
 fn intentional_duplicate_choices(preview: &oeuvre_core::ImportPreview) -> ImportChoices {
     let mut choices = ImportChoices::default();
     for entry in &preview.entries {
-        if matches!(
-            entry.proposal,
-            EntryProposal::PublicationDuplicate { .. }
-        ) {
+        if matches!(entry.proposal, EntryProposal::PublicationDuplicate { .. }) {
             choices
                 .entries
                 .insert(entry.entry_key.clone(), EntryChoice::IntentionalDuplicate);
@@ -2601,21 +2598,27 @@ impl LibraryApp {
             .iter()
             .filter(|e| e.needs_review())
             .flat_map(|e| {
-                e.conflicts.iter().map(move |c| {
-                    format!(
-                        "{} — {}: {}",
-                        e.entry_key,
-                        c.code,
-                        c.message
-                    )
-                })
+                e.conflicts
+                    .iter()
+                    .map(move |c| format!("{} — {}: {}", e.entry_key, c.code, c.message))
             })
             .take(100)
             .collect();
         let summary = format!(
             "{} entr{} need review before saving",
-            plan.preview.entries.iter().filter(|e| e.needs_review()).count(),
-            if plan.preview.entries.iter().filter(|e| e.needs_review()).count() == 1 {
+            plan.preview
+                .entries
+                .iter()
+                .filter(|e| e.needs_review())
+                .count(),
+            if plan
+                .preview
+                .entries
+                .iter()
+                .filter(|e| e.needs_review())
+                .count()
+                == 1
+            {
                 "y"
             } else {
                 "ies"

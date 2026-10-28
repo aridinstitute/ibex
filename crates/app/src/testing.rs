@@ -292,10 +292,7 @@ impl MemoryStore {
 
     /// Test helper: remove a resource and its creator edges (Task 06 stale preview).
     pub fn test_delete_resource(&self, id: ResourceId) {
-        self.resources
-            .lock()
-            .expect("MemoryStore lock")
-            .remove(&id);
+        self.resources.lock().expect("MemoryStore lock").remove(&id);
         self.created
             .lock()
             .expect("MemoryStore lock")
@@ -679,8 +676,7 @@ impl Store for MemoryStore {
     }
 
     async fn list_persons(&self) -> Result<Vec<Person>, StoreError> {
-        self.list_persons_calls
-            .fetch_add(1, AtomicOrdering::SeqCst);
+        self.list_persons_calls.fetch_add(1, AtomicOrdering::SeqCst);
         let state = self.people.lock().expect("MemoryStore lock");
         Ok(state.by_id.values().cloned().collect())
     }
@@ -1156,8 +1152,7 @@ impl Store for MemoryStore {
     }
 
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError> {
-        self.get_resource_calls
-            .fetch_add(1, AtomicOrdering::SeqCst);
+        self.get_resource_calls.fetch_add(1, AtomicOrdering::SeqCst);
         let row = self
             .resources
             .lock()

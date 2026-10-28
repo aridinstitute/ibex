@@ -219,14 +219,8 @@ impl AccessedDoc {
             .map(NonEmptyStr::try_new)
             .transpose()
             .map_err(|e| StoreError::invalid(e.to_string()))?;
-        BibliographicDate::try_new_precise(
-            instant,
-            end,
-            self.precision,
-            self.certainty,
-            display,
-        )
-        .map_err(|e| StoreError::invalid(e.to_string()))
+        BibliographicDate::try_new_precise(instant, end, self.precision, self.certainty, display)
+            .map_err(|e| StoreError::invalid(e.to_string()))
     }
 }
 
@@ -827,9 +821,7 @@ impl SurrealStore {
         }
 
         self.db
-            .query(
-                "DEFINE TABLE created TYPE RELATION IN person OUT resource ENFORCED",
-            )
+            .query("DEFINE TABLE created TYPE RELATION IN person OUT resource ENFORCED")
             .await
             .map_err(map_err)?
             .check()
@@ -1392,10 +1384,8 @@ impl SurrealStore {
             let child = by_id
                 .get(&id)
                 .ok_or_else(|| StoreError::new(format!("missing summary stub {id}")))?;
-            let ancestors = gather_ancestors(child, |parent_id| {
-                Ok(by_id.get(&parent_id).cloned())
-            })
-            .map_err(|e| StoreError::invalid(e.to_string()))?;
+            let ancestors = gather_ancestors(child, |parent_id| Ok(by_id.get(&parent_id).cloned()))
+                .map_err(|e| StoreError::invalid(e.to_string()))?;
             let effective = resolve_effective(child, &ancestors)
                 .map_err(|e| StoreError::invalid(e.to_string()))?;
             let (date_added, date_edited) =
@@ -2292,9 +2282,11 @@ impl Store for SurrealStore {
             )
             .await?;
         let ids = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
-        let parents = if ids.is_empty() {
-            Vec::new()
-        } else {
+        // These reads depend only on the page IDs, not on each other's results.
+        let child_parents = async {
+            if ids.is_empty() {
+                return Ok::<_, StoreError>(std::collections::HashSet::new());
+            }
             let sql = if visible.is_some() {
                 "SELECT VALUE parent FROM resource WHERE parent IN $ids AND id IN $visible GROUP BY parent"
             } else {
@@ -2307,11 +2299,14 @@ impl Store for SurrealStore {
                 .bind(("visible", visible.unwrap_or_default()))
                 .await
                 .map_err(map_err)?;
-            response.take::<Vec<RecordId>>(0).map_err(map_err)?
+            Ok(response
+                .take::<Vec<RecordId>>(0)
+                .map_err(map_err)?
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>())
         };
-        let rows = self
-            .summaries_for_rows(rows)
-            .await?
+        let (parents, summaries) = tokio::try_join!(child_parents, self.summaries_for_rows(rows))?;
+        let rows = summaries
             .into_iter()
             .map(|summary| {
                 let has_children = parents.contains(&Self::resource_key(summary.id));

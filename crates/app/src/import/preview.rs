@@ -14,16 +14,17 @@ use crate::{AppState, CommandError};
 use super::link::{
     ContainerDecision, ImportEntityIndex, plan_parent_for_entry, resolve_explicit_container,
 };
-use super::save::{seed_identity_index, seed_index_from_store, PersonLookupCache};
+use super::save::{PersonLookupCache, seed_identity_index, seed_index_from_store};
 
 /// Inspect `draft` against the library without persisting.
 pub async fn preview_draft(
     state: &AppState,
     draft: ImportDraft,
 ) -> Result<ImportPreview, CommandError> {
-    let fingerprint = draft.source_fingerprint.clone().unwrap_or_else(|| {
-        source_fingerprint(draft.provenance.format, "")
-    });
+    let fingerprint = draft
+        .source_fingerprint
+        .clone()
+        .unwrap_or_else(|| source_fingerprint(draft.provenance.format, ""));
 
     let identity = seed_identity_index(state).await?;
     let mut index = ImportEntityIndex::default();

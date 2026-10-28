@@ -7,8 +7,8 @@ use oeuvre_core::{ImportChoices, ImportPreview, ImportReport};
 
 use crate::event::Event;
 use crate::import::{
-    parse_biblatex, parse_csl_json, preview_draft, save_draft_inner, save_draft_with_choices,
-    ImportHooks,
+    ImportHooks, parse_biblatex, parse_csl_json, preview_draft, save_draft_inner,
+    save_draft_with_choices,
 };
 use crate::{AppState, CommandError, Handler, Outcome};
 
@@ -44,7 +44,8 @@ impl Handler for ImportBiblatex {
     type Output = Imported;
 
     async fn run(self, state: &AppState, ev: &mut Event) -> Result<Imported, CommandError> {
-        let draft = parse_biblatex(&self.source_text).map_err(|e| CommandError::Invalid(e.message))?;
+        let draft =
+            parse_biblatex(&self.source_text).map_err(|e| CommandError::Invalid(e.message))?;
         let report =
             save_draft_inner(state, draft, self.choices, Some(ev), ImportHooks::default()).await?;
         Ok(Imported(report))
@@ -72,7 +73,8 @@ impl Handler for ImportCslJson {
     type Output = ImportedCsl;
 
     async fn run(self, state: &AppState, ev: &mut Event) -> Result<ImportedCsl, CommandError> {
-        let draft = parse_csl_json(&self.source_text).map_err(|e| CommandError::Invalid(e.message))?;
+        let draft =
+            parse_csl_json(&self.source_text).map_err(|e| CommandError::Invalid(e.message))?;
         let report =
             save_draft_inner(state, draft, self.choices, Some(ev), ImportHooks::default()).await?;
         Ok(ImportedCsl(report))
@@ -99,7 +101,8 @@ impl Handler for PreviewCslJson {
     type Output = PreviewedCsl;
 
     async fn run(self, state: &AppState, _ev: &mut Event) -> Result<PreviewedCsl, CommandError> {
-        let draft = parse_csl_json(&self.source_text).map_err(|e| CommandError::Invalid(e.message))?;
+        let draft =
+            parse_csl_json(&self.source_text).map_err(|e| CommandError::Invalid(e.message))?;
         let preview = preview_draft(state, draft).await?;
         Ok(PreviewedCsl(preview))
     }
@@ -125,7 +128,8 @@ impl Handler for PreviewBiblatex {
     type Output = Previewed;
 
     async fn run(self, state: &AppState, _ev: &mut Event) -> Result<Previewed, CommandError> {
-        let draft = parse_biblatex(&self.source_text).map_err(|e| CommandError::Invalid(e.message))?;
+        let draft =
+            parse_biblatex(&self.source_text).map_err(|e| CommandError::Invalid(e.message))?;
         let preview = preview_draft(state, draft).await?;
         Ok(Previewed(preview))
     }

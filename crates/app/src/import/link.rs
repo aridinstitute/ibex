@@ -59,7 +59,11 @@ pub(crate) struct ImportEntityIndex {
 }
 
 impl ImportEntityIndex {
-    pub fn seed_from_store(&mut self, rows: &[ResourceSummary], details: &[(ResourceId, Resource)]) {
+    pub fn seed_from_store(
+        &mut self,
+        rows: &[ResourceSummary],
+        details: &[(ResourceId, Resource)],
+    ) {
         for row in rows {
             match row.kind {
                 ResourceKind::Journal => {
@@ -166,7 +170,10 @@ pub(crate) fn normalize_title(title: &str) -> String {
 }
 
 pub(crate) fn issue_title(volume: Option<&str>, number: Option<&str>) -> String {
-    match (volume.map(str::trim).filter(|s| !s.is_empty()), number.map(str::trim).filter(|s| !s.is_empty())) {
+    match (
+        volume.map(str::trim).filter(|s| !s.is_empty()),
+        number.map(str::trim).filter(|s| !s.is_empty()),
+    ) {
         (Some(v), Some(n)) => format!("Vol. {v}, no. {n}"),
         (Some(v), None) => format!("Vol. {v}"),
         (None, Some(n)) => format!("No. {n}"),
@@ -365,7 +372,10 @@ fn match_or_create_issue(
     }
     let vol_key = vol.unwrap_or("").to_owned();
     let num_key = num.unwrap_or("").to_owned();
-    if let Some(id) = index.issues.get(&(journal_id, vol_key.clone(), num_key.clone())) {
+    if let Some(id) = index
+        .issues
+        .get(&(journal_id, vol_key.clone(), num_key.clone()))
+    {
         return Ok(ContainerDecision::Reuse(*id));
     }
     let title = issue_title(vol, num);
@@ -482,9 +492,16 @@ fn plan_article_under_journal(
         }
     };
 
-    let has_issue_evidence =
-        entry.resource.volume.as_deref().is_some_and(|s| !s.trim().is_empty())
-            || entry.resource.issue.as_deref().is_some_and(|s| !s.trim().is_empty());
+    let has_issue_evidence = entry
+        .resource
+        .volume
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+        || entry
+            .resource
+            .issue
+            .as_deref()
+            .is_some_and(|s| !s.trim().is_empty());
 
     if !has_issue_evidence {
         planned.parent_id = Some(journal_id);

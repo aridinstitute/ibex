@@ -18,19 +18,18 @@ pub use collection::{
     collection_descendant_closure,
 };
 pub use identifier::{Identifier, deserialize_identifiers};
-pub use inheritance::{
-    Effective, EffectiveValues, InheritanceError, InheritableField, ValueOrigin,
-    INHERITANCE_MAX_DEPTH, fields_inherited_from, gather_ancestors, is_never_inherited,
-    never_inherited, resolve_effective,
-};
 pub use import::{
-    codes as import_codes, source_fingerprint, ContainerPreview, CreatorPreview,
-    DiagnosticSeverity, EntryChoice, EntryPreview, EntryProposal, EntryProvenance,
-    IMPORT_MAX_SOURCE_BYTES, IMPORT_PARSER_VERSION, ImportChoices, ImportConflict,
+    ContainerPreview, CreatorPreview, DiagnosticSeverity, EntryChoice, EntryPreview, EntryProposal,
+    EntryProvenance, IMPORT_MAX_SOURCE_BYTES, IMPORT_PARSER_VERSION, ImportChoices, ImportConflict,
     ImportDiagnostic, ImportDraft, ImportEntryDraft, ImportEntryOutcomeKind, ImportFormat,
     ImportIssue, ImportPreview, ImportProgress, ImportReport, ImportTempId, ImportedEntry,
     PersonCandidate, PersonChoice, PersonMatchPreview, SeriesPreview, SourceProvenance,
-    UnresolvedCreator,
+    UnresolvedCreator, codes as import_codes, source_fingerprint,
+};
+pub use inheritance::{
+    Effective, EffectiveValues, INHERITANCE_MAX_DEPTH, InheritableField, InheritanceError,
+    ValueOrigin, fields_inherited_from, gather_ancestors, is_never_inherited, never_inherited,
+    resolve_effective,
 };
 pub use pages::{PageBound, PageSpan, Pages, deserialize_pages_opt};
 pub use person::{Name, NameError, NameKey, NonEmptyStr, Person, PersonError, PersonId};

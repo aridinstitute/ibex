@@ -158,7 +158,10 @@ pub struct NameKey(String);
 impl NameKey {
     pub fn from_name(name: &Name) -> Self {
         if name.is_literal() {
-            return Self(format!("*|{}|||", normalize_key_part(name.last().unwrap_or(""))));
+            return Self(format!(
+                "*|{}|||",
+                normalize_key_part(name.last().unwrap_or(""))
+            ));
         }
         Self(format!(
             "{}|{}|{}|{}",

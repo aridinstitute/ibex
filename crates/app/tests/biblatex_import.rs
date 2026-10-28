@@ -151,16 +151,10 @@ async fn imports_a_mixed_batch_and_reports_skips_without_losing_fields() {
     ] {
         assert_eq!(data[key], expected, "mapping {key}");
     }
-    assert_eq!(
-        chapter.pages.as_ref().map(|p| p.as_str()),
-        Some("10–20")
-    );
+    assert_eq!(chapter.pages.as_ref().map(|p| p.as_str()), Some("10–20"));
     assert!(chapter.pages.as_ref().unwrap().is_structured());
     assert_eq!(chapter.isbns[0].as_str(), "978-0-306-40615-7");
-    assert_eq!(
-        chapter.isbns[0].canonical.as_deref(),
-        Some("9780306406157")
-    );
+    assert_eq!(chapter.isbns[0].canonical.as_deref(), Some("9780306406157"));
     assert_eq!(chapter.issns[0].as_str(), "1234-5678");
     assert_eq!(chapter.isrns[0].as_str(), "EXAMPLE-1");
     assert_eq!(chapter.keywords, ["history", "research"]);
@@ -180,11 +174,7 @@ async fn imports_a_mixed_batch_and_reports_skips_without_losing_fields() {
     assert!(chapter.event_date.is_some());
     assert!(chapter.accessed.is_some());
     assert!(
-        !chapter
-            .accessed
-            .as_ref()
-            .unwrap()
-            .claims_exact_time(),
+        !chapter.accessed.as_ref().unwrap().claims_exact_time(),
         "date-only urldate must not claim an exact time"
     );
     assert!(chapter.tag_ids.is_empty());
@@ -234,7 +224,7 @@ async fn invalid_syntax_duplicate_keys_and_reference_cycles_write_nothing() {
                 .execute(Command::ImportBiblatex(ImportBiblatex {
                     source_text: source.into(),
                     choices: Default::default(),
-        }))
+                }))
                 .await,
             Err(oeuvre_app::CommandError::Invalid(_))
         ));
@@ -270,7 +260,7 @@ async fn rejects_deep_reference_chains_even_when_parents_appear_first() {
             .execute(Command::ImportBiblatex(ImportBiblatex {
                 source_text: source,
                 choices: Default::default(),
-        }))
+            }))
             .await,
         Err(oeuvre_app::CommandError::Invalid(_))
     ));

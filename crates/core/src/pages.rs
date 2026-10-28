@@ -223,7 +223,11 @@ mod tests {
         let pages = Pages::parse("S10-S20").unwrap();
         assert!(pages.is_structured());
         assert_eq!(
-            pages.spans[0].start.prefix.as_ref().map(NonEmptyStr::as_str),
+            pages.spans[0]
+                .start
+                .prefix
+                .as_ref()
+                .map(NonEmptyStr::as_str),
             Some("S")
         );
         assert_eq!(pages.spans[0].start.number, Some(10));

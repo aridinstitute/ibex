@@ -58,9 +58,7 @@ pub fn parse_biblatex(source: &str) -> Result<ImportDraft, ParseError> {
     let mut next_temp = 1u64;
     for entry in bib.iter() {
         let pre = explicit.get(&entry.key);
-        let original_fields = pre
-            .map(collect_fields_including_notes)
-            .unwrap_or_default();
+        let original_fields = pre.map(collect_fields_including_notes).unwrap_or_default();
         let note = original_fields.get("note").cloned();
         let annotation = original_fields.get("annotation").cloned();
         let inherited_origins = pre
@@ -401,9 +399,8 @@ fn map_entry(entry: &Entry) -> Result<MappedEntry, MapError> {
             ));
         }
     };
-    let title = value(entry, "title").ok_or_else(|| {
-        map_err(import_codes::MISSING_TITLE, "entry needs a title")
-    })?;
+    let title = value(entry, "title")
+        .ok_or_else(|| map_err(import_codes::MISSING_TITLE, "entry needs a title"))?;
     let mut creators = Vec::new();
     let mut incomplete_creators = false;
     let mut field_warnings = Vec::new();
@@ -546,7 +543,10 @@ fn inherited_field_origins(
         if before.get(key).is_some() {
             continue;
         }
-        if matches!(key.as_str(), "crossref" | "xref" | "xdata" | "note" | "annotation") {
+        if matches!(
+            key.as_str(),
+            "crossref" | "xref" | "xdata" | "note" | "annotation"
+        ) {
             continue;
         }
         // Record that the field appeared only after expansion; ancestor key is

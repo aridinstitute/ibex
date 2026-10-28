@@ -9,8 +9,8 @@ use oeuvre_app::command::{
 use oeuvre_app::testing::{MemorySink, MemoryStore};
 use oeuvre_app::{AppState, Command, CommandError, Outcome, Surface};
 use oeuvre_core::{
-    BibliographicDate, CreatorRole, CreatorSpec, Identifier, Name, NewResource, NonEmptyStr,
-    Pages, PersonId, ResourceId, ResourceKind, UtcMillis,
+    BibliographicDate, CreatorRole, CreatorSpec, Identifier, Name, NewResource, NonEmptyStr, Pages,
+    PersonId, ResourceId, ResourceKind, UtcMillis,
 };
 
 fn nes(s: &str) -> NonEmptyStr {
@@ -139,8 +139,7 @@ async fn article_inherits_issue_and_journal_fields_in_detail_and_list() {
     issue.volume = Some("12".into());
     issue.issue = Some("3".into());
     issue.published = Some(
-        BibliographicDate::try_new(UtcMillis::jan_1_utc(2020).unwrap(), Some(nes("2020")))
-            .unwrap(),
+        BibliographicDate::try_new(UtcMillis::jan_1_utc(2020).unwrap(), Some(nes("2020"))).unwrap(),
     );
     let issue = create(&state, issue).await;
 
@@ -160,12 +159,7 @@ async fn article_inherits_issue_and_journal_fields_in_detail_and_list() {
         d.container_title.as_ref().map(|s| s.as_str()),
         Some("Nature")
     );
-    assert_eq!(
-        d.published
-            .as_ref()
-            .and_then(|p| p.display()),
-        Some("2020")
-    );
+    assert_eq!(d.published.as_ref().and_then(|p| p.display()), Some("2020"));
 
     // Stored child is unchanged.
     let stored = raw(&state, article.id).await;

@@ -1,12 +1,12 @@
 //! Shared import orchestration: resolve people/series/containers and persist drafts.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use oeuvre_core::{
-    CreatorRole, CreatorSpec, EntryChoice, ImportedEntry, ImportedResourceWrite, ImportChoices,
-    ImportDraft, ImportEntryDraft, ImportIssue, ImportProgress, ImportReport, Name, NameKey,
+    CreatorRole, CreatorSpec, EntryChoice, ImportChoices, ImportDraft, ImportEntryDraft,
+    ImportIssue, ImportProgress, ImportReport, ImportedEntry, ImportedResourceWrite, Name, NameKey,
     NewSeries, NonEmptyStr, Person, PersonChoice, PersonId, Resource, ResourceId, ResourceKind,
     Series, SeriesId, import_codes,
 };
@@ -68,10 +68,7 @@ impl IdentityIndex {
             let key = normalize_doi(doi);
             if let Some(ids) = self.by_doi.get(&key) {
                 if let Some(id) = ids.first() {
-                    return Some((
-                        *id,
-                        format!("publication DOI already in library ({doi})"),
-                    ));
+                    return Some((*id, format!("publication DOI already in library ({doi})")));
                 }
             }
         }
@@ -95,7 +92,8 @@ impl IdentityIndex {
 }
 
 fn normalize_doi(doi: &str) -> String {
-    doi.trim().trim_start_matches("https://doi.org/")
+    doi.trim()
+        .trim_start_matches("https://doi.org/")
         .trim_start_matches("http://doi.org/")
         .trim_start_matches("doi:")
         .trim()
@@ -183,8 +181,11 @@ pub(crate) async fn save_draft_inner(
         {
             for key in entry_keys.iter().skip(entry_pos) {
                 report.not_attempted.push(
-                    ImportIssue::new(Some(key.clone()), "not attempted because import was cancelled")
-                        .with_code(import_codes::CANCELLED),
+                    ImportIssue::new(
+                        Some(key.clone()),
+                        "not attempted because import was cancelled",
+                    )
+                    .with_code(import_codes::CANCELLED),
                 );
             }
             sync_event_counts(ev.as_deref_mut(), &report);
@@ -329,20 +330,13 @@ pub(crate) async fn save_draft_inner(
             let new_dependencies = parent_plan.new_dependencies;
             let linked = parent_plan.linked;
 
-            let pending_people: Vec<PersonId> =
-                new_people.iter().map(|person| person.id).collect();
+            let pending_people: Vec<PersonId> = new_people.iter().map(|person| person.id).collect();
             let pending_series = new_series.as_ref().map(|s| s.id);
             let pending_resources: Vec<ResourceId> =
                 new_dependencies.iter().map(|r| r.id).collect();
             for dep in &new_dependencies {
-                validate_new_resource_refs(
-                    state,
-                    &dep.to_new(),
-                    &[],
-                    None,
-                    &pending_resources,
-                )
-                .await?;
+                validate_new_resource_refs(state, &dep.to_new(), &[], None, &pending_resources)
+                    .await?;
             }
             validate_new_resource_refs(
                 state,
@@ -479,10 +473,7 @@ enum EntrySave {
     Conflicted(ImportIssue),
 }
 
-async fn revalidate_reuse(
-    state: &AppState,
-    resource_id: ResourceId,
-) -> Result<(), ImportIssue> {
+async fn revalidate_reuse(state: &AppState, resource_id: ResourceId) -> Result<(), ImportIssue> {
     match state.store().get_resource(resource_id).await {
         Ok(_) => Ok(()),
         Err(_) => Err(ImportIssue::new(
@@ -493,9 +484,7 @@ async fn revalidate_reuse(
     }
 }
 
-pub(crate) async fn seed_identity_index(
-    state: &AppState,
-) -> Result<IdentityIndex, CommandError> {
+pub(crate) async fn seed_identity_index(state: &AppState) -> Result<IdentityIndex, CommandError> {
     let mut identity = IdentityIndex::default();
     for resource in state.store().list_resources_for_import().await? {
         identity.remember_resource(&resource);
@@ -602,10 +591,13 @@ async fn plan_creators(
         let people = cache.find_by_name(name);
         let choice = choices.people.get(&ImportChoices::person_key(entry_key, i));
         let id = match (people.as_slice(), choice) {
-            (_, Some(PersonChoice::UseExisting {
-                person_id,
-                expected_name_key,
-            })) => {
+            (
+                _,
+                Some(PersonChoice::UseExisting {
+                    person_id,
+                    expected_name_key,
+                }),
+            ) => {
                 let person = match cache.get(*person_id) {
                     Some(p) => p.clone(),
                     None => state.store().get_person(*person_id).await.map_err(|_| {

@@ -21,10 +21,7 @@ fn parse_biblatex_maps_a_book_without_app_state() {
     assert_eq!(entry.kind(), ResourceKind::Book);
     assert_eq!(entry.title().as_str(), "Notes on the Analytical Engine");
     assert_eq!(entry.unresolved_creators.len(), 1);
-    assert_eq!(
-        entry.unresolved_creators[0].name.display(),
-        "Ada Lovelace"
-    );
+    assert_eq!(entry.unresolved_creators[0].name.display(), "Ada Lovelace");
     assert_eq!(
         entry.resource.publisher.as_deref(),
         Some("Scientific Memoirs")
@@ -72,7 +69,10 @@ fn parse_biblatex_rejects_cycles_and_oversized_sources() {
         "{err:?}"
     );
 
-    let huge = format!("@book{{x,title={{X}}}}{}", " ".repeat(oeuvre_core::IMPORT_MAX_SOURCE_BYTES));
+    let huge = format!(
+        "@book{{x,title={{X}}}}{}",
+        " ".repeat(oeuvre_core::IMPORT_MAX_SOURCE_BYTES)
+    );
     let err = parse_biblatex(&huge).expect_err("too large");
     assert_eq!(err.code, import_codes::SOURCE_TOO_LARGE);
 }
@@ -113,7 +113,11 @@ fn parse_biblatex_inherits_crossref_without_parent_resource_id() {
             .inherited_origins
             .get("year")
             .map(String::as_str)
-            .or_else(|| chapter.provenance.inherited_origins.get("date").map(String::as_str)),
+            .or_else(|| chapter
+                .provenance
+                .inherited_origins
+                .get("date")
+                .map(String::as_str)),
         Some("parent")
     );
 }
@@ -134,15 +138,24 @@ fn parse_preserves_notes_particles_pages_and_optional_date_warnings() {
     assert_eq!(draft.entries.len(), 1);
     let entry = &draft.entries[0];
     assert_eq!(entry.provenance.note.as_deref(), Some("A note"));
-    assert_eq!(entry.provenance.annotation.as_deref(), Some("An annotation"));
-    assert!(entry.provenance.original_fields.contains_key("note"));
     assert_eq!(
-        entry.unresolved_creators[0].name.particle(),
-        Some("van")
+        entry.provenance.annotation.as_deref(),
+        Some("An annotation")
     );
-    assert!(entry.unresolved_creators.iter().any(|c| c.name.is_literal()));
+    assert!(entry.provenance.original_fields.contains_key("note"));
+    assert_eq!(entry.unresolved_creators[0].name.particle(), Some("van"));
+    assert!(
+        entry
+            .unresolved_creators
+            .iter()
+            .any(|c| c.name.is_literal())
+    );
     assert_eq!(
-        entry.resource.pages.as_ref().map(|p| p.spans[0].start.number),
+        entry
+            .resource
+            .pages
+            .as_ref()
+            .map(|p| p.spans[0].start.number),
         Some(Some(10))
     );
     assert!(

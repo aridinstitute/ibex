@@ -76,7 +76,11 @@ async fn retrying_same_source_does_not_duplicate_committed_entries() {
         "retry must not create new resources: {:?}",
         second.imported
     );
-    assert_eq!(second.reused.len(), 2, "committed entries reused: {second:?}");
+    assert_eq!(
+        second.reused.len(),
+        2,
+        "committed entries reused: {second:?}"
+    );
     assert_eq!(resource_count(&state).await, after_first);
 }
 
