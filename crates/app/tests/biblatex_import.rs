@@ -23,6 +23,7 @@ async fn imports_a_book_through_the_application_command() {
     let Outcome::ImportBiblatex(report) = state
         .execute(Command::ImportBiblatex(ImportBiblatex {
             source_text: source.into(),
+            choices: Default::default(),
         }))
         .await
         .unwrap()
@@ -90,6 +91,7 @@ async fn imports_a_mixed_batch_and_reports_skips_without_losing_fields() {
     let Outcome::ImportBiblatex(report) = state
         .execute(Command::ImportBiblatex(ImportBiblatex {
             source_text: source.into(),
+            choices: Default::default(),
         }))
         .await
         .unwrap()
@@ -230,8 +232,9 @@ async fn invalid_syntax_duplicate_keys_and_reference_cycles_write_nothing() {
         assert!(matches!(
             state
                 .execute(Command::ImportBiblatex(ImportBiblatex {
-                    source_text: source.into()
-                }))
+                    source_text: source.into(),
+                    choices: Default::default(),
+        }))
                 .await,
             Err(oeuvre_app::CommandError::Invalid(_))
         ));
@@ -265,8 +268,9 @@ async fn rejects_deep_reference_chains_even_when_parents_appear_first() {
     assert!(matches!(
         state
             .execute(Command::ImportBiblatex(ImportBiblatex {
-                source_text: source
-            }))
+                source_text: source,
+                choices: Default::default(),
+        }))
             .await,
         Err(oeuvre_app::CommandError::Invalid(_))
     ));
@@ -280,6 +284,7 @@ async fn preserves_custom_fields_named_like_internal_reference_markers() {
         .build();
     let Outcome::ImportBiblatex(report) = state.execute(Command::ImportBiblatex(ImportBiblatex {
         source_text: "@book{one,title={Book},oeuvre_crossref={custom},oeuvre_import_crossref={also custom}}".into(),
+        choices: Default::default(),
     })).await.unwrap() else { panic!("import"); };
     let Outcome::GetResource(resource) = state
         .execute(Command::GetResource(GetResource {
@@ -317,6 +322,7 @@ async fn inherits_nearest_reference_date_and_does_not_abort_on_bad_entry_dates()
         .build();
     let Outcome::ImportBiblatex(report) = state.execute(Command::ImportBiblatex(ImportBiblatex {
         source_text: "@book{grand,title={Grand},year={2020}} @book{parent,title={Parent},year={2021},crossref={grand}} @inbook{child,title={Child},crossref={parent}} @book{bad,title={Bad},year={bad}} @inbook{badchild,title={Bad child},crossref={bad}}".into(),
+        choices: Default::default(),
     })).await.unwrap() else { panic!("import"); };
     // Invalid optional dates warn and retain source values; entries still import.
     assert_eq!(report.imported.len(), 5);

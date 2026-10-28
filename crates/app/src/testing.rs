@@ -212,28 +212,59 @@ fn cmp_field<T: Ord>(a: Option<T>, b: Option<T>) -> Ordering {
     }
 }
 
+/// In-memory store. Cheap to clone: all state is behind shared mutexes.
+#[derive(Clone)]
 pub struct MemoryStore {
-    people: Mutex<PeopleState>,
-    series: Mutex<HashMap<SeriesId, Series>>,
-    tags: Mutex<HashMap<TagId, Tag>>,
-    collections: Mutex<HashMap<CollectionId, Collection>>,
+    people: Arc<Mutex<PeopleState>>,
+    series: Arc<Mutex<HashMap<SeriesId, Series>>>,
+    tags: Arc<Mutex<HashMap<TagId, Tag>>>,
+    collections: Arc<Mutex<HashMap<CollectionId, Collection>>>,
     /// `(child, parent)` edges for `child_of`.
-    collection_child_of: Mutex<Vec<(CollectionId, CollectionId)>>,
-    resources: Mutex<HashMap<ResourceId, ResourceRow>>,
-    created: Mutex<Vec<CreatedEdge>>,
+    collection_child_of: Arc<Mutex<Vec<(CollectionId, CollectionId)>>>,
+    resources: Arc<Mutex<HashMap<ResourceId, ResourceRow>>>,
+    created: Arc<Mutex<Vec<CreatedEdge>>>,
+    /// When set, the Nth subsequent `create_imported_resource` fails (0-based).
+    import_fail_at: Arc<Mutex<Option<usize>>>,
+    import_create_count: Arc<Mutex<usize>>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self {
-            people: Mutex::new(PeopleState::new()),
-            series: Mutex::new(HashMap::new()),
-            tags: Mutex::new(HashMap::new()),
-            collections: Mutex::new(HashMap::new()),
-            collection_child_of: Mutex::new(Vec::new()),
-            resources: Mutex::new(HashMap::new()),
-            created: Mutex::new(Vec::new()),
+            people: Arc::new(Mutex::new(PeopleState::new())),
+            series: Arc::new(Mutex::new(HashMap::new())),
+            tags: Arc::new(Mutex::new(HashMap::new())),
+            collections: Arc::new(Mutex::new(HashMap::new())),
+            collection_child_of: Arc::new(Mutex::new(Vec::new())),
+            resources: Arc::new(Mutex::new(HashMap::new())),
+            created: Arc::new(Mutex::new(Vec::new())),
+            import_fail_at: Arc::new(Mutex::new(None)),
+            import_create_count: Arc::new(Mutex::new(0)),
         }
+    }
+
+    /// Fail the Nth `create_imported_resource` call (0-based) with a store error.
+    pub fn fail_imported_create_at(&self, n: usize) {
+        *self.import_fail_at.lock().expect("MemoryStore lock") = Some(n);
+        *self.import_create_count.lock().expect("MemoryStore lock") = 0;
+    }
+
+    /// Clear fault injection so subsequent imports persist normally.
+    pub fn clear_import_fail(&self) {
+        *self.import_fail_at.lock().expect("MemoryStore lock") = None;
+        *self.import_create_count.lock().expect("MemoryStore lock") = 0;
+    }
+
+    /// Test helper: remove a resource and its creator edges (Task 06 stale preview).
+    pub fn test_delete_resource(&self, id: ResourceId) {
+        self.resources
+            .lock()
+            .expect("MemoryStore lock")
+            .remove(&id);
+        self.created
+            .lock()
+            .expect("MemoryStore lock")
+            .retain(|e| e.resource_id != id);
     }
 
     /// Smart cascade: exclusive children recurse; shared children only unlink.
@@ -862,6 +893,15 @@ impl Store for MemoryStore {
         &self,
         write: ImportedResourceWrite,
     ) -> Result<Resource, StoreError> {
+        {
+            let mut count = self.import_create_count.lock().expect("MemoryStore lock");
+            let fail_at = *self.import_fail_at.lock().expect("MemoryStore lock");
+            if fail_at == Some(*count) {
+                *count += 1;
+                return Err(StoreError::new("injected import persistence failure"));
+            }
+            *count += 1;
+        }
         // Validate every creator against the pending people or the store before
         // any write, so a failed unit leaves no partial MemoryStore state.
         for creator in &write.resource.creators {

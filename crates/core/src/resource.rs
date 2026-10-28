@@ -828,6 +828,10 @@ pub struct ResourceProvenance {
     pub inherited_origins: std::collections::BTreeMap<String, String>,
     pub note: Option<String>,
     pub annotation: Option<String>,
+    /// Fingerprint of the import source that committed this entry (Task 06).
+    /// Paired with [`ResourceMetadata::citekey`] for source-local idempotency.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fingerprint: Option<String>,
 }
 
 /// Import-specific bibliographic fields. Source values retain their original

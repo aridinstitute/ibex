@@ -25,6 +25,7 @@ async fn shared_issue_and_series_survive_reopen() {
     let Outcome::ImportBiblatex(report) = state
         .execute(Command::ImportBiblatex(ImportBiblatex {
             source_text: source.into(),
+            choices: Default::default(),
         }))
         .await
         .unwrap()

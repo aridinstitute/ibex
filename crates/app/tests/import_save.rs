@@ -18,6 +18,10 @@ fn book_draft(key: &str, title: &str, author: Name) -> ImportDraft {
             format: ImportFormat::Test,
             parser_version: IMPORT_PARSER_VERSION,
         },
+        source_fingerprint: Some(oeuvre_core::source_fingerprint(
+            ImportFormat::Test,
+            &format!("{key}\0{title}"),
+        )),
         entries: vec![ImportEntryDraft {
             temp_id: ImportTempId::new(1),
             resource: NewResource {

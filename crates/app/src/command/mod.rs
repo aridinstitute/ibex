@@ -6,8 +6,10 @@ pub(crate) mod resource;
 mod series;
 mod tag;
 
-pub use biblatex_import::{ImportBiblatex, ImportIssue, ImportedEntry};
-pub use oeuvre_core::ImportReport;
+pub use biblatex_import::{
+    ImportBiblatex, ImportIssue, ImportedEntry, PreviewBiblatex, SaveImportDraft,
+};
+pub use oeuvre_core::{ImportChoices, ImportPreview, ImportReport};
 pub use collection::{
     AddCollectionParent, CreateCollection, DeleteCollection, DeletedCollection,
     ListCollectionForest, RemoveCollectionParent, RenameCollection,
@@ -56,6 +58,8 @@ pub enum Command {
     DeleteCollection(DeleteCollection),
     CreateResource(CreateResource),
     ImportBiblatex(ImportBiblatex),
+    PreviewBiblatex(PreviewBiblatex),
+    SaveImportDraft(SaveImportDraft),
     UpdateResource(UpdateResource),
     SetResourceFavorite(SetResourceFavorite),
     GetResource(GetResource),
@@ -90,6 +94,8 @@ pub enum Outcome {
     DeleteCollection(DeletedCollection),
     CreateResource(Resource),
     ImportBiblatex(ImportReport),
+    PreviewBiblatex(ImportPreview),
+    SaveImportDraft(ImportReport),
     UpdateResource(Resource),
     SetResourceFavorite(Resource),
     GetResource(Resource),
@@ -151,6 +157,8 @@ impl Command {
             Command::DeleteCollection(_) => DeleteCollection::NAME,
             Command::CreateResource(_) => CreateResource::NAME,
             Command::ImportBiblatex(_) => ImportBiblatex::NAME,
+            Command::PreviewBiblatex(_) => PreviewBiblatex::NAME,
+            Command::SaveImportDraft(_) => SaveImportDraft::NAME,
             Command::UpdateResource(_) => UpdateResource::NAME,
             Command::SetResourceFavorite(_) => SetResourceFavorite::NAME,
             Command::GetResource(_) => GetResource::NAME,
@@ -202,6 +210,8 @@ pub(crate) async fn dispatch(
         Command::DeleteCollection(c) => drive(c, state, ev).await,
         Command::CreateResource(c) => drive(c, state, ev).await,
         Command::ImportBiblatex(c) => drive(c, state, ev).await,
+        Command::PreviewBiblatex(c) => drive(c, state, ev).await,
+        Command::SaveImportDraft(c) => drive(c, state, ev).await,
         Command::UpdateResource(c) => drive(c, state, ev).await,
         Command::SetResourceFavorite(c) => drive(c, state, ev).await,
         Command::GetResource(c) => drive(c, state, ev).await,

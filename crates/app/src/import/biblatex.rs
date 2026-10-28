@@ -48,6 +48,10 @@ pub fn parse_biblatex(source: &str) -> Result<ImportDraft, ParseError> {
             format: ImportFormat::Biblatex,
             parser_version: IMPORT_PARSER_VERSION,
         },
+        source_fingerprint: Some(oeuvre_core::source_fingerprint(
+            ImportFormat::Biblatex,
+            source,
+        )),
         entries: Vec::new(),
         diagnostics: Vec::new(),
     };
@@ -141,6 +145,7 @@ pub fn parse_biblatex(source: &str) -> Result<ImportDraft, ParseError> {
                     inherited_origins: inherited_origins.clone(),
                     note: note.clone(),
                     annotation: annotation.clone(),
+                    source_fingerprint: None,
                 };
                 draft.entries.push(ImportEntryDraft {
                     temp_id: ImportTempId::new(next_temp),
