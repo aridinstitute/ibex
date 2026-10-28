@@ -1725,6 +1725,8 @@ gpui_kit::actions!([
     ImportBiblatexFile,
     OpenCommandPalette,
     SelectAllResources,
+    ExtendResourceSelectionUp,
+    ExtendResourceSelectionDown,
     ToggleLeftPanel,
     ToggleDetailPanel,
     CycleColumnSort,
@@ -2204,6 +2206,16 @@ impl LibraryApp {
     ) -> Self {
         cx.bind_keys([
             KeyBinding::new(
+                "shift-up",
+                ExtendResourceSelectionUp,
+                Some("LibraryApp > DataTable && !InlineEdit"),
+            ),
+            KeyBinding::new(
+                "shift-down",
+                ExtendResourceSelectionDown,
+                Some("LibraryApp > DataTable && !InlineEdit"),
+            ),
+            KeyBinding::new(
                 "cmd-a",
                 SelectAllResources,
                 Some("LibraryApp > DataTable && !InlineEdit"),
@@ -2271,6 +2283,7 @@ impl LibraryApp {
                             delegate.selected_col = Some(*col_ix);
                             cx.notify();
                         });
+                        cx.notify();
                     }
                     TableEvent::ClearSelection => {
                         if this.table.read(cx).selected_row().is_some()
@@ -3618,7 +3631,7 @@ impl LibraryApp {
             Some(EditFetch::Ready(form)) => form.record.id == id,
             None => true,
         };
-        if !editing_this {
+        if !editing_this || self.table.read(cx).delegate().selected_ids.len() > 1 {
             self.edit = None;
         }
         self.show_detail(id, window, cx);
@@ -3909,6 +3922,35 @@ impl LibraryApp {
             Some(EditFetch::Loading(_)) => {}
             None => self.request_edit(window, cx),
         }
+    }
+
+    fn extend_resource_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.has_inline(cx) || self.edit.is_some() {
+            return;
+        }
+        self.table.update(cx, |table, cx| {
+            let current = table.selected_row();
+            let delegate = table.delegate_mut();
+            let Some(last) = delegate.rows.len().checked_sub(1) else {
+                return;
+            };
+            let next = current.map_or(if delta < 0 { last } else { 0 }, |ix| {
+                ix.saturating_add_signed(delta).min(last)
+            });
+            let anchor = delegate
+                .selection_anchor
+                .and_then(|id| delegate.rows.iter().position(|row| row.id == id))
+                .unwrap_or(current.unwrap_or(next).min(last));
+            delegate.selection_anchor = Some(delegate.rows[anchor].id);
+            // Keep the origin fixed so reversing direction shrinks the range.
+            delegate.selected_ids = delegate.rows[anchor.min(next)..=anchor.max(next)]
+                .iter()
+                .map(|row| row.id)
+                .collect();
+            delegate.preserve_selection = true;
+            table.set_selected_row(next, cx);
+        });
+        cx.notify();
     }
 
     fn focus_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4421,6 +4463,10 @@ impl LibraryApp {
     /// a second fetch in the same flow. One form at a time; the sidebar
     /// swaps to it while it exists.
     fn request_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.table.read(cx).delegate().selected_ids.len() > 1 {
+            window.push_notification("Select one resource to edit its details", cx);
+            return;
+        }
         if self.import_state != ImportState::Idle {
             window.push_notification("Wait for the bibliography import to finish", cx);
             return;
@@ -5052,6 +5098,10 @@ impl LibraryApp {
     /// row selected means nothing to edit, and an open form means the
     /// sidebar already is the editor.
     fn render_side_panel(&self, cx: &mut Context<Self>) -> Div {
+        let selected_count = self.table.read(cx).delegate().selected_ids.len();
+        if selected_count > 1 {
+            return render_panel(DetailView::Multiple(selected_count), None, None, cx);
+        }
         match &self.edit {
             Some(EditFetch::Ready(form)) => self.render_edit_panel(form, cx),
             Some(EditFetch::Loading(_)) => render_panel(DetailView::Loading, None, None, cx),
@@ -5509,6 +5559,12 @@ impl Render for LibraryApp {
             .on_action(cx.listener(|this, _: &ImportBiblatexFile, window, cx| {
                 this.import_biblatex(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ExtendResourceSelectionUp, _, cx| {
+                this.extend_resource_selection(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ExtendResourceSelectionDown, _, cx| {
+                this.extend_resource_selection(1, cx);
+            }))
             .on_action(cx.listener(|this, _: &SelectAllResources, window, cx| {
                 if this.has_inline(cx) || this.edit.is_some() {
                     return;
@@ -5960,6 +6016,166 @@ mod palette_persistence_tests {
     use gpui_kit::component::{WindowExt as _, table::TableState};
     use gpui_kit::{AppContext as _, Focusable as _, KeyBinding};
     use oeuvre_core::{NonEmptyStr, ResourceId};
+
+    #[gpui_kit::test]
+    fn shift_arrows_extend_shrink_and_clamp_resource_selection(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::test::TestWindowExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        cx.executor().allow_parking();
+        let store = oeuvre_app::testing::MemoryStore::new();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(oeuvre_app::seed::seed_demo_library(&store, 8))
+            .unwrap();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(store)
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let first = worker
+            .list_grid_page_blocking(
+                oeuvre_core::ResourceGridParent::Roots,
+                oeuvre_core::ResourceQuery::newest_first(),
+                0,
+                50,
+            )
+            .unwrap();
+        let ids: Vec<_> = first.rows.iter().map(|r| r.summary.id).collect();
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let table = cx.new(|cx| {
+                    TableState::new(
+                        LibraryDelegate::new(worker, first, Settings::default()),
+                        window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| app.focus_table(window, cx));
+            window.render_frame(cx);
+            window.press("shift-down", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        app.read_with(cx, |app, cx| {
+            assert_eq!(
+                app.table.read(cx).delegate().selected_ids,
+                [ids[0]]
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>()
+            )
+        });
+        // The range grows from the original row; reversing removes its trailing edge.
+        for (key, expected) in [
+            ("shift-down", vec![ids[0], ids[1]]),
+            ("shift-down", vec![ids[0], ids[1], ids[2]]),
+            ("shift-up", vec![ids[0], ids[1]]),
+            ("shift-up", vec![ids[0]]),
+            ("shift-up", vec![ids[0]]),
+            ("down", vec![ids[1]]),
+            ("shift-up", vec![ids[0], ids[1]]),
+            ("shift-down", vec![ids[1]]),
+            ("shift-down", vec![ids[1], ids[2]]),
+        ] {
+            let count = expected.len();
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.press(key, cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            app.read_with(cx, |app, cx| {
+                assert_eq!(
+                    app.table.read(cx).delegate().selected_ids,
+                    expected
+                        .into_iter()
+                        .collect::<std::collections::HashSet<_>>(),
+                    "after {key}"
+                )
+            });
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                if count > 1 {
+                    assert_eq!(
+                        window.find("detail-selection-count").label(),
+                        Some(format!("{count} resources selected").as_str())
+                    );
+                    assert!(window.try_find("edit-resource").is_none());
+                } else {
+                    assert!(window.try_find("detail-selection-count").is_none());
+                }
+            })
+            .unwrap();
+        }
+        cx.update_window(handle, |_, _, cx| {
+            app.read(cx)
+                .table
+                .clone()
+                .update(cx, |table, cx| table.set_selected_row(ids.len() - 1, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("shift-down", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        app.read_with(cx, |app, cx| {
+            assert_eq!(
+                app.table.read(cx).delegate().selected_ids,
+                [*ids.last().unwrap()]
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>()
+            )
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("shift-up", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("detail-selection-count").is_some());
+            window.dispatch_action(Box::new(super::ToggleEditMode), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert!(
+                app.edit.is_none(),
+                "multi-selection must not open an invisible editor"
+            )
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            assert!(
+                app.read(cx)
+                    .table
+                    .read(cx)
+                    .delegate()
+                    .selected_ids
+                    .is_empty()
+            );
+            window.render_frame(cx);
+            assert!(
+                window.try_find("detail-selection-count").is_none(),
+                "column selection must redraw the detail panel"
+            );
+        })
+        .unwrap();
+    }
 
     #[gpui_kit::test]
     fn resource_modified_clicks_and_select_all(cx: &mut gpui_kit::TestAppContext) {
