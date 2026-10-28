@@ -21,15 +21,15 @@ pub use person::{
     UpdatePerson,
 };
 pub use resource::{
-    CountResources, CreateResource, GetResource, GetResourceDetail, ListResources,
-    ListResourcesPage, ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
+    CountResources, CreateResource, GetResource, GetResourceDetail, ListResourceGridPage,
+    ListResources, ListResourcesPage, ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
 };
 pub use series::CreateSeries;
 pub use tag::{CreateTag, FindTagByText, GetTag, ListTags};
 
 use oeuvre_core::{
-    Collection, CollectionTreeNode, Person, Resource, ResourceCounts, ResourceDetail, ResourcePage,
-    ResourceSummary, Series, SortedResourcePage, StoreError, Tag,
+    Collection, CollectionTreeNode, Person, Resource, ResourceCounts, ResourceDetail,
+    ResourceGridPage, ResourcePage, ResourceSummary, Series, SortedResourcePage, StoreError, Tag,
 };
 
 use crate::AppState;
@@ -70,6 +70,7 @@ pub enum Command {
     ListResources(ListResources),
     ListResourcesPage(ListResourcesPage),
     ListResourcesQueryPage(ListResourcesQueryPage),
+    ListResourceGridPage(ListResourceGridPage),
     CountResources(CountResources),
 }
 
@@ -108,6 +109,7 @@ pub enum Outcome {
     ListResources(Vec<ResourceSummary>),
     ListResourcesPage(ResourcePage),
     ListResourcesQueryPage(SortedResourcePage),
+    ResourceGridPage(ResourceGridPage),
     CountResources(ResourceCounts),
 }
 
@@ -173,6 +175,7 @@ impl Command {
             Command::ListResources(_) => ListResources::NAME,
             Command::ListResourcesPage(_) => ListResourcesPage::NAME,
             Command::ListResourcesQueryPage(_) => ListResourcesQueryPage::NAME,
+            Command::ListResourceGridPage(_) => ListResourceGridPage::NAME,
             Command::CountResources(_) => CountResources::NAME,
         }
     }
@@ -228,6 +231,7 @@ pub(crate) async fn dispatch(
         Command::ListResources(c) => drive(c, state, ev).await,
         Command::ListResourcesPage(c) => drive(c, state, ev).await,
         Command::ListResourcesQueryPage(c) => drive(c, state, ev).await,
+        Command::ListResourceGridPage(c) => drive(c, state, ev).await,
         Command::CountResources(c) => drive(c, state, ev).await,
     }
 }

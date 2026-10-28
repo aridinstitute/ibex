@@ -40,6 +40,10 @@ pub(crate) const RESOURCE_FILTER_TITLE: Key = Key::new("resource.filter_title");
 pub(crate) const RESOURCE_FILTER_SEARCH: Key = Key::new("resource.filter_search");
 pub(crate) const RESOURCE_PAGE_LIMIT: Key = Key::new("resource.page_limit");
 pub(crate) const RESOURCE_PAGE_OFFSET: Key = Key::new("resource.page_offset");
+pub(crate) const RESOURCE_GRID_PARENT: Key = Key::new("resource.grid_parent");
+pub(crate) const RESOURCE_PARENT_ID: Key = Key::new("resource.parent_id");
+pub(crate) const RESOURCE_GRID_ROWS: Key = Key::new("resource.grid_rows");
+pub(crate) const RESOURCE_GRID_HAS_MORE: Key = Key::new("resource.grid_has_more");
 pub(crate) const RESOURCE_SORT_FIELD: Key = Key::new("resource.sort_field");
 pub(crate) const RESOURCE_SORT_DIRECTION: Key = Key::new("resource.sort_direction");
 pub(crate) const SERIES_ID: Key = Key::new("series.id");
@@ -89,6 +93,10 @@ mod tests {
         RESOURCE_FILTER_SEARCH,
         RESOURCE_PAGE_LIMIT,
         RESOURCE_PAGE_OFFSET,
+        RESOURCE_GRID_PARENT,
+        RESOURCE_PARENT_ID,
+        RESOURCE_GRID_ROWS,
+        RESOURCE_GRID_HAS_MORE,
         RESOURCE_SORT_FIELD,
         RESOURCE_SORT_DIRECTION,
         SERIES_ID,

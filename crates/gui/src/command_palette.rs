@@ -27,6 +27,9 @@ impl PaletteRequest {
     }
 }
 
+/// Library-wide view preference; independent of resource membership edits.
+pub struct ToggleResourceGrouping;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Commands,
@@ -48,14 +51,21 @@ pub struct CommandPalette {
     selected_tags: HashSet<TagId>,
     selected_collections: HashSet<CollectionId>,
     ready: bool,
+    grouped: bool,
     saving: bool,
     error: Option<String>,
 }
 
 impl EventEmitter<PaletteRequest> for CommandPalette {}
+impl EventEmitter<ToggleResourceGrouping> for CommandPalette {}
 
 impl CommandPalette {
-    pub fn new(target: Option<ResourceId>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        target: Option<ResourceId>,
+        grouped: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         ensure_palette_bindings(cx);
         let state = cx.new(|cx| InputState::new(window, cx).placeholder("Type a command…"));
         cx.subscribe_in(&state, window, |this, _, event: &InputEvent, _, cx| {
@@ -74,7 +84,7 @@ impl CommandPalette {
             title: if target.is_some() {
                 "Loading resource…"
             } else {
-                "Select a resource to use these commands"
+                "Select a resource to edit tags or collections"
             }
             .into(),
             screen: Screen::Commands,
@@ -85,6 +95,7 @@ impl CommandPalette {
             selected_tags: HashSet::new(),
             selected_collections: HashSet::new(),
             ready: false,
+            grouped,
             saving: false,
             error: None,
         }
@@ -141,12 +152,19 @@ impl CommandPalette {
         cx.notify();
     }
 
+    fn option_disabled(&self, row: usize) -> bool {
+        self.saving
+            || (!(self.screen == Screen::Commands && row == 2)
+                && (!self.ready || self.target.is_none()))
+    }
+
     fn visible_options(&self, cx: &App) -> Vec<(usize, SharedString, bool)> {
         let query = self.state.read(cx).value().trim().to_lowercase();
         let options: Vec<_> = match self.screen {
             Screen::Commands => vec![
                 (0, "Edit tags…".into(), false),
                 (1, "Edit collections…".into(), false),
+                (2, "Group children under parents".into(), self.grouped),
             ],
             Screen::Tags => self
                 .tags
@@ -175,12 +193,17 @@ impl CommandPalette {
         };
         options
             .into_iter()
-            .filter(|(_, label, _)| label.to_lowercase().contains(&query))
+            .filter(|(row, label, _)| {
+                label.to_lowercase().contains(&query)
+                    || (self.screen == Screen::Commands
+                        && *row == 2
+                        && "toggle grouping flat nested tree".contains(&query))
+            })
             .collect()
     }
 
     fn move_highlight(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if !self.ready || self.saving || self.target.is_none() {
+        if self.saving {
             return;
         }
         let options = self.visible_options(cx);
@@ -210,13 +233,14 @@ impl CommandPalette {
     }
 
     fn confirm(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.ready || self.saving || self.target.is_none() {
+        if self.option_disabled(row) {
             return;
         }
         match self.screen {
             Screen::Commands => match row {
                 0 => self.navigate(Screen::Tags, window, cx),
                 1 => self.navigate(Screen::Collections, window, cx),
+                2 => cx.emit(ToggleResourceGrouping),
                 _ => {}
             },
             Screen::Tags => {
@@ -337,7 +361,7 @@ impl CommandPalette {
         checked: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let disabled = !self.ready || self.saving || self.target.is_none();
+        let disabled = self.option_disabled(row);
         let highlighted = self.highlighted == Some(row) && !disabled;
         h_flex()
             .id(("palette-row", row))
@@ -357,7 +381,7 @@ impl CommandPalette {
             })
             .when(disabled, |row| row.text_color(cx.theme().muted_foreground))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if *hovered && !this.saving && this.ready && this.highlighted != Some(row) {
+                if *hovered && !this.option_disabled(row) && this.highlighted != Some(row) {
                     this.highlighted = Some(row);
                     cx.notify();
                 }
@@ -633,7 +657,8 @@ mod tests {
                 cx,
                 |window, cx| {
                     let palette = cx.new(|cx| {
-                        let mut palette = CommandPalette::new(selected.then_some(id), window, cx);
+                        let mut palette =
+                            CommandPalette::new(selected.then_some(id), true, window, cx);
                         if loaded {
                             palette.loaded(record, tags, collections, cx);
                         }

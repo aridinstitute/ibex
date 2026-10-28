@@ -183,11 +183,14 @@ async fn article_inherits_issue_and_journal_fields_in_detail_and_list() {
         row.container_title.as_ref().map(|s| s.as_str()),
         Some("Nature")
     );
-    assert_eq!(row.published_label.as_ref().map(|s| s.as_str()), Some("2020"));
+    assert_eq!(
+        row.published_label.as_ref().map(|s| s.as_str()),
+        Some("2020")
+    );
 }
 
 #[tokio::test]
-async fn explicit_overrides_win_and_venue_overrides_container() {
+async fn explicit_fields_override_defaults_but_linked_container_overrides_venue() {
     let state = state();
     let mut journal = bare(ResourceKind::Journal, "Nature", None);
     journal.publisher = Some("Springer Nature".into());
@@ -210,8 +213,59 @@ async fn explicit_overrides_win_and_venue_overrides_container() {
     assert_eq!(d.issue.as_deref(), Some("1"));
     assert_eq!(
         d.container_title.as_ref().map(|s| s.as_str()),
-        Some("Custom Venue")
+        Some("Nature")
     );
+}
+
+#[tokio::test]
+async fn journal_rename_updates_linked_article_container_despite_imported_venue() {
+    let state = state();
+    let journal = create(&state, bare(ResourceKind::Journal, "BSac", None)).await;
+    let issue = create(
+        &state,
+        bare(ResourceKind::Issue, "Vol. 182, no. 1", Some(journal.id)),
+    )
+    .await;
+    let mut article = bare(ResourceKind::JournalArticle, "Paper", Some(issue.id));
+    article.metadata.venue = Some("BSac".into());
+    let article = create(&state, article).await;
+
+    assert_eq!(
+        detail(&state, article.id)
+            .await
+            .container_title
+            .as_ref()
+            .map(NonEmptyStr::as_str),
+        Some("BSac")
+    );
+
+    let mut edited = journal.to_new();
+    edited.title = nes("Bibliotheca Sacra");
+    state
+        .execute(Command::UpdateResource(UpdateResource {
+            id: journal.id,
+            new: edited,
+        }))
+        .await
+        .unwrap();
+
+    let after = detail(&state, article.id).await;
+    let row = list(&state)
+        .await
+        .into_iter()
+        .find(|r| r.id == article.id)
+        .unwrap();
+    assert_eq!(
+        (
+            after.container_title.as_ref().map(NonEmptyStr::as_str),
+            row.container_title.as_ref().map(NonEmptyStr::as_str),
+        ),
+        (Some("Bibliotheca Sacra"), Some("Bibliotheca Sacra")),
+        "linked journal title must win over the article's imported venue on fresh reads"
+    );
+
+    // Resolving the current container title must not rewrite the stored article.
+    assert_eq!(raw(&state, article.id).await, article);
 }
 
 #[tokio::test]

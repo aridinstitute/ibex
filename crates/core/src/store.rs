@@ -249,6 +249,22 @@ pub trait Store: Send + Sync + 'static {
         ))
     }
 
+    /// Page exact siblings, retaining filtered matches and their ancestors.
+    /// Child indicators describe the visible, filtered hierarchy. Ordering and
+    /// offset semantics are the same as `list_resources_query_page`.
+    async fn list_resource_grid_page(
+        &self,
+        parent: crate::ResourceGridParent,
+        query: &ResourceQuery,
+        offset: u64,
+        limit: u32,
+    ) -> Result<crate::ResourceGridPage, StoreError> {
+        let _ = (parent, query, offset, limit);
+        Err(StoreError::new(
+            "list_resource_grid_page not supported by this store",
+        ))
+    }
+
     /// Unfiltered totals across the full library, independent of pagination.
     async fn resource_counts(&self) -> Result<crate::ResourceCounts, StoreError> {
         Err(StoreError::new(

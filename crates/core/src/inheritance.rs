@@ -359,19 +359,8 @@ fn resolve_identifiers(
     Effective::absent()
 }
 
-fn resolve_container_title(
-    resource: &Resource,
-    ancestors: &[Resource],
-) -> Effective<NonEmptyStr> {
-    if let Some(venue) = resource
-        .metadata
-        .venue
-        .as_ref()
-        .and_then(|v| NonEmptyStr::try_new(v).ok())
-    {
-        return Effective::explicit(venue);
-    }
-
+fn resolve_container_title(resource: &Resource, ancestors: &[Resource]) -> Effective<NonEmptyStr> {
+    // Linked records are authoritative; imported venue text is only a fallback.
     // Prefer real containers (journal/book/…) over issue volume labels.
     for ancestor in ancestors {
         if ancestor.kind == ResourceKind::Issue {
@@ -381,11 +370,16 @@ fn resolve_container_title(
     }
 
     // Issue-only chain (no journal loaded / missing grandparent): show the issue title.
-    if let Some(issue) = ancestors
-        .iter()
-        .find(|a| a.kind == ResourceKind::Issue)
-    {
+    if let Some(issue) = ancestors.iter().find(|a| a.kind == ResourceKind::Issue) {
         return Effective::inherited(issue.title.clone(), issue.id);
+    }
+    if let Some(venue) = resource
+        .metadata
+        .venue
+        .as_ref()
+        .and_then(|v| NonEmptyStr::try_new(v).ok())
+    {
+        return Effective::explicit(venue);
     }
 
     Effective::absent()
@@ -588,24 +582,36 @@ mod tests {
         assert_eq!(effective.volume.origin, ValueOrigin::Explicit);
         assert_eq!(
             effective.container_title.value.as_ref().map(|s| s.as_str()),
-            Some("Custom Venue")
+            Some("Nature")
         );
-        assert_eq!(effective.container_title.origin, ValueOrigin::Explicit);
+        assert!(effective.container_title.is_inherited());
         // Non-overridden issue number still inherits.
         assert_eq!(effective.issue.value.as_deref(), Some("1"));
         assert!(effective.issue.is_inherited());
     }
 
     #[test]
+    fn unlinked_article_uses_imported_venue_as_fallback() {
+        let mut article = bare(ResourceKind::JournalArticle, "Paper", None);
+        article.metadata.venue = Some("BSac".into());
+
+        let effective = resolve_effective(&article, &[]).unwrap();
+        assert_eq!(
+            effective
+                .container_title
+                .value
+                .as_ref()
+                .map(NonEmptyStr::as_str),
+            Some("BSac")
+        );
+        assert_eq!(effective.container_title.origin, ValueOrigin::Explicit);
+    }
+    #[test]
     fn parent_update_propagates_when_child_has_no_override() {
         let mut journal = bare(ResourceKind::Journal, "Nature", None);
         journal.publisher = Some("Old Pub".into());
         let issue = bare(ResourceKind::Issue, "Vol. 1, no. 1", Some(journal.id));
-        let article = bare(
-            ResourceKind::JournalArticle,
-            "Paper",
-            Some(issue.id),
-        );
+        let article = bare(ResourceKind::JournalArticle, "Paper", Some(issue.id));
 
         let before = resolve_effective(&article, &[issue.clone(), journal.clone()]).unwrap();
         assert_eq!(before.publisher.value.as_deref(), Some("Old Pub"));

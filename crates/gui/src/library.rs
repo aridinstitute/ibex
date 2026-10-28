@@ -1,4 +1,12 @@
-//! Library grid: resource summary rows, one page at a time.
+//! Virtualized bibliographic tree grid with independently paged sibling lists.
+//!
+//! Title disclosure buttons and Alt+Right/Alt+Left expand/collapse resources;
+//! Expansion loads all direct children; Alt+Right also retries a failed expansion.
+//! Filtering retains matching resources' ancestors as navigation context.
+
+#[path = "resource_grid.rs"]
+mod resource_grid;
+use resource_grid::ResourceGrid;
 
 use std::{
     any::Any,
@@ -31,12 +39,12 @@ use oeuvre_core::{
     Collection, CollectionId, CollectionTreeNode, EntryChoice, EntryProposal, ImportChoices,
     NonEmptyStr, ParentRule, Person, PersonChoice as ImportPersonChoice, PersonId,
     PersonMatchPreview, PublishedRange, Resource, ResourceCounts, ResourceDetail, ResourceFilter,
-    ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary,
-    SortDirection, Tag, TagId, UtcMillis, format_recorded_date,
+    ResourceGridPage, ResourceGridParent, ResourceId, ResourceKind, ResourceQuery, ResourceSort,
+    ResourceSummary, SortDirection, Tag, TagId, UtcMillis, format_recorded_date,
 };
 
 use crate::collections::{CollectionChoice, CollectionDelegate, flatten_collections};
-use crate::command_palette::{CommandPalette, PaletteRequest};
+use crate::command_palette::{CommandPalette, PaletteRequest, ToggleResourceGrouping};
 use crate::db::DbWorker;
 use crate::detail::{
     DetailFetch, DetailView, FIELD_LABEL_WIDTH, FIELD_TEXT_SIZE, PANEL_WIDTH, render_panel,
@@ -296,20 +304,16 @@ const INLINE_KIND_MENU_WIDTH: Pixels = px(220.);
 /// `text_xs` reads too small at this base font size.
 const HEADER_TEXT_SIZE: Pixels = px(10.);
 
-/// Continuation for the next scroll page, keyed to the listing mode: the
-/// plain newest-first listing walks id cursors, a queried listing walks
-/// offsets.
-#[derive(Debug, Clone, Copy)]
-enum PageCursor {
-    NewestFirst(Option<ResourceId>),
-    Query(Option<u64>),
-}
-
 pub struct LibraryDelegate {
     worker: DbWorker,
     rows: Vec<ResourceSummary>,
+    grid: ResourceGrid,
+    grouped: bool,
+    reopen: HashSet<ResourceId>,
+    reveal_selection: Option<ResourceId>,
     loading: bool,
-    next: PageCursor,
+    reloading: bool,
+    next: Option<u64>,
     /// Column sort driving the listing; `None` is the newest-first default.
     sort: Option<(ResourceSort, SortDirection)>,
     /// Predicates driving the listing; `none()` matches every resource.
@@ -341,14 +345,115 @@ pub struct LibraryDelegate {
 }
 
 impl LibraryDelegate {
+    /// Reconcile editors by identity before publishing a new positional snapshot.
+    fn rebuild_rows(&mut self) {
+        self.rows = self.grid.visible();
+        let draft = self.inline.as_ref().is_some_and(InlineSession::is_create) as usize;
+        if let Some(session) = self.inline.as_mut() {
+            match session {
+                InlineSession::Loading { id, row_ix } => {
+                    if let Some(ix) = self.rows.iter().position(|row| row.id == *id) {
+                        *row_ix = ix + draft;
+                    }
+                }
+                InlineSession::Ready(form) => {
+                    if let Some(ix) = form
+                        .record
+                        .as_ref()
+                        .and_then(|record| self.rows.iter().position(|row| row.id == record.id))
+                    {
+                        form.row_ix = ix + draft;
+                    }
+                }
+                InlineSession::Create(_) => {}
+            }
+        }
+    }
+
+    fn request_children(
+        &mut self,
+        id: ResourceId,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        if self.reloading || !self.grouped {
+            return;
+        }
+        let Some((token, offset)) = self.grid.begin(id) else {
+            return;
+        };
+        let worker = self.worker.clone();
+        let query = ResourceQuery {
+            sort: self.sort,
+            filter: self.filter.clone(),
+        };
+        let generation = self.listing_gen;
+        cx.spawn_in(window, async move |table, window| {
+            let reply = worker
+                .list_grid_page(ResourceGridParent::Children(id), query, offset, u32::MAX)
+                .await;
+            _ = table.update_in(window, |table, window, cx| {
+                if table.delegate().listing_gen != generation {
+                    return;
+                }
+                let selected = table
+                    .selected_row()
+                    .and_then(|ix| table.delegate().row_id(ix));
+                let delegate = table.delegate_mut();
+                if !delegate.grid.finish(id, token, reply) {
+                    return;
+                }
+                delegate.rebuild_rows();
+                delegate.resume_expansions(window, cx);
+                let selected = selected.or(delegate.reveal_selection);
+                restore_grid_selection(table, selected, None, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn resume_expansions(&mut self, window: &mut Window, cx: &mut Context<TableState<Self>>) {
+        if !self.grouped {
+            return;
+        }
+        let ids: Vec<_> = self
+            .grid
+            .positions
+            .iter()
+            .filter_map(|(id, (_, _, has_children))| {
+                (*has_children && self.reopen.contains(id)).then_some(*id)
+            })
+            .collect();
+        for id in ids {
+            self.grid.expanded.insert(id);
+            let needs_page = self
+                .grid
+                .children
+                .get(&id)
+                .is_none_or(|page| !page.loaded && page.error.is_none());
+            if needs_page {
+                self.request_children(id, window, cx);
+            }
+        }
+    }
     /// Start from a first page fetched before the window opens, so the grid
     /// never renders an empty bootstrap state.
-    pub fn new(worker: DbWorker, first: ResourcePage, settings: Settings) -> Self {
+    pub fn new(worker: DbWorker, first: ResourceGridPage, settings: Settings) -> Self {
+        let next = first.next_offset;
+        let mut grid = ResourceGrid::new(first);
+        let rows = grid.visible();
         Self {
             worker,
-            rows: first.rows,
+            rows,
+            grid,
+            grouped: true,
+            reopen: HashSet::new(),
+            reveal_selection: None,
             loading: false,
-            next: PageCursor::NewestFirst(first.next_before),
+            reloading: false,
+            next,
             sort: None,
             filter: ResourceFilter::none(),
             filter_inputs: None,
@@ -463,7 +568,13 @@ impl LibraryDelegate {
         cx: &mut Context<TableState<Self>>,
     ) {
         self.listing_gen += 1;
+        self.reopen.extend(self.grid.expanded.iter().copied());
+        self.reveal_selection = selected_id.filter(|_| restore_col.is_none());
+        for page in self.grid.children.values_mut() {
+            page.request = None;
+        }
         self.loading = true;
+        self.reloading = true;
         self.error = None;
         // A fresh listing invalidates in-row editors (row indices move).
         self.inline = None;
@@ -471,22 +582,10 @@ impl LibraryDelegate {
         let sort = self.sort;
         let filter = self.filter.clone();
         let issued_gen = self.listing_gen;
+        let grouped = self.grouped;
         cx.spawn_in(window, async move |table, window| {
-            // The plain id-cursor walk exists only for the unsorted,
-            // unfiltered default; any sort or filter routes through the
-            // query seam.
-            let reply = if sort.is_none() && !filter.is_active() {
-                worker
-                    .list_page(None, PAGE_SIZE)
-                    .await
-                    .map(|page| (page.rows, PageCursor::NewestFirst(page.next_before)))
-            } else {
-                worker
-                    .list_query_page(ResourceQuery { sort, filter }, 0, PAGE_SIZE)
-                    .await
-                    .map(|page| (page.rows, PageCursor::Query(page.next_offset)))
-            };
-            _ = table.update_in(window, |table, _window, cx| {
+            let reply = listing_page(&worker, grouped, ResourceQuery { sort, filter }, 0).await;
+            _ = table.update_in(window, |table, window, cx| {
                 let delegate = table.delegate_mut();
                 // A newer sort or keystroke superseded this fetch; its
                 // rows belong to a listing nobody is looking at.
@@ -494,10 +593,13 @@ impl LibraryDelegate {
                     return;
                 }
                 delegate.loading = false;
+                delegate.reloading = false;
                 match reply {
-                    Ok((rows, next)) => {
-                        delegate.rows = rows;
-                        delegate.next = next;
+                    Ok(page) => {
+                        delegate.next = page.next_offset;
+                        delegate.grid = ResourceGrid::new(page);
+                        delegate.rebuild_rows();
+                        delegate.resume_expansions(window, cx);
                     }
                     Err(err) => delegate.error = Some(err),
                 }
@@ -508,13 +610,9 @@ impl LibraryDelegate {
                 if let Some(col_ix) = restore_col {
                     table.set_selected_col(col_ix, cx);
                 } else {
-                    let selected_ix = selected_id
-                        .and_then(|id| table.delegate().rows.iter().position(|row| row.id == id));
-                    match selected_ix {
-                        Some(ix) => table.set_selected_row(ix, cx),
-                        None => table.clear_selection(cx),
-                    }
+                    restore_grid_selection(table, selected_id, None, cx);
                 }
+                table.col_selectable = true;
                 cx.notify();
             });
         })
@@ -648,6 +746,112 @@ impl LibraryDelegate {
     }
 }
 
+/// Flat mode uses the existing query contract so sorting/filtering span all resources.
+async fn listing_page(
+    worker: &DbWorker,
+    grouped: bool,
+    query: ResourceQuery,
+    offset: u64,
+) -> Result<ResourceGridPage, String> {
+    if grouped {
+        worker
+            .list_grid_page(ResourceGridParent::Roots, query, offset, PAGE_SIZE)
+            .await
+    } else {
+        worker
+            .list_query_page(query, offset, PAGE_SIZE)
+            .await
+            .map(|page| ResourceGridPage {
+                rows: page
+                    .rows
+                    .into_iter()
+                    .map(|summary| oeuvre_core::ResourceGridRow {
+                        summary,
+                        has_children: false,
+                    })
+                    .collect(),
+                next_offset: page.next_offset,
+            })
+    }
+}
+
+/// Selection is reconciled in domain coordinates before another event can use it.
+fn restore_grid_selection(
+    table: &mut TableState<LibraryDelegate>,
+    selected: Option<ResourceId>,
+    fallback: Option<ResourceId>,
+    cx: &mut Context<TableState<LibraryDelegate>>,
+) {
+    let Some(id) = selected else {
+        return;
+    };
+    let delegate = table.delegate_mut();
+    let draft = delegate
+        .inline
+        .as_ref()
+        .is_some_and(InlineSession::is_create) as usize;
+    let ix = delegate
+        .rows
+        .iter()
+        .position(|row| row.id == id)
+        .or_else(|| fallback.and_then(|id| delegate.rows.iter().position(|row| row.id == id)));
+    if let Some(ix) = ix {
+        delegate.selected_row = Some(ix + draft);
+        if delegate.reveal_selection == Some(id) {
+            delegate.reveal_selection = None;
+        }
+        table.set_selected_row(ix + draft, cx);
+    } else {
+        delegate.selected_row = None;
+        table.clear_selection(cx);
+    }
+}
+
+fn change_resource_expansion(
+    table: &mut TableState<LibraryDelegate>,
+    id: ResourceId,
+    expand: bool,
+    window: &mut Window,
+    cx: &mut Context<TableState<LibraryDelegate>>,
+) {
+    // Editors retain positional focus. Do not let pointer or keyboard disclosure
+    // hide their row; asynchronous page insertion is reconciled by identity.
+    if table.delegate().inline.is_some() || table.delegate().reloading {
+        return;
+    }
+    if !table
+        .delegate()
+        .grid
+        .positions
+        .get(&id)
+        .is_some_and(|(_, _, children)| *children)
+    {
+        return;
+    }
+    let selected = table
+        .selected_row()
+        .and_then(|ix| table.delegate().row_id(ix));
+    let delegate = table.delegate_mut();
+    if expand {
+        delegate.grid.expanded.insert(id);
+        delegate.reopen.insert(id);
+        let unloaded = delegate
+            .grid
+            .children
+            .get(&id)
+            .is_none_or(|page| !page.loaded);
+        if unloaded {
+            delegate.request_children(id, window, cx);
+        }
+    } else {
+        delegate.grid.collapse(id);
+        delegate.reopen = delegate.grid.expanded.clone();
+    }
+    delegate.rebuild_rows();
+    restore_grid_selection(table, selected, Some(id), cx);
+    cx.notify();
+}
+
 impl TableDelegate for LibraryDelegate {
     fn columns_count(&self, _cx: &App) -> usize {
         COLUMNS
@@ -714,7 +918,11 @@ impl TableDelegate for LibraryDelegate {
         // Reserve the same 1px border on every row so selecting one changes
         // only paint, not its content box. Transparent rules remain invisible.
         div()
-            .id(("row", row_ix))
+            .id(SharedString::from(
+                self.row_id(row_ix)
+                    .map(|id| format!("resource-row-{id}"))
+                    .unwrap_or_else(|| "resource-create-draft".into()),
+            ))
             .border_1()
             .border_color(transparent_white())
             .when(self.selected_row == Some(row_ix), |row| {
@@ -945,12 +1153,85 @@ impl TableDelegate for LibraryDelegate {
                         .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx)),
                 )
             }
-            COL_TITLE => cell.child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .child(row.title.as_str().to_owned()),
-            ),
+            COL_TITLE => {
+                let id = row.id;
+                let (depth, _, has_children) = self
+                    .grid
+                    .positions
+                    .get(&id)
+                    .copied()
+                    .unwrap_or((0, None, false));
+                let expanded = self.grid.expanded.contains(&id);
+                let disabled = self.inline.is_some() || self.reloading;
+                let title = row.title.as_str().to_owned();
+                let mut cell = cell.pl(rems(depth as f32)).gap_1();
+                if has_children {
+                    let label = format!(
+                        "{} {} ({})",
+                        if expanded { "Collapse" } else { "Expand" },
+                        title,
+                        if expanded { "Alt+Left" } else { "Alt+Right" }
+                    );
+                    cell = cell.child(
+                        Button::new(format!("resource-expand-{id}"))
+                            .ghost()
+                            .xsmall()
+                            .compact()
+                            .icon(if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .accessibility_label(label.clone())
+                            .tooltip(label)
+                            .disabled(disabled)
+                            .on_click(cx.listener(move |table, _, window, cx| {
+                                cx.stop_propagation();
+                                change_resource_expansion(table, id, !expanded, window, cx);
+                            })),
+                    );
+                } else {
+                    cell = cell.child(div().w_4().flex_shrink_0());
+                }
+                cell = cell.child(
+                    div()
+                        .id(SharedString::from(format!("resource-title-{id}")))
+                        .test_support()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .child(title),
+                );
+                if expanded {
+                    if let Some(page) = self.grid.children.get(&id) {
+                        let loading = page.request.is_some();
+                        if loading || page.error.is_some() {
+                            let label = if loading {
+                                "Loading children…"
+                            } else {
+                                "Children failed · Retry"
+                            };
+                            let tooltip = page.error.clone().unwrap_or_else(|| {
+                                format!("Load children of {}", row.title.as_str())
+                            });
+                            cell = cell.child(
+                                Button::new(format!("resource-children-{id}"))
+                                    .ghost()
+                                    .xsmall()
+                                    .compact()
+                                    .label(label)
+                                    .tooltip(tooltip)
+                                    .disabled(disabled || loading)
+                                    .on_click(cx.listener(move |table, _, window, cx| {
+                                        cx.stop_propagation();
+                                        table.delegate_mut().request_children(id, window, cx);
+                                    })),
+                            );
+                        }
+                    }
+                }
+                cell
+            }
             COL_CREATORS => cell
                 .text_color(muted)
                 .child(div().min_w_0().truncate().child(row.creators_label.clone())),
@@ -1002,11 +1283,7 @@ impl TableDelegate for LibraryDelegate {
     }
 
     fn has_more(&self, _cx: &App) -> bool {
-        !self.loading
-            && match self.next {
-                PageCursor::NewestFirst(next) => next.is_some(),
-                PageCursor::Query(next) => next.is_some(),
-            }
+        !self.loading && self.error.is_none() && self.next.is_some()
     }
 
     fn load_more_threshold(&self) -> usize {
@@ -1014,78 +1291,46 @@ impl TableDelegate for LibraryDelegate {
     }
 
     fn load_more(&mut self, window: &mut Window, cx: &mut Context<TableState<Self>>) {
-        // The grid fires load_more repeatedly near the bottom, so loading
-        // acts as the lock and an exhausted cursor marks the end.
-        if self.loading
-            || !matches!(
-                self.next,
-                PageCursor::NewestFirst(Some(_)) | PageCursor::Query(Some(_))
-            )
-        {
+        if self.loading {
             return;
         }
+        let Some(offset) = self.next else {
+            return;
+        };
         self.loading = true;
         self.error = None;
         let worker = self.worker.clone();
-        let sort = self.sort;
-        let filter = self.filter.clone();
+        let query = ResourceQuery {
+            sort: self.sort,
+            filter: self.filter.clone(),
+        };
         let issued_gen = self.listing_gen;
-        match self.next {
-            // Cursor kind pins the request shape: the id-cursor walk only
-            // exists while the listing is unsorted and unfiltered, because
-            // reload_from_top re-routes on any sort or filter.
-            PageCursor::NewestFirst(Some(before)) => {
-                cx.spawn_in(window, async move |table, window| {
-                    let page = worker.list_page(Some(before), PAGE_SIZE).await;
-                    _ = table.update_in(window, |table, _window, cx| {
-                        let delegate = table.delegate_mut();
-                        // A sort or keystroke changed the listing after
-                        // this page was requested, so the page belongs to
-                        // a superseded listing; drop it rather than append
-                        // rows the current filter excludes.
-                        if delegate.listing_gen != issued_gen {
-                            return;
-                        }
-                        delegate.loading = false;
-                        match page {
-                            Ok(page) => {
-                                delegate.rows.extend(page.rows);
-                                delegate.next = PageCursor::NewestFirst(page.next_before);
-                            }
-                            Err(err) => delegate.error = Some(err),
-                        }
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            PageCursor::Query(Some(offset)) => {
-                cx.spawn_in(window, async move |table, window| {
-                    let page = worker
-                        .list_query_page(ResourceQuery { sort, filter }, offset, PAGE_SIZE)
-                        .await;
-                    _ = table.update_in(window, |table, _window, cx| {
-                        let delegate = table.delegate_mut();
-                        if delegate.listing_gen != issued_gen {
-                            return;
-                        }
-                        delegate.loading = false;
-                        match page {
-                            Ok(page) => {
-                                delegate.rows.extend(page.rows);
-                                delegate.next = PageCursor::Query(page.next_offset);
-                            }
-                            Err(err) => delegate.error = Some(err),
-                        }
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
-            // Unreachable behind the guard above; a future cursor kind must
-            // not wedge the loading lock, so release it and stop.
-            _ => self.loading = false,
-        }
+        let grouped = self.grouped;
+        cx.spawn_in(window, async move |table, window| {
+            let reply = listing_page(&worker, grouped, query, offset).await;
+            _ = table.update_in(window, |table, window, cx| {
+                let selected = table
+                    .selected_row()
+                    .and_then(|ix| table.delegate().row_id(ix));
+                let delegate = table.delegate_mut();
+                if delegate.listing_gen != issued_gen {
+                    return;
+                }
+                delegate.loading = false;
+                match reply {
+                    Ok(page) => {
+                        delegate.next = page.next_offset;
+                        delegate.grid.append_roots(page);
+                        delegate.rebuild_rows();
+                        delegate.resume_expansions(window, cx);
+                    }
+                    Err(err) => delegate.error = Some(err),
+                }
+                restore_grid_selection(table, selected, None, cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
@@ -1404,6 +1649,8 @@ gpui_kit::actions!([
     FocusSearch,
     InlineNextField,
     InlinePrevField,
+    ExpandResource,
+    CollapseResource,
 ]);
 
 /// Two Esc presses within this window clear filters and hide the filter row.
@@ -1421,9 +1668,8 @@ const DETAIL_CACHE_CAPACITY: usize = 96;
 
 /// Fetched details keyed by id, first-in first-out. A hit renders the
 /// panel without a fetch, which is what makes nearby steps feel instant;
-/// details change only through an edit, and saving one invalidates that
-/// id's entry (see [`DetailCache::invalidate`]), so entries are otherwise
-/// never stale, and the oldest falls out past [`DETAIL_CACHE_CAPACITY`].
+/// details can inherit fields from other records, so resource edits discard
+/// the cache. Otherwise the oldest falls out past [`DETAIL_CACHE_CAPACITY`].
 struct DetailCache {
     entries: HashMap<ResourceId, ResourceDetail>,
     /// Insertion order, oldest first; drives eviction.
@@ -1870,6 +2116,18 @@ impl LibraryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.bind_keys([
+            KeyBinding::new(
+                "alt-right",
+                ExpandResource,
+                Some("LibraryApp && !Input && !InlineEdit"),
+            ),
+            KeyBinding::new(
+                "alt-left",
+                CollapseResource,
+                Some("LibraryApp && !Input && !InlineEdit"),
+            ),
+        ]);
         cx.subscribe_in(
             &table,
             window,
@@ -1879,15 +2137,21 @@ impl LibraryApp {
                         this.save_column_widths(widths, cx);
                     }
                     TableEvent::SelectRow(row_ix) => {
+                        if this.table.read(cx).selected_row() != Some(*row_ix) {
+                            return;
+                        }
                         this.table.update(cx, |table, cx| {
                             let delegate = table.delegate_mut();
                             delegate.selected_row = Some(*row_ix);
                             delegate.selected_col = None;
+                            delegate.reveal_selection = None;
                             cx.notify();
                         });
                         this.select_row(*row_ix, window, cx);
                     }
                     TableEvent::SelectColumn(col_ix) => {
+                        this.table
+                            .update(cx, |table, _| table.delegate_mut().reveal_selection = None);
                         // While inline editing, Tab/arrows mean field focus — not
                         // column selection. Restore the row highlight and move
                         // the caret into the matching editor.
@@ -1906,6 +2170,11 @@ impl LibraryApp {
                         });
                     }
                     TableEvent::ClearSelection => {
+                        if this.table.read(cx).selected_row().is_some()
+                            || this.table.read(cx).selected_col().is_some()
+                        {
+                            return;
+                        }
                         this.table.update(cx, |table, cx| {
                             let delegate = table.delegate_mut();
                             delegate.selected_row = None;
@@ -2526,7 +2795,23 @@ impl LibraryApp {
         }
         self.last_escape_at = None;
         let target = self.selected;
-        let palette = cx.new(|cx| CommandPalette::new(target, window, cx));
+        let grouped = self.table.read(cx).delegate().grouped;
+        let palette = cx.new(|cx| CommandPalette::new(target, grouped, window, cx));
+        cx.subscribe_in(
+            &palette,
+            window,
+            |app, _, _: &ToggleResourceGrouping, window, cx| {
+                window.close_dialog(cx);
+                let selected = app.selected;
+                app.table.update(cx, |table, cx| {
+                    let delegate = table.delegate_mut();
+                    delegate.grouped = !delegate.grouped;
+                    delegate.reload_from_top(selected, None, window, cx);
+                });
+                app.focus_table(window, cx);
+            },
+        )
+        .detach();
         cx.subscribe_in(
             &palette,
             window,
@@ -3246,7 +3531,6 @@ impl LibraryApp {
         cx.spawn_in(window, async move |app, window| {
             let reply = worker.resource_detail(id).await;
             _ = app.update_in(window, |app, window, cx| {
-                app.detail_inflight.remove(&id);
                 // The record this reply describes was edited after the
                 // fetch was issued; it must not enter the cache or the
                 // panel. The save's own refetch (issued at the new
@@ -3254,6 +3538,7 @@ impl LibraryApp {
                 if *app.detail_gens.get(&id).unwrap_or(&0) != fetch_epoch {
                     return;
                 }
+                app.detail_inflight.remove(&id);
                 match reply {
                     Ok(detail) => {
                         // Failures stay out of the cache: reselecting a
@@ -3413,6 +3698,33 @@ impl LibraryApp {
         }
     }
 
+    fn disclose_selected_resource(
+        &mut self,
+        expand: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.table.update(cx, |table, cx| {
+            let Some(id) = table
+                .selected_row()
+                .and_then(|ix| table.delegate().row_id(ix))
+            else {
+                return;
+            };
+            let target = if !expand && !table.delegate().grid.expanded.contains(&id) {
+                table.delegate().grid.parent(id).unwrap_or(id)
+            } else {
+                id
+            };
+            if expand && table.delegate().grid.expanded.contains(&target) {
+                if table.delegate().inline.is_none() {
+                    table.delegate_mut().request_children(target, window, cx);
+                }
+            } else {
+                change_resource_expansion(table, target, expand, window, cx);
+            }
+        });
+    }
     /// Space on a highlighted sortable column steps that column's sort
     /// cycle. Kind has no sort field, so Space is a no-op there.
     fn cycle_column_sort(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3771,6 +4083,14 @@ impl LibraryApp {
                 }
                 match record {
                     Ok(record) => {
+                        let row_ix = app
+                            .table
+                            .read(cx)
+                            .delegate()
+                            .inline
+                            .as_ref()
+                            .expect("session checked above")
+                            .row_ix();
                         let form = InlineRowEdit::for_edit(record, &people, row_ix, window, cx);
                         // Land the form in the delegate before focusing so
                         // the next paint owns the focused Input entity.
@@ -3913,9 +4233,12 @@ impl LibraryApp {
                             table.col_selectable = true;
                         });
                         app.selected = Some(id);
-                        *app.detail_gens.entry(id).or_default() += 1;
-                        app.detail_inflight.remove(&id);
-                        app.detail_cache.invalidate(&id);
+                        // Any cached article may inherit from the edited container.
+                        // Reject pre-edit replies as well as cached projections.
+                        for pending in app.detail_inflight.drain() {
+                            *app.detail_gens.entry(pending).or_default() += 1;
+                        }
+                        app.detail_cache = DetailCache::new();
                         app.detail = Some((id, DetailFetch::Loading));
                         app.fetch_detail(id, window, cx);
                         app.refresh_counts(window, cx);
@@ -4170,13 +4493,12 @@ impl LibraryApp {
                 match reply {
                     Ok(_) => {
                         app.edit = None;
-                        // The stored record changed under every detail
-                        // fetched for it: bump the id's generation so an
-                        // in-flight fetch's reply is dropped, forget the
-                        // cached detail, and refetch for the panel.
-                        *app.detail_gens.entry(id).or_default() += 1;
-                        app.detail_inflight.remove(&id);
-                        app.detail_cache.invalidate(&id);
+                        // Any cached article may inherit from the edited container.
+                        // Reject pre-edit replies as well as cached projections.
+                        for pending in app.detail_inflight.drain() {
+                            *app.detail_gens.entry(pending).or_default() += 1;
+                        }
+                        app.detail_cache = DetailCache::new();
                         app.detail = Some((id, DetailFetch::Loading));
                         app.fetch_detail(id, window, cx);
                         app.refresh_counts(window, cx);
@@ -5052,6 +5374,12 @@ impl Render for LibraryApp {
             .on_action(cx.listener(|this, _: &CycleColumnSort, window, cx| {
                 this.cycle_column_sort(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ExpandResource, window, cx| {
+                this.disclose_selected_resource(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CollapseResource, window, cx| {
+                this.disclose_selected_resource(false, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleEditMode, window, cx| {
                 this.toggle_edit_mode(window, cx);
             }))
@@ -5319,6 +5647,8 @@ impl Render for LibraryApp {
                                     table.header_row_height(height)
                                 });
                             let wrap = div()
+                                .id("library-grid-viewport")
+                                .test_support()
                                 .flex_1()
                                 .min_w_0()
                                 .h_full()
@@ -5368,13 +5698,28 @@ impl Render for LibraryApp {
             )
             .when_some(error, |el, error| {
                 el.child(
-                    div()
+                    h_flex()
+                        .gap_2()
                         .flex_shrink_0()
                         .px_2()
                         .py_1()
                         .text_xs()
                         .text_color(danger)
-                        .child(error),
+                        .child(error)
+                        .child(
+                            Button::new("retry-resource-grid")
+                                .ghost()
+                                .xsmall()
+                                .label("Retry")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let selected = this.selected;
+                                    this.table.update(cx, |table, cx| {
+                                        table
+                                            .delegate_mut()
+                                            .reload_from_top(selected, None, window, cx);
+                                    });
+                                })),
+                        ),
                 )
             })
     }
@@ -5573,7 +5918,17 @@ mod palette_persistence_tests {
                 .surface(oeuvre_app::Surface::Test)
                 .build(),
         );
-        let first = worker.list_page_blocking(None, 50).unwrap();
+        let first = worker
+            .list_grid_page_blocking(
+                oeuvre_core::ResourceGridParent::Roots,
+                oeuvre_core::ResourceQuery {
+                    sort: None,
+                    filter: oeuvre_core::ResourceFilter::none(),
+                },
+                0,
+                50,
+            )
+            .unwrap();
         let (handle, app) = cx.update(|cx| {
             gpui_kit::init(cx);
             cx.bind_keys([KeyBinding::new(
@@ -5637,7 +5992,17 @@ mod panel_width_tests {
                 .surface(oeuvre_app::Surface::Test)
                 .build(),
         );
-        let first = worker.list_page_blocking(None, 50).unwrap();
+        let first = worker
+            .list_grid_page_blocking(
+                oeuvre_core::ResourceGridParent::Roots,
+                oeuvre_core::ResourceQuery {
+                    sort: None,
+                    filter: oeuvre_core::ResourceFilter::none(),
+                },
+                0,
+                50,
+            )
+            .unwrap();
         let (handle, _) = cx.update(|cx| {
             gpui_kit::init(cx);
             gpui_kit::open_window(
@@ -6225,7 +6590,17 @@ mod biblatex_gui_tests {
                 .surface(oeuvre_app::Surface::Test)
                 .build(),
         );
-        let first = worker.list_page_blocking(None, 50).unwrap();
+        let first = worker
+            .list_grid_page_blocking(
+                oeuvre_core::ResourceGridParent::Roots,
+                oeuvre_core::ResourceQuery {
+                    sort: None,
+                    filter: oeuvre_core::ResourceFilter::none(),
+                },
+                0,
+                50,
+            )
+            .unwrap();
         let (handle, app) = cx.update(|cx| {
             gpui_kit::init(cx);
             cx.bind_keys([KeyBinding::new(
@@ -6276,7 +6651,10 @@ mod biblatex_gui_tests {
             Some(vec![path.clone()])
         });
         cx.run_until_parked();
-        // Fence the external database thread, then process the GUI completion and reload.
+        // Preview and commit are separate worker round trips. Let the preview
+        // completion enqueue the commit before fencing its persisted rows.
+        worker.list_page_blocking(None, 50).unwrap();
+        cx.run_until_parked();
         assert_eq!(worker.list_page_blocking(None, 50).unwrap().rows.len(), 2);
         cx.run_until_parked();
         worker.list_page_blocking(None, 50).unwrap();
@@ -6287,7 +6665,7 @@ mod biblatex_gui_tests {
             assert!(window.try_find("biblatex-import-report").is_some());
             assert_eq!(
                 window.find("biblatex-import-report").label(),
-                Some("2 imported · 1 skipped · 0 warnings")
+                Some("2 imported · 0 reused · 1 skipped · 0 conflicted · 0 failed · 0 not attempted · 0 warnings")
             );
             assert_eq!(app.read(cx).counts.as_ref().unwrap().all_items, 2);
             assert_eq!(app.read(cx).table.read(cx).delegate().rows.len(), 2);
@@ -6308,6 +6686,536 @@ mod biblatex_gui_tests {
         assert_eq!(worker.list_page_blocking(None, 50).unwrap().rows.len(), 2);
         cx.update_window(handle, |_, window, cx| {
             assert!(!window.has_active_dialog(cx));
+        })
+        .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod resource_grid_tests {
+    use super::{DbWorker, LibraryDelegate, ResourceKind, Settings};
+
+    #[test]
+    fn collapsed_grid_does_not_show_children_as_roots() {
+        let store = oeuvre_app::testing::MemoryStore::new();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(oeuvre_app::seed::seed_demo_library(&store, 20))
+            .unwrap();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(store)
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let first = worker
+            .list_grid_page_blocking(
+                oeuvre_core::ResourceGridParent::Roots,
+                oeuvre_core::ResourceQuery {
+                    sort: None,
+                    filter: oeuvre_core::ResourceFilter::none(),
+                },
+                0,
+                50,
+            )
+            .unwrap();
+        let grid = LibraryDelegate::new(worker, first, Settings::default());
+        assert!(
+            !grid
+                .rows
+                .iter()
+                .any(|row| row.kind == ResourceKind::BookSection)
+        );
+        assert!(
+            !grid
+                .rows
+                .iter()
+                .any(|row| row.kind == ResourceKind::JournalArticle)
+        );
+    }
+}
+
+#[cfg(test)]
+mod nested_grid_interaction_tests {
+    use super::{
+        DbWorker, LibraryApp, LibraryDelegate, ResourceFilter, ResourceGridParent, ResourceKind,
+        ResourceQuery, Settings, TableState,
+    };
+    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, TestAppContext};
+
+    #[gpui_kit::test]
+    fn pointer_disclosure_loads_children_and_keyboard_collapses(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.executor().allow_parking();
+        let store = oeuvre_app::testing::MemoryStore::new();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use oeuvre_core::Store as _;
+            oeuvre_app::seed::seed_demo_library(&store, 20)
+                .await
+                .unwrap();
+            let chapter = store
+                .list_resources()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|row| row.kind == ResourceKind::BookSection)
+                .unwrap();
+            let template = store.get_resource(chapter.id).await.unwrap().to_new();
+            for _ in 0..60 {
+                store.create_resource(template.clone()).await.unwrap();
+            }
+        });
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(store)
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let query = ResourceQuery {
+            sort: None,
+            filter: ResourceFilter::none(),
+        };
+        let first = worker
+            .list_grid_page_blocking(ResourceGridParent::Roots, query, 0, 50)
+            .unwrap();
+        let parent = first
+            .rows
+            .iter()
+            .find(|row| row.summary.kind == ResourceKind::Book && row.has_children)
+            .unwrap()
+            .summary
+            .id;
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            let worker = worker.clone();
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let table = cx.new(|cx| {
+                    TableState::new(
+                        LibraryDelegate::new(worker, first, Settings::default()),
+                        window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        let before = app.read_with(cx, |app, cx| app.table.read(cx).delegate().rows.len());
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| app.focus_table(window, cx));
+            window.render_frame(cx);
+            window.click(format!("resource-expand-{parent}"), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        worker.list_page_blocking(None, 1).unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let table = app.read(cx).table.clone();
+            assert_eq!(
+                table.read(cx).delegate().rows.len(),
+                before + 63,
+                "expanding a parent must load every child, not just the first page"
+            );
+            assert!(
+                window
+                    .try_find(format!("resource-children-{parent}"))
+                    .is_none()
+            );
+            let ix = table
+                .read(cx)
+                .delegate()
+                .rows
+                .iter()
+                .position(|row| row.kind == ResourceKind::BookSection)
+                .unwrap();
+            let selected = table.read(cx).delegate().rows[ix].id;
+            table.update(cx, |table, cx| table.set_selected_row(ix, cx));
+            app.update(cx, |app, cx| app.focus_table(window, cx));
+            window.render_frame(cx);
+            window.press("alt-left", cx);
+            assert_eq!(table.read(cx).delegate().rows.len(), before);
+            assert_eq!(
+                table
+                    .read(cx)
+                    .selected_row()
+                    .and_then(|ix| table.read(cx).delegate().row_id(ix)),
+                Some(parent)
+            );
+            assert!(
+                !table
+                    .read(cx)
+                    .delegate()
+                    .rows
+                    .iter()
+                    .any(|row| row.id == selected)
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn palette_toggles_grouping_without_selection_and_restores_grouped_rows(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.executor().allow_parking();
+        let store = oeuvre_app::testing::MemoryStore::new();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(oeuvre_app::seed::seed_demo_library(&store, 20))
+            .unwrap();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(store)
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let total = worker.list_page_blocking(None, 50).unwrap().rows.len();
+        let first = worker
+            .list_grid_page_blocking(
+                ResourceGridParent::Roots,
+                ResourceQuery::newest_first(),
+                0,
+                50,
+            )
+            .unwrap();
+        let grouped_count = first.rows.len();
+        assert!(grouped_count < total);
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let table = cx.new(|cx| {
+                    TableState::new(
+                        LibraryDelegate::new(worker.clone(), first, Settings::default()),
+                        window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| app.open_command_palette(window, cx));
+            window.render_frame(cx);
+            assert!(
+                window.try_find(("palette-row", 2usize)).is_some(),
+                "grouping is a library command, available without a selected resource"
+            );
+            window.input("grouping", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| window.press("enter", cx))
+            .unwrap();
+        cx.run_until_parked();
+        worker.list_page_blocking(None, 1).unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(!window.has_active_dialog(cx));
+            let table = app.read(cx).table.clone();
+            let delegate = table.read(cx).delegate();
+            assert_eq!(delegate.rows.len(), total);
+            assert!(
+                delegate
+                    .grid
+                    .positions
+                    .values()
+                    .all(|position| *position == (0, None, false))
+            );
+            app.update(cx, |app, cx| app.open_command_palette(window, cx));
+            window.render_frame(cx);
+            window.click(("palette-row", 2usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        worker.list_page_blocking(None, 1).unwrap();
+        cx.run_until_parked();
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.table.read(cx).delegate().rows.len(), grouped_count);
+        });
+    }
+}
+
+#[cfg(test)]
+mod cached_grid_interaction_tests {
+    use super::resource_grid::ChildPage;
+    use super::{DbWorker, LibraryApp, LibraryDelegate, Settings, TableState};
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, TestAppContext};
+    use oeuvre_core::{
+        NonEmptyStr, ResourceGridPage, ResourceGridRow, ResourceId, ResourceKind, ResourceSummary,
+        UtcMillis,
+    };
+
+    fn row(title: &str, has_children: bool) -> ResourceGridRow {
+        ResourceGridRow {
+            summary: ResourceSummary {
+                id: ResourceId::generate(),
+                kind: ResourceKind::Book,
+                title: NonEmptyStr::try_new(title).unwrap(),
+                creators_label: String::new(),
+                published_label: None,
+                publisher: None,
+                container_title: None,
+                date_added: UtcMillis::from_unix_ms(0),
+                date_edited: UtcMillis::from_unix_ms(0),
+            },
+            has_children,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn disclosure_preserves_other_selection_and_selects_collapsed_ancestor(
+        cx: &mut TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.executor().allow_parking();
+        let parent = row("Parent book", true);
+        let child = row("Chapter", false);
+        let other = row("Other root", false);
+        let parent_id = parent.summary.id;
+        let child_id = child.summary.id;
+        let other_id = other.summary.id;
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let mut delegate = LibraryDelegate::new(
+                    worker,
+                    ResourceGridPage {
+                        rows: vec![parent, other],
+                        next_offset: None,
+                    },
+                    Settings::default(),
+                );
+                delegate.grid.children.insert(
+                    parent_id,
+                    ChildPage {
+                        rows: vec![child],
+                        loaded: true,
+                        ..Default::default()
+                    },
+                );
+                let table = cx.new(|cx| TableState::new(delegate, window, cx));
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            let table = app.read(cx).table.clone();
+            table.update(cx, |table, cx| table.set_selected_row(1, cx));
+            app.update(cx, |app, cx| app.focus_table(window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .try_find(format!("resource-expand-{child_id}"))
+                    .is_none()
+            );
+            window.click(format!("resource-expand-{parent_id}"), cx);
+            let table = app.read(cx).table.clone();
+            assert_eq!(table.read(cx).delegate().rows.len(), 3);
+            assert_eq!(
+                table
+                    .read(cx)
+                    .selected_row()
+                    .and_then(|ix| table.read(cx).delegate().row_id(ix)),
+                Some(other_id)
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            let table = app.read(cx).table.clone();
+            table.update(cx, |table, cx| table.set_selected_row(1, cx));
+            app.update(cx, |app, cx| app.focus_table(window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("alt-left", cx);
+            let table = app.read(cx).table.clone();
+            assert_eq!(table.read(cx).delegate().rows.len(), 2);
+            assert_eq!(
+                table
+                    .read(cx)
+                    .selected_row()
+                    .and_then(|ix| table.read(cx).delegate().row_id(ix)),
+                Some(parent_id)
+            );
+            window.press("alt-right", cx);
+            assert_eq!(table.read(cx).delegate().rows.len(), 3);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn arriving_child_page_moves_loading_editor_by_resource_id() {
+        let parent = row("Parent", true);
+        let other = row("Editing this", false);
+        let id = other.summary.id;
+        let parent_id = parent.summary.id;
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let mut delegate = LibraryDelegate::new(
+            worker,
+            ResourceGridPage {
+                rows: vec![parent, other],
+                next_offset: None,
+            },
+            Settings::default(),
+        );
+        delegate.inline = Some(super::InlineSession::Loading { id, row_ix: 1 });
+        delegate.grid.expanded.insert(parent_id);
+        let (token, _) = delegate.grid.begin(parent_id).unwrap();
+        delegate.grid.finish(
+            parent_id,
+            token,
+            Ok(ResourceGridPage {
+                rows: vec![row("New child", false)],
+                next_offset: None,
+            }),
+        );
+        delegate.rebuild_rows();
+        assert_eq!(delegate.inline.as_ref().unwrap().row_ix(), 2);
+        assert_eq!(delegate.row_id(2), Some(id));
+        assert_ne!(delegate.row_id(1), Some(id));
+    }
+
+    #[gpui_kit::test]
+    fn child_retry_and_collapse_remain_available_while_request_is_pending(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.executor().allow_parking();
+        let parent = row("Retry this book", true);
+        let id = parent.summary.id;
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let mut delegate = LibraryDelegate::new(
+                    worker,
+                    ResourceGridPage {
+                        rows: vec![parent],
+                        next_offset: None,
+                    },
+                    Settings::default(),
+                );
+                delegate.grid.expanded.insert(id);
+                delegate.grid.children.insert(
+                    id,
+                    ChildPage {
+                        error: Some("Connection lost".into()),
+                        ..Default::default()
+                    },
+                );
+                let table = cx.new(|cx| TableState::new(delegate, window, cx));
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let retry = format!("resource-children-{id}");
+            let expand = format!("resource-expand-{id}");
+            assert_eq!(
+                window.find(retry.clone()).label(),
+                Some("Children failed · Retry")
+            );
+            window.click(retry.clone(), cx);
+            assert_eq!(
+                window.find(retry.clone()).label(),
+                Some("Loading children…")
+            );
+            let table = app.read(cx).table.clone();
+            let first = table.read(cx).delegate().grid.children[&id]
+                .request
+                .unwrap();
+            window.click(expand.clone(), cx);
+            assert!(
+                table.read(cx).delegate().grid.children[&id]
+                    .request
+                    .is_none()
+            );
+            assert!(window.try_find(retry.clone()).is_none());
+            window.click(expand.clone(), cx);
+            let second = table.read(cx).delegate().grid.children[&id]
+                .request
+                .unwrap();
+            assert_ne!(first, second);
+            assert_eq!(window.find(retry).label(), Some("Loading children…"));
+
+            table.update(cx, |table, _| {
+                table.delegate_mut().inline = Some(super::InlineSession::Loading { id, row_ix: 0 });
+            });
+            window.render_frame(cx);
+            window.click(expand, cx);
+            assert!(
+                table.read(cx).delegate().grid.expanded.contains(&id),
+                "disclosure must not move an active inline editor"
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn background_loading_keeps_the_grid_viewport_height(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.executor().allow_parking();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let first = ResourceGridPage {
+                    rows: vec![row("Book", false)],
+                    next_offset: Some(1),
+                };
+                let table = cx.new(|cx| {
+                    TableState::new(
+                        LibraryDelegate::new(worker, first, Settings::default()),
+                        window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let idle = window.find("library-grid-viewport").bounds();
+            let table = app.read(cx).table.clone();
+            table.update(cx, |table, cx| {
+                table.delegate_mut().loading = true;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("library-grid-viewport").bounds(),
+                idle,
+                "background page loading must not add a footer or shrink the grid"
+            );
         })
         .unwrap();
     }

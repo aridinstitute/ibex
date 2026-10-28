@@ -5,6 +5,7 @@ use oeuvre_core::{
     ResourceError, ResourceId, ResourcePage, ResourceQuery, ResourceSummary, SeriesId,
     SortedResourcePage, StoreError, creator_label_name, detail_creator_groups, resolve_effective,
 };
+use oeuvre_core::{ResourceGridPage, ResourceGridParent};
 
 use crate::event::{self, Event};
 use crate::{AppState, CommandError, Handler, Outcome};
@@ -58,6 +59,61 @@ pub struct ListResourcesQueryPage {
     pub offset: u64,
     /// Page size in rows. Zero is rejected as invalid input.
     pub limit: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListResourceGridPage {
+    pub parent: ResourceGridParent,
+    pub query: ResourceQuery,
+    pub offset: u64,
+    pub limit: u32,
+}
+
+pub(crate) struct ListedGridPage(pub ResourceGridPage);
+
+impl From<ListedGridPage> for Outcome {
+    fn from(ListedGridPage(page): ListedGridPage) -> Self {
+        Outcome::ResourceGridPage(page)
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for ListResourceGridPage {
+    const NAME: &'static str = "list_resource_grid_page";
+    type Output = ListedGridPage;
+
+    fn annotate(&self, ev: &mut Event) {
+        ListResourcesQueryPage {
+            query: self.query.clone(),
+            offset: self.offset,
+            limit: self.limit,
+        }
+        .annotate(ev);
+        match self.parent {
+            ResourceGridParent::Roots => {
+                ev.set(event::RESOURCE_GRID_PARENT, "roots");
+            }
+            ResourceGridParent::Children(id) => {
+                ev.set(event::RESOURCE_GRID_PARENT, "children");
+                ev.set(event::RESOURCE_PARENT_ID, id.to_string());
+            }
+        }
+    }
+
+    async fn run(self, state: &AppState, ev: &mut Event) -> Result<ListedGridPage, CommandError> {
+        if self.limit == 0 {
+            return Err(CommandError::Invalid(
+                "page limit must be at least 1".into(),
+            ));
+        }
+        let page = state
+            .store()
+            .list_resource_grid_page(self.parent, &self.query, self.offset, self.limit)
+            .await?;
+        ev.set(event::RESOURCE_GRID_ROWS, page.rows.len() as u64);
+        ev.set(event::RESOURCE_GRID_HAS_MORE, page.next_offset.is_some());
+        Ok(ListedGridPage(page))
+    }
 }
 
 #[derive(Debug, Clone)]

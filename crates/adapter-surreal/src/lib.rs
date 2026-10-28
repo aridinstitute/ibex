@@ -287,6 +287,13 @@ struct ListCreatorEdgeRow {
 }
 
 #[derive(Debug, SurrealValue)]
+struct GridLinkRow {
+    id: RecordId,
+    #[surreal(default)]
+    parent: Option<RecordId>,
+}
+
+#[derive(Debug, SurrealValue)]
 struct InheritanceAncestorRow {
     id: RecordId,
     #[surreal(wrap)]
@@ -318,6 +325,202 @@ struct KindCountRow {
 }
 
 impl SurrealStore {
+    async fn query_resource_rows(
+        &self,
+        query: &ResourceQuery,
+        offset: u64,
+        limit: u32,
+        parent: Option<oeuvre_core::ResourceGridParent>,
+        visible: Option<&[RecordId]>,
+        matches_only: bool,
+    ) -> Result<(Vec<ListResourceRow>, Option<u64>), StoreError> {
+        // ORDER BY takes field paths, not expressions, so computed keys are
+        // aliased projections the clause can name; ASC/DESC cannot come from
+        // a parameter, so the literal is chosen by the enum below, never
+        // from input. Ties break newest-first (id descending) and rows
+        // without the sort field land at the no-data end for the direction
+        // via the boolean pre-key (`sort_missing`).
+        let fetch_limit = (u64::from(limit) + 1).min(u64::from(u32::MAX)) as usize;
+        // Collection filter expands to the selected id plus descendants so
+        // nested membership matches without the caller walking the graph.
+        let collection_record_ids = if let Some(cid) = query.filter.collection {
+            Some(
+                self.collection_descendant_ids(cid)
+                    .await?
+                    .into_iter()
+                    .map(Self::collection_key)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+        // Filter predicates AND into one WHERE ahead of the order contract;
+        // values are bound parameters, never interpolated text.
+        let mut where_sql = filter_where(&query.filter);
+        if let Some(parent) = parent {
+            let clause = match parent {
+                oeuvre_core::ResourceGridParent::Roots => "parent = NONE",
+                oeuvre_core::ResourceGridParent::Children(_) => "parent = $grid_parent",
+            };
+            where_sql.push_str(if where_sql.is_empty() {
+                " WHERE "
+            } else {
+                " AND "
+            });
+            where_sql.push_str(clause);
+        }
+        if visible.is_some() {
+            where_sql.push_str(if where_sql.is_empty() {
+                " WHERE "
+            } else {
+                " AND "
+            });
+            where_sql.push_str("id IN $grid_visible");
+        }
+        // A creator filter narrows the row set at its source: traversing one
+        // person's `created` edges reaches exactly their works, where a
+        // membership predicate would instead scan every resource and test
+        // each row.
+        let from_sql = filter_from(&query.filter);
+        let sql = match query.sort {
+            // The default listing order, paged by offset instead of cursor.
+            None => format!(
+                "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited FROM {from_sql}{where_sql} \
+                 ORDER BY id DESC LIMIT $limit START $offset"
+            ),
+            Some((ResourceSort::Title, direction)) => {
+                let dir = dir_literal(direction);
+                format!(
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited FROM {from_sql}{where_sql} \
+                     ORDER BY title COLLATE {dir}, id DESC LIMIT $limit START $offset"
+                )
+            }
+            Some((ResourceSort::Published, direction)) => {
+                let dir = dir_literal(direction);
+                format!(
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
+                            published.instant AS sort_key, \
+                            (IF published THEN false ELSE true END) AS sort_missing \
+                     FROM {from_sql}{where_sql} \
+                     ORDER BY sort_missing {dir}, sort_key {dir}, id DESC \
+                     LIMIT $limit START $offset"
+                )
+            }
+            // Publisher is optional data, so its rows take the published
+            // sort's no-data marker: names order case-insensitively and a
+            // row without one lands at the direction's end.
+            Some((ResourceSort::Publisher, direction)) => {
+                let dir = dir_literal(direction);
+                format!(
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
+                            (IF publisher THEN false ELSE true END) AS sort_missing \
+                     FROM {from_sql}{where_sql} \
+                     ORDER BY sort_missing {dir}, publisher COLLATE {dir}, id DESC \
+                     LIMIT $limit START $offset"
+                )
+            }
+            // Record-keeping dates are stamped on every create and edit and
+            // backfilled at open, so both sorts are plain instant orders;
+            // the missing flag only guards a row a failed backfill left
+            // behind.
+            Some((ResourceSort::DateAdded, direction)) => {
+                let dir = dir_literal(direction);
+                format!(
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
+                            (IF date_added THEN false ELSE true END) AS sort_missing \
+                     FROM {from_sql}{where_sql} \
+                     ORDER BY sort_missing {dir}, date_added {dir}, id DESC \
+                     LIMIT $limit START $offset"
+                )
+            }
+            Some((ResourceSort::DateEdited, direction)) => {
+                let dir = dir_literal(direction);
+                format!(
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
+                            (IF date_edited THEN false ELSE true END) AS sort_missing \
+                     FROM {from_sql}{where_sql} \
+                     ORDER BY sort_missing {dir}, date_edited {dir}, id DESC \
+                     LIMIT $limit START $offset"
+                )
+            }
+            // The key is maintained on writes, avoiding per-row creator lookups.
+            Some((ResourceSort::PrimaryCreator, direction)) => {
+                let dir = dir_literal(direction);
+                format!(
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
+                            primary_creator_last_name, \
+                            (IF primary_creator_last_name THEN false ELSE true END) AS sort_missing \
+                     FROM {from_sql}{where_sql} \
+                     ORDER BY sort_missing {dir}, primary_creator_last_name COLLATE {dir}, id DESC \
+                     LIMIT $limit START $offset"
+                )
+            }
+        };
+        let sql = if matches_only {
+            format!(
+                "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited FROM {from_sql}{where_sql}"
+            )
+        } else {
+            sql
+        };
+        let mut statement = self
+            .db
+            .query(sql)
+            .bind(("limit", fetch_limit))
+            .bind(("offset", offset));
+        if let Some(oeuvre_core::ResourceGridParent::Children(id)) = parent {
+            statement = statement.bind(("grid_parent", Self::resource_key(id)));
+        }
+        if let Some(ids) = visible {
+            statement = statement.bind(("grid_visible", ids.to_vec()));
+        }
+        // The needle binds only when its clause is present, and lowercases
+        // once here instead of per row inside the query.
+        if let Some(needle) = query.filter.title.as_ref() {
+            statement = statement.bind(("title_needle", needle.as_str().to_lowercase()));
+        }
+        if let Some(needle) = query.filter.search.as_ref() {
+            statement = statement.bind(("search_needle", needle.as_str().to_lowercase()));
+        }
+        // The creator binds as its record id, matching the created edges'
+        // `in` links without string building.
+        if let Some(creator) = query.filter.creator {
+            statement = statement.bind(("creator_id", Self::person_key(creator)));
+        }
+        // The kind binds as its slug, the same wrapped-enum string the
+        // create path stores, so the clause compares like against like.
+        if let Some(kind) = query.filter.kind {
+            statement = statement.bind(("kind", kind.as_str()));
+        }
+        if let Some(favorite) = query.filter.favorite {
+            statement = statement.bind(("favorite", favorite));
+        }
+        if let Some(tag) = query.filter.tag {
+            statement = statement.bind(("tag_id", Self::tag_key(tag)));
+        }
+        if let Some(ids) = collection_record_ids {
+            statement = statement.bind(("collection_ids", ids));
+        }
+        if let Some(range) = query.filter.published {
+            if let Some(from) = range.from {
+                statement = statement.bind(("published_from", from.as_unix_ms()));
+            }
+            if let Some(to) = range.to {
+                statement = statement.bind(("published_to", to.as_unix_ms()));
+            }
+        }
+        let mut response = statement.await.map_err(map_err)?;
+        let mut rows: Vec<ListResourceRow> = response.take(0).map_err(map_err)?;
+        if matches_only {
+            return Ok((rows, None));
+        }
+        // One extra row decides next_offset exactly, mirroring the cursor
+        // page; an offset past the end yields an empty page.
+        let has_more = rows.len() > limit as usize;
+        rows.truncate(limit as usize);
+        let next_offset = has_more.then(|| offset.saturating_add(u64::from(limit)));
+        Ok((rows, next_offset))
+    }
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
         let db = Surreal::new::<SurrealKv>(path).await.map_err(map_err)?;
         db.use_ns(NS).use_db(DB).await.map_err(map_err)?;
@@ -2014,157 +2217,111 @@ impl Store for SurrealStore {
         offset: u64,
         limit: u32,
     ) -> Result<SortedResourcePage, StoreError> {
-        // ORDER BY takes field paths, not expressions, so computed keys are
-        // aliased projections the clause can name; ASC/DESC cannot come from
-        // a parameter, so the literal is chosen by the enum below, never
-        // from input. Ties break newest-first (id descending) and rows
-        // without the sort field land at the no-data end for the direction
-        // via the boolean pre-key (`sort_missing`).
-        let fetch_limit = (u64::from(limit) + 1).min(u64::from(u32::MAX)) as usize;
-        // Collection filter expands to the selected id plus descendants so
-        // nested membership matches without the caller walking the graph.
-        let collection_record_ids = if let Some(cid) = query.filter.collection {
-            Some(
-                self.collection_descendant_ids(cid)
-                    .await?
-                    .into_iter()
-                    .map(Self::collection_key)
-                    .collect::<Vec<_>>(),
-            )
+        let (rows, next_offset) = self
+            .query_resource_rows(query, offset, limit, None, None, false)
+            .await?;
+        let rows = self.summaries_for_rows(rows).await?;
+        Ok(SortedResourcePage { rows, next_offset })
+    }
+
+    async fn list_resource_grid_page(
+        &self,
+        parent: oeuvre_core::ResourceGridParent,
+        query: &ResourceQuery,
+        offset: u64,
+        limit: u32,
+    ) -> Result<oeuvre_core::ResourceGridPage, StoreError> {
+        use oeuvre_core::{ResourceGridPage, ResourceGridRow};
+        if limit == 0 {
+            return Err(StoreError::invalid("page limit must be at least 1"));
+        }
+        // Only filtered requests need a context pass. Read matches, then their
+        // ancestors one depth at a time in batches; never load the unfiltered
+        // library or issue one database request per grid row. The visible-id
+        // set is recomputed per page and uses memory proportional to matches
+        // plus ancestors.
+        let visible = if query.filter != ResourceFilter::none() {
+            let (matches, _) = self
+                .query_resource_rows(query, 0, 0, None, None, true)
+                .await?;
+            let mut seen = std::collections::HashSet::new();
+            let mut frontier = Vec::new();
+            for row in matches {
+                seen.insert(row.id);
+                if let Some(parent) = row.parent {
+                    frontier.push(parent);
+                }
+            }
+            loop {
+                frontier.retain(|id| !seen.contains(id));
+                if frontier.is_empty() {
+                    break;
+                }
+                let mut response = self
+                    .db
+                    .query("SELECT id, parent FROM $ids")
+                    .bind(("ids", frontier))
+                    .await
+                    .map_err(map_err)?;
+                let ancestors: Vec<GridLinkRow> = response.take(0).map_err(map_err)?;
+                frontier = Vec::new();
+                for row in ancestors {
+                    if seen.insert(row.id) {
+                        if let Some(parent) = row.parent {
+                            frontier.push(parent);
+                        }
+                    }
+                }
+            }
+            Some(seen.into_iter().collect::<Vec<_>>())
         } else {
             None
         };
-        // Filter predicates AND into one WHERE ahead of the order contract;
-        // values are bound parameters, never interpolated text.
-        let where_sql = filter_where(&query.filter);
-        // A creator filter narrows the row set at its source: traversing one
-        // person's `created` edges reaches exactly their works, where a
-        // membership predicate would instead scan every resource and test
-        // each row.
-        let from_sql = filter_from(&query.filter);
-        let sql = match query.sort {
-            // The default listing order, paged by offset instead of cursor.
-            None => format!(
-                "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited FROM {from_sql}{where_sql} \
-                 ORDER BY id DESC LIMIT $limit START $offset"
-            ),
-            Some((ResourceSort::Title, direction)) => {
-                let dir = dir_literal(direction);
-                format!(
-                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited FROM {from_sql}{where_sql} \
-                     ORDER BY title COLLATE {dir}, id DESC LIMIT $limit START $offset"
-                )
-            }
-            Some((ResourceSort::Published, direction)) => {
-                let dir = dir_literal(direction);
-                format!(
-                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
-                            published.instant AS sort_key, \
-                            (IF published THEN false ELSE true END) AS sort_missing \
-                     FROM {from_sql}{where_sql} \
-                     ORDER BY sort_missing {dir}, sort_key {dir}, id DESC \
-                     LIMIT $limit START $offset"
-                )
-            }
-            // Publisher is optional data, so its rows take the published
-            // sort's no-data marker: names order case-insensitively and a
-            // row without one lands at the direction's end.
-            Some((ResourceSort::Publisher, direction)) => {
-                let dir = dir_literal(direction);
-                format!(
-                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
-                            (IF publisher THEN false ELSE true END) AS sort_missing \
-                     FROM {from_sql}{where_sql} \
-                     ORDER BY sort_missing {dir}, publisher COLLATE {dir}, id DESC \
-                     LIMIT $limit START $offset"
-                )
-            }
-            // Record-keeping dates are stamped on every create and edit and
-            // backfilled at open, so both sorts are plain instant orders;
-            // the missing flag only guards a row a failed backfill left
-            // behind.
-            Some((ResourceSort::DateAdded, direction)) => {
-                let dir = dir_literal(direction);
-                format!(
-                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
-                            (IF date_added THEN false ELSE true END) AS sort_missing \
-                     FROM {from_sql}{where_sql} \
-                     ORDER BY sort_missing {dir}, date_added {dir}, id DESC \
-                     LIMIT $limit START $offset"
-                )
-            }
-            Some((ResourceSort::DateEdited, direction)) => {
-                let dir = dir_literal(direction);
-                format!(
-                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
-                            (IF date_edited THEN false ELSE true END) AS sort_missing \
-                     FROM {from_sql}{where_sql} \
-                     ORDER BY sort_missing {dir}, date_edited {dir}, id DESC \
-                     LIMIT $limit START $offset"
-                )
-            }
-            // The key is maintained on writes, avoiding per-row creator lookups.
-            Some((ResourceSort::PrimaryCreator, direction)) => {
-                let dir = dir_literal(direction);
-                format!(
-                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
-                            primary_creator_last_name, \
-                            (IF primary_creator_last_name THEN false ELSE true END) AS sort_missing \
-                     FROM {from_sql}{where_sql} \
-                     ORDER BY sort_missing {dir}, primary_creator_last_name COLLATE {dir}, id DESC \
-                     LIMIT $limit START $offset"
-                )
-            }
+        let sibling_query = ResourceQuery {
+            sort: query.sort,
+            filter: ResourceFilter::none(),
         };
-        let mut statement = self
-            .db
-            .query(sql)
-            .bind(("limit", fetch_limit))
-            .bind(("offset", offset));
-        // The needle binds only when its clause is present, and lowercases
-        // once here instead of per row inside the query.
-        if let Some(needle) = query.filter.title.as_ref() {
-            statement = statement.bind(("title_needle", needle.as_str().to_lowercase()));
-        }
-        if let Some(needle) = query.filter.search.as_ref() {
-            statement = statement.bind(("search_needle", needle.as_str().to_lowercase()));
-        }
-        // The creator binds as its record id, matching the created edges'
-        // `in` links without string building.
-        if let Some(creator) = query.filter.creator {
-            statement = statement.bind(("creator_id", Self::person_key(creator)));
-        }
-        // The kind binds as its slug, the same wrapped-enum string the
-        // create path stores, so the clause compares like against like.
-        if let Some(kind) = query.filter.kind {
-            statement = statement.bind(("kind", kind.as_str()));
-        }
-        if let Some(favorite) = query.filter.favorite {
-            statement = statement.bind(("favorite", favorite));
-        }
-        if let Some(tag) = query.filter.tag {
-            statement = statement.bind(("tag_id", Self::tag_key(tag)));
-        }
-        if let Some(ids) = collection_record_ids {
-            statement = statement.bind(("collection_ids", ids));
-        }
-        if let Some(range) = query.filter.published {
-            if let Some(from) = range.from {
-                statement = statement.bind(("published_from", from.as_unix_ms()));
-            }
-            if let Some(to) = range.to {
-                statement = statement.bind(("published_to", to.as_unix_ms()));
-            }
-        }
-        let mut response = statement.await.map_err(map_err)?;
-        let mut rows: Vec<ListResourceRow> = response.take(0).map_err(map_err)?;
-        // One extra row decides next_offset exactly, mirroring the cursor
-        // page; an offset past the end yields an empty page.
-        let has_more = rows.len() > limit as usize;
-        rows.truncate(limit as usize);
-        let next_offset = has_more.then(|| offset.saturating_add(u64::from(limit)));
-        let rows = self.summaries_for_rows(rows).await?;
-        Ok(SortedResourcePage { rows, next_offset })
+        let (rows, next_offset) = self
+            .query_resource_rows(
+                &sibling_query,
+                offset,
+                limit,
+                Some(parent),
+                visible.as_deref(),
+                false,
+            )
+            .await?;
+        let ids = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+        let parents = if ids.is_empty() {
+            Vec::new()
+        } else {
+            let sql = if visible.is_some() {
+                "SELECT VALUE parent FROM resource WHERE parent IN $ids AND id IN $visible GROUP BY parent"
+            } else {
+                "SELECT VALUE parent FROM resource WHERE parent IN $ids GROUP BY parent"
+            };
+            let mut response = self
+                .db
+                .query(sql)
+                .bind(("ids", ids))
+                .bind(("visible", visible.unwrap_or_default()))
+                .await
+                .map_err(map_err)?;
+            response.take::<Vec<RecordId>>(0).map_err(map_err)?
+        };
+        let rows = self
+            .summaries_for_rows(rows)
+            .await?
+            .into_iter()
+            .map(|summary| {
+                let has_children = parents.contains(&Self::resource_key(summary.id));
+                ResourceGridRow {
+                    summary,
+                    has_children,
+                }
+            })
+            .collect();
+        Ok(ResourceGridPage { rows, next_offset })
     }
 }
 
@@ -3074,6 +3231,101 @@ mod tests {
 
     fn sorted_query(field: ResourceSort, direction: SortDirection) -> ResourceQuery {
         ResourceQuery::sorted(field, direction)
+    }
+
+    #[tokio::test]
+    async fn grid_pages_scope_sort_and_retain_filtered_ancestors() {
+        use oeuvre_core::ResourceGridParent::{Children, Roots};
+        let store = SurrealStore::open_memory().await.unwrap();
+        let journal = sortable_container(&store, "Context journal").await;
+        let other = sortable_container(&store, "Other journal").await;
+        let mut issue = journal.to_new();
+        issue.kind = ResourceKind::Issue;
+        issue.title = NonEmptyStr::try_new("Context issue").unwrap();
+        issue.parent_id = Some(journal.id);
+        let issue = store.create_resource(issue).await.unwrap();
+        let mut article = issue.to_new();
+        article.kind = ResourceKind::JournalArticle;
+        article.title = NonEmptyStr::try_new("Needle article").unwrap();
+        article.parent_id = Some(issue.id);
+        let article = store.create_resource(article).await.unwrap();
+        let mut sibling = issue.to_new();
+        sibling.title = NonEmptyStr::try_new("Alpha issue").unwrap();
+        let sibling = store.create_resource(sibling).await.unwrap();
+        let query = ResourceQuery::sorted(ResourceSort::Title, SortDirection::Ascending);
+        let roots = store
+            .list_resource_grid_page(Roots, &query, 0, 1)
+            .await
+            .unwrap();
+        assert_eq!(roots.rows[0].summary.id, journal.id);
+        assert!(roots.rows[0].has_children);
+        assert_eq!(roots.next_offset, Some(1));
+        let end = store
+            .list_resource_grid_page(Roots, &query, 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(end.rows[0].summary.id, other.id);
+        assert!(!end.rows[0].has_children);
+        assert_eq!(end.next_offset, None);
+        let children = store
+            .list_resource_grid_page(Children(journal.id), &query, 0, 1)
+            .await
+            .unwrap();
+        assert_eq!(children.rows[0].summary.id, sibling.id);
+        assert_eq!(children.next_offset, Some(1));
+        let mut filtered = query.clone();
+        filtered.filter.title = Some(NonEmptyStr::try_new("needle").unwrap());
+        let roots = store
+            .list_resource_grid_page(Roots, &filtered, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(roots.rows.len(), 1);
+        assert_eq!(roots.rows[0].summary.id, journal.id);
+        assert!(roots.rows[0].has_children);
+        let children = store
+            .list_resource_grid_page(Children(journal.id), &filtered, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(children.rows.len(), 1);
+        assert_eq!(children.rows[0].summary.id, issue.id);
+        assert!(children.rows[0].has_children);
+        let leaves = store
+            .list_resource_grid_page(Children(issue.id), &filtered, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(leaves.rows[0].summary.id, article.id);
+        assert!(!leaves.rows[0].has_children);
+        filtered.filter.title = Some(NonEmptyStr::try_new("Context issue").unwrap());
+        let children = store
+            .list_resource_grid_page(Children(journal.id), &filtered, 0, 10)
+            .await
+            .unwrap();
+        assert!(!children.rows[0].has_children);
+        filtered.filter.kind = Some(ResourceKind::Journal);
+        assert!(
+            store
+                .list_resource_grid_page(Roots, &filtered, 0, 10)
+                .await
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_resource_grid_page(Children(ResourceId::generate()), &query, 0, 10)
+                .await
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        assert!(
+            store
+                .list_resource_grid_page(Roots, &query, 100, 10)
+                .await
+                .unwrap()
+                .rows
+                .is_empty()
+        );
     }
 
     #[tokio::test]
