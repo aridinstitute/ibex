@@ -11,6 +11,7 @@ mod settings;
 mod tags;
 mod theme;
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -43,6 +44,14 @@ struct Args {
     /// Use an in-memory store seeded with a demo library (overrides --data).
     #[arg(long, global = true)]
     memory: bool,
+
+    /// Number of demo resources to seed in memory mode (default: 5000).
+    #[arg(long, requires = "memory")]
+    demo_resources: Option<usize>,
+
+    /// Print a readiness marker after opening the benchmark window.
+    #[arg(long, requires = "memory", hide = true)]
+    benchmark_ready: bool,
 }
 
 fn main() -> ExitCode {
@@ -58,6 +67,7 @@ fn main() -> ExitCode {
 fn run() -> Result<()> {
     let args = Args::parse();
     let state = setup_state(&args)?;
+    let benchmark_ready = args.benchmark_ready;
     let worker = DbWorker::spawn(state);
 
     // Settings are app-level, so they live in the default app data
@@ -151,6 +161,10 @@ fn run() -> Result<()> {
                 eprintln!("error: failed to open window: {err}");
                 std::process::exit(1);
             }
+            if benchmark_ready {
+                println!("OEUVRE_GUI_READY");
+                std::io::stdout().flush().expect("flush readiness marker");
+            }
         });
     Ok(())
 }
@@ -165,12 +179,15 @@ fn setup_state(args: &Args) -> Result<AppState> {
         .context("start runtime")?;
     let state = rt.block_on(async {
         if args.memory {
+            // Memory-only storage is too costly for large libraries: the 100k-item
+            // demo used ~1.37 GiB RSS. Keep this mode for demos and benchmarks.
             let store = SurrealStore::open_memory()
                 .await
                 .context("open in-memory library")?;
             oeuvre_app::seed::seed_demo_library(
                 &store,
-                oeuvre_app::seed::DEFAULT_DEMO_LIBRARY_SIZE,
+                args.demo_resources
+                    .unwrap_or(oeuvre_app::seed::DEFAULT_DEMO_LIBRARY_SIZE),
             )
             .await
             .context("seed demo library")?;
@@ -195,4 +212,22 @@ fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("oeuvre")
+}
+
+#[cfg(test)]
+mod benchmark_args_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn demo_resources_requires_memory_mode() {
+        assert!(Args::try_parse_from(["ovr-gui", "--demo-resources", "1000"]).is_err());
+        let args = Args::try_parse_from(["ovr-gui", "--memory", "--demo-resources", "1000"])
+            .expect("benchmark seed count");
+        assert_eq!(args.demo_resources, Some(1000));
+    }
+
+    #[tokio::test]
+    async fn benchmark_ready_requires_memory_mode() {
+        assert!(Args::try_parse_from(["ovr-gui", "--benchmark-ready"]).is_err());
+    }
 }
