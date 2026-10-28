@@ -11,8 +11,8 @@ use oeuvre_app::{
     AppState, Command, CommandError, FieldValue, Outcome, Status, Store, StoreError, StoreHealth,
 };
 use oeuvre_core::{
-    Collection, CollectionId, CollectionTreeNode, Name, NewResource, NewSeries, NonEmptyStr,
-    Person, PersonId, Resource, ResourceId, Series, SeriesId, Tag, TagId,
+    Collection, CollectionId, CollectionTreeNode, ImportedResourceWrite, Name, NewResource,
+    NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceId, Series, SeriesId, Tag, TagId,
 };
 
 #[tokio::test]
@@ -169,6 +169,13 @@ impl Store for HangStore {
     }
 
     async fn create_resource(&self, _new: NewResource) -> Result<Resource, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn create_imported_resource(
+        &self,
+        _write: ImportedResourceWrite,
+    ) -> Result<Resource, StoreError> {
         std::future::pending().await
     }
 

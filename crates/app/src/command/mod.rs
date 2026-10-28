@@ -1,3 +1,4 @@
+mod biblatex_import;
 mod collection;
 mod health;
 mod person;
@@ -5,6 +6,7 @@ mod resource;
 mod series;
 mod tag;
 
+pub use biblatex_import::{ImportBiblatex, ImportIssue, ImportReport, ImportedEntry};
 pub use collection::{
     AddCollectionParent, CreateCollection, DeleteCollection, DeletedCollection,
     ListCollectionForest, RemoveCollectionParent, RenameCollection,
@@ -52,6 +54,7 @@ pub enum Command {
     RemoveCollectionParent(RemoveCollectionParent),
     DeleteCollection(DeleteCollection),
     CreateResource(CreateResource),
+    ImportBiblatex(ImportBiblatex),
     UpdateResource(UpdateResource),
     SetResourceFavorite(SetResourceFavorite),
     GetResource(GetResource),
@@ -85,6 +88,7 @@ pub enum Outcome {
     RemoveCollectionParent(()),
     DeleteCollection(DeletedCollection),
     CreateResource(Resource),
+    ImportBiblatex(ImportReport),
     UpdateResource(Resource),
     SetResourceFavorite(Resource),
     GetResource(Resource),
@@ -145,6 +149,7 @@ impl Command {
             Command::RemoveCollectionParent(_) => RemoveCollectionParent::NAME,
             Command::DeleteCollection(_) => DeleteCollection::NAME,
             Command::CreateResource(_) => CreateResource::NAME,
+            Command::ImportBiblatex(_) => ImportBiblatex::NAME,
             Command::UpdateResource(_) => UpdateResource::NAME,
             Command::SetResourceFavorite(_) => SetResourceFavorite::NAME,
             Command::GetResource(_) => GetResource::NAME,
@@ -195,6 +200,7 @@ pub(crate) async fn dispatch(
         Command::RemoveCollectionParent(c) => drive(c, state, ev).await,
         Command::DeleteCollection(c) => drive(c, state, ev).await,
         Command::CreateResource(c) => drive(c, state, ev).await,
+        Command::ImportBiblatex(c) => drive(c, state, ev).await,
         Command::UpdateResource(c) => drive(c, state, ev).await,
         Command::SetResourceFavorite(c) => drive(c, state, ev).await,
         Command::GetResource(c) => drive(c, state, ev).await,

@@ -171,6 +171,79 @@ fn map_store(err: StoreError) -> CommandError {
     }
 }
 
+/// Shared reference checks for ordinary create and import.
+///
+/// `pending_people` / `pending_series` are ids that will be created in the same
+/// atomic write, so they need not already exist in the store.
+pub(crate) async fn validate_new_resource_refs(
+    state: &AppState,
+    new: &NewResource,
+    pending_people: &[PersonId],
+    pending_series: Option<SeriesId>,
+) -> Result<(), CommandError> {
+    for spec in &new.creators {
+        if pending_people.contains(&spec.person_id) {
+            continue;
+        }
+        state
+            .store()
+            .get_person(spec.person_id)
+            .await
+            .map_err(|e| map_person_lookup(e, spec.person_id))?;
+    }
+
+    if let Some(parent_id) = new.parent_id {
+        let parent = state
+            .store()
+            .get_resource(parent_id)
+            .await
+            .map_err(|e| map_resource_lookup(e, parent_id))?;
+        new.kind
+            .accept_parent(parent.kind)
+            .map_err(map_resource_err)?;
+    }
+
+    if let Some(series_id) = new.series_id {
+        if pending_series != Some(series_id) {
+            state
+                .store()
+                .get_series(series_id)
+                .await
+                .map_err(|e| map_series_lookup(e, series_id))?;
+        }
+    }
+
+    for tag_id in &new.tag_ids {
+        state.store().get_tag(*tag_id).await.map_err(|e| {
+            if e.is_not_found() {
+                CommandError::NotFound(tag_id.to_string())
+            } else if e.is_invalid() {
+                CommandError::Invalid(e.message.clone())
+            } else {
+                CommandError::Store(e)
+            }
+        })?;
+    }
+
+    for collection_id in &new.collection_ids {
+        state
+            .store()
+            .get_collection(*collection_id)
+            .await
+            .map_err(|e| {
+                if e.is_not_found() {
+                    CommandError::NotFound(collection_id.to_string())
+                } else if e.is_invalid() {
+                    CommandError::Invalid(e.message.clone())
+                } else {
+                    CommandError::Store(e)
+                }
+            })?;
+    }
+
+    Ok(())
+}
+
 /// Field names that differ between the stored record and its replacement,
 /// in a fixed column order. The update's wide event joins them into
 /// `resource.changed_fields`; an empty vec means the write is a no-op.
@@ -214,6 +287,87 @@ fn changed_fields(old: &Resource, new: &NewResource) -> Vec<&'static str> {
     if old.collection_ids != new.collection_ids {
         changed.push("collections");
     }
+    if old.metadata != new.metadata {
+        changed.push("metadata");
+    }
+    if old.subtitle != new.subtitle {
+        changed.push("subtitle");
+    }
+    if old.title_addon != new.title_addon {
+        changed.push("title_addon");
+    }
+    if old.short_title != new.short_title {
+        changed.push("short_title");
+    }
+    if old.place != new.place {
+        changed.push("place");
+    }
+    if old.volume != new.volume {
+        changed.push("volume");
+    }
+    if old.issue != new.issue {
+        changed.push("issue");
+    }
+    if old.pages != new.pages {
+        changed.push("pages");
+    }
+    if old.total_pages != new.total_pages {
+        changed.push("total_pages");
+    }
+    if old.article_number != new.article_number {
+        changed.push("article_number");
+    }
+    if old.edition != new.edition {
+        changed.push("edition");
+    }
+    if old.doi != new.doi {
+        changed.push("doi");
+    }
+    if old.url != new.url {
+        changed.push("url");
+    }
+    if old.eprint != new.eprint {
+        changed.push("eprint");
+    }
+    if old.isbns != new.isbns {
+        changed.push("isbns");
+    }
+    if old.issns != new.issns {
+        changed.push("issns");
+    }
+    if old.isrns != new.isrns {
+        changed.push("isrns");
+    }
+    if old.original_date != new.original_date {
+        changed.push("original_date");
+    }
+    if old.event_date != new.event_date {
+        changed.push("event_date");
+    }
+    if old.language != new.language {
+        changed.push("language");
+    }
+    if old.document_type != new.document_type {
+        changed.push("document_type");
+    }
+    if old.publication_method != new.publication_method {
+        changed.push("publication_method");
+    }
+    if old.institution != new.institution {
+        changed.push("institution");
+    }
+    if old.organization != new.organization {
+        changed.push("organization");
+    }
+    if old.school != new.school {
+        changed.push("school");
+    }
+    if old.abstract_text != new.abstract_text {
+        changed.push("abstract_text");
+    }
+    if old.keywords != new.keywords {
+        changed.push("keywords");
+    }
     changed
 }
 
@@ -228,61 +382,7 @@ impl Handler for CreateResource {
     }
 
     async fn run(self, state: &AppState, ev: &mut Event) -> Result<Created, CommandError> {
-        for spec in &self.new.creators {
-            state
-                .store()
-                .get_person(spec.person_id)
-                .await
-                .map_err(|e| map_person_lookup(e, spec.person_id))?;
-        }
-
-        if let Some(parent_id) = self.new.parent_id {
-            let parent = state
-                .store()
-                .get_resource(parent_id)
-                .await
-                .map_err(|e| map_resource_lookup(e, parent_id))?;
-            self.new
-                .kind
-                .accept_parent(parent.kind)
-                .map_err(map_resource_err)?;
-        }
-
-        if let Some(series_id) = self.new.series_id {
-            state
-                .store()
-                .get_series(series_id)
-                .await
-                .map_err(|e| map_series_lookup(e, series_id))?;
-        }
-
-        for tag_id in &self.new.tag_ids {
-            state.store().get_tag(*tag_id).await.map_err(|e| {
-                if e.is_not_found() {
-                    CommandError::NotFound(tag_id.to_string())
-                } else if e.is_invalid() {
-                    CommandError::Invalid(e.message.clone())
-                } else {
-                    CommandError::Store(e)
-                }
-            })?;
-        }
-
-        for collection_id in &self.new.collection_ids {
-            state
-                .store()
-                .get_collection(*collection_id)
-                .await
-                .map_err(|e| {
-                    if e.is_not_found() {
-                        CommandError::NotFound(collection_id.to_string())
-                    } else if e.is_invalid() {
-                        CommandError::Invalid(e.message.clone())
-                    } else {
-                        CommandError::Store(e)
-                    }
-                })?;
-        }
+        validate_new_resource_refs(state, &self.new, &[], None).await?;
 
         let resource = state
             .store()
@@ -479,7 +579,11 @@ impl Handler for GetResourceDetail {
                     .map_err(|e| map_resource_lookup(e, parent_id))?;
                 Some(parent.title)
             }
-            None => None,
+            None => resource
+                .metadata
+                .venue
+                .as_ref()
+                .and_then(|v| oeuvre_core::NonEmptyStr::try_new(v).ok()),
         };
         let series_title = match resource.series_id {
             Some(series_id) => {
@@ -508,6 +612,32 @@ impl Handler for GetResourceDetail {
         }
 
         Ok(FetchedDetail(ResourceDetail {
+            subtitle: resource.subtitle,
+            title_addon: resource.title_addon,
+            short_title: resource.short_title,
+            place: resource.place,
+            volume: resource.volume,
+            issue: resource.issue,
+            pages: resource.pages,
+            total_pages: resource.total_pages,
+            article_number: resource.article_number,
+            edition: resource.edition,
+            doi: resource.doi,
+            url: resource.url,
+            eprint: resource.eprint,
+            isbns: resource.isbns,
+            issns: resource.issns,
+            isrns: resource.isrns,
+            original_date: resource.original_date,
+            event_date: resource.event_date,
+            language: resource.language,
+            document_type: resource.document_type,
+            publication_method: resource.publication_method,
+            institution: resource.institution,
+            organization: resource.organization,
+            school: resource.school,
+            abstract_text: resource.abstract_text,
+            keywords: resource.keywords,
             id: resource.id,
             kind: resource.kind,
             title: resource.title,

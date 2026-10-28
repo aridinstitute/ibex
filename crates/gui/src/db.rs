@@ -7,15 +7,21 @@ use oeuvre_app::command::{
     ListPersons, ListResourcesPage, ListResourcesQueryPage, ListTags, RemoveCollectionParent,
     RenameCollection, SetResourceFavorite, UpdateResource,
 };
+use oeuvre_app::command::{ImportBiblatex, ImportReport};
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
     Collection, CollectionId, CollectionTreeNode, Name, NewResource, NonEmptyStr, Person, Resource,
     ResourceCounts, ResourceDetail, ResourceId, ResourcePage, ResourceQuery, SortedResourcePage,
     Tag,
 };
+use std::{io::Read as _, path::PathBuf};
 use tokio::sync::oneshot;
 
 pub enum DbRequest {
+    ImportBiblatex {
+        path: PathBuf,
+        reply: oneshot::Sender<Result<ImportReport, String>>,
+    },
     ListPage {
         before: Option<ResourceId>,
         limit: u32,
@@ -105,6 +111,15 @@ pub struct DbWorker {
 }
 
 impl DbWorker {
+    /// Read and import a UTF-8 bibliography file on the database worker.
+    pub async fn import_biblatex(&self, path: PathBuf) -> Result<ImportReport, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::ImportBiblatex { path, reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
     /// Spawn the worker thread. The thread owns the tokio runtime that runs
     /// every command against `state`, mirroring the CLI's runtime so Surreal
     /// never runs on gpui's executor.
@@ -120,6 +135,38 @@ impl DbWorker {
                 rt.block_on(async move {
                     for req in rx {
                         match req {
+                            DbRequest::ImportBiblatex { path, reply } => {
+                                let result = async {
+                                    // File I/O and parsing stay on this worker, never GPUI's executor.
+                                    let file = std::fs::File::open(&path)
+                                        .map_err(|e| format!("Unable to open bibliography: {e}"))?;
+                                    let mut bytes = Vec::new();
+                                    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+                                    file.take(MAX_BYTES + 1)
+                                        .read_to_end(&mut bytes)
+                                        .map_err(|e| format!("Unable to read bibliography: {e}"))?;
+                                    if bytes.len() as u64 > MAX_BYTES {
+                                        return Err(
+                                            "Bibliography exceeds the 16 MiB import limit".into()
+                                        );
+                                    }
+                                    let source_text = String::from_utf8(bytes).map_err(|_| {
+                                        "Bibliography must be UTF-8 text".to_string()
+                                    })?;
+                                    match state
+                                        .execute(Command::ImportBiblatex(ImportBiblatex {
+                                            source_text,
+                                        }))
+                                        .await
+                                        .map_err(|e| e.to_string())?
+                                    {
+                                        Outcome::ImportBiblatex(report) => Ok(report),
+                                        _ => Err("unexpected outcome from import_biblatex".into()),
+                                    }
+                                }
+                                .await;
+                                let _ = reply.send(result);
+                            }
                             DbRequest::ListPage {
                                 before,
                                 limit,
@@ -690,6 +737,34 @@ mod tests {
     use oeuvre_core::published_label_from;
 
     #[tokio::test]
+    async fn worker_imports_a_file_and_returns_report_with_persisted_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.bib");
+        std::fs::write(&path, "@book{one,title={Imported book},doi={10.1000/book}}\n@article{two,title={Imported paper},journaltitle={Journal}}\n@patent{three,title={Skipped}}").unwrap();
+        let worker = DbWorker::spawn(
+            AppState::builder(MemoryStore::new())
+                .surface(Surface::Test)
+                .build(),
+        );
+        let report = worker.import_biblatex(path).await.unwrap();
+        assert_eq!(report.imported.len(), 2);
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(worker.resource_counts().await.unwrap().all_items, 2);
+        let book = worker
+            .resource(report.imported[0].resource_id)
+            .await
+            .unwrap();
+        assert_eq!(book.doi.as_deref(), Some("10.1000/book"));
+        assert!(
+            worker
+                .import_biblatex(dir.path().join("missing.bib"))
+                .await
+                .is_err()
+        );
+        assert_eq!(worker.resource_counts().await.unwrap().all_items, 2);
+    }
+
+    #[tokio::test]
     async fn worker_creates_person_available_for_author_selection() {
         let state = AppState::builder(MemoryStore::new())
             .surface(Surface::Test)
@@ -1095,6 +1170,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();

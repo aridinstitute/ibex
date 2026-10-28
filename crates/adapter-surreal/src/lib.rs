@@ -3,12 +3,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use oeuvre_core::{
-    BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole, Name,
-    NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceCounts,
-    ResourceFilter, ResourceId, ResourceKind, ResourcePage, ResourceQuery, ResourceSort,
-    ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store, StoreError,
-    StoreHealth, Tag, TagId, UtcMillis, build_collection_forest, collection_descendant_closure,
-    creator_label_name, format_creators_label, published_label_from,
+    BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole,
+    ImportedResourceWrite, Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource,
+    ResourceCounts, ResourceFilter, ResourceId, ResourceKind, ResourceMetadata, ResourcePage,
+    ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId, SortDirection,
+    SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId, UtcMillis,
+    build_collection_forest, collection_descendant_closure, creator_label_name,
+    format_creators_label, published_label_from,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -95,6 +96,58 @@ struct TagCountRow {
 
 #[derive(Debug, Clone, SurrealValue)]
 struct ResourceDoc {
+    #[surreal(default, wrap)]
+    subtitle: Option<NonEmptyStr>,
+    #[surreal(default, wrap)]
+    title_addon: Option<NonEmptyStr>,
+    #[surreal(default, wrap)]
+    short_title: Option<NonEmptyStr>,
+    #[surreal(default)]
+    place: Option<String>,
+    #[surreal(default)]
+    volume: Option<String>,
+    #[surreal(default)]
+    issue: Option<String>,
+    #[surreal(default)]
+    pages: Option<String>,
+    #[surreal(default)]
+    total_pages: Option<String>,
+    #[surreal(default)]
+    article_number: Option<String>,
+    #[surreal(default)]
+    edition: Option<String>,
+    #[surreal(default)]
+    doi: Option<String>,
+    #[surreal(default)]
+    url: Option<String>,
+    #[surreal(default)]
+    eprint: Option<String>,
+    #[surreal(default)]
+    isbns: Vec<String>,
+    #[surreal(default)]
+    issns: Vec<String>,
+    #[surreal(default)]
+    isrns: Vec<String>,
+    #[surreal(default, wrap)]
+    original_date: Option<BibliographicDate>,
+    #[surreal(default, wrap)]
+    event_date: Option<BibliographicDate>,
+    #[surreal(default)]
+    language: Option<String>,
+    #[surreal(default)]
+    document_type: Option<String>,
+    #[surreal(default)]
+    publication_method: Option<String>,
+    #[surreal(default)]
+    institution: Option<String>,
+    #[surreal(default)]
+    organization: Option<String>,
+    #[surreal(default)]
+    school: Option<String>,
+    #[surreal(default)]
+    abstract_text: Option<String>,
+    #[surreal(default)]
+    keywords: Vec<String>,
     #[surreal(wrap)]
     kind: ResourceKind,
     #[surreal(wrap)]
@@ -104,6 +157,9 @@ struct ResourceDoc {
     published: Option<BibliographicDate>,
     #[surreal(wrap)]
     accessed: Option<BibliographicDate>,
+    /// Older resources lack import metadata.
+    #[surreal(wrap, default)]
+    metadata: Option<ResourceMetadata>,
     #[surreal(default)]
     parent: Option<RecordId>,
     #[surreal(default)]
@@ -137,6 +193,8 @@ struct CreatedEdgeRow {
 
 #[derive(Debug, SurrealValue)]
 struct ListResourceRow {
+    #[surreal(default)]
+    venue: Option<String>,
     id: RecordId,
     #[surreal(wrap)]
     kind: ResourceKind,
@@ -210,6 +268,23 @@ impl SurrealStore {
     }
 
     async fn ensure_schema(&self) -> Result<(), StoreError> {
+        // Base tables before relation DDL or indexes that would otherwise
+        // implicitly create `created` as a plain table (skipping ENFORCED).
+        let _ = self
+            .db
+            .query("DEFINE TABLE IF NOT EXISTS person SCHEMALESS")
+            .await;
+        let _ = self
+            .db
+            .query("DEFINE TABLE IF NOT EXISTS series SCHEMALESS")
+            .await;
+        let _ = self
+            .db
+            .query("DEFINE TABLE IF NOT EXISTS resource SCHEMALESS")
+            .await;
+
+        self.ensure_created_relation_table().await?;
+
         // Best-effort NONUNIQUE index. Mem engines may reject DEFINE; find still
         // uses CONTAINS over name_keys.
         let _ = self
@@ -278,21 +353,6 @@ impl SurrealStore {
 
         let _ = self
             .db
-            .query("DEFINE TABLE IF NOT EXISTS series SCHEMALESS")
-            .await;
-        let _ = self
-            .db
-            .query("DEFINE TABLE IF NOT EXISTS resource SCHEMALESS")
-            .await;
-        let _ = self
-            .db
-            .query(
-                "DEFINE TABLE IF NOT EXISTS created TYPE RELATION IN person OUT resource ENFORCED",
-            )
-            .await;
-
-        let _ = self
-            .db
             .query("DEFINE TABLE IF NOT EXISTS tag SCHEMALESS")
             .await;
         let _ = self
@@ -345,6 +405,94 @@ impl SurrealStore {
             .map_err(map_err)?;
 
         Ok(())
+    }
+
+    /// Ensure `created` is an ENFORCED person→resource relation.
+    ///
+    /// Indexes defined on `created` before the relation DDL silently create a
+    /// plain table; `DEFINE TABLE IF NOT EXISTS … TYPE RELATION` then no-ops.
+    /// Existing libraries with that plain table are rebuilt in place.
+    async fn ensure_created_relation_table(&self) -> Result<(), StoreError> {
+        let definition = self.created_table_definition().await?;
+        let enforced = definition
+            .as_deref()
+            .is_some_and(|def| def.contains("TYPE RELATION") && def.contains("ENFORCED"));
+        if enforced {
+            return Ok(());
+        }
+
+        // CreatedEdgeRow omits `out`; migration needs both endpoints.
+        #[derive(Debug, SurrealValue)]
+        struct EdgeCopy {
+            #[surreal(rename = "in")]
+            person: RecordId,
+            out: RecordId,
+            #[surreal(wrap)]
+            role: CreatorRole,
+            order: u32,
+            credited_as: Option<String>,
+        }
+        let edges: Vec<EdgeCopy> = if definition.is_some() {
+            let mut response = self
+                .db
+                .query("SELECT in, out, role, order, credited_as FROM created")
+                .await
+                .map_err(map_err)?;
+            response.take(0).map_err(map_err)?
+        } else {
+            Vec::new()
+        };
+
+        if definition.is_some() {
+            self.db
+                .query("REMOVE TABLE created")
+                .await
+                .map_err(map_err)?
+                .check()
+                .map_err(map_err)?;
+        }
+
+        self.db
+            .query(
+                "DEFINE TABLE created TYPE RELATION IN person OUT resource ENFORCED",
+            )
+            .await
+            .map_err(map_err)?
+            .check()
+            .map_err(map_err)?;
+
+        for edge in edges {
+            self.db
+                .query(
+                    "RELATE $from -> created -> $to \
+                     SET role = $role, order = $order, credited_as = $credited",
+                )
+                .bind(("from", edge.person))
+                .bind(("to", edge.out))
+                .bind(("role", SerdeWrapper(edge.role)))
+                .bind(("order", edge.order))
+                .bind(("credited", edge.credited_as))
+                .await
+                .map_err(map_err)?
+                .check()
+                .map_err(map_err)?;
+        }
+        Ok(())
+    }
+
+    async fn created_table_definition(&self) -> Result<Option<String>, StoreError> {
+        let mut response = self.db.query("INFO FOR DB").await.map_err(map_err)?;
+        let info: Option<surrealdb::types::Value> = response.take(0).map_err(map_err)?;
+        let Some(surrealdb::types::Value::Object(db)) = info else {
+            return Ok(None);
+        };
+        let Some(surrealdb::types::Value::Object(tables)) = db.get("tables").cloned() else {
+            return Ok(None);
+        };
+        match tables.get("created") {
+            Some(surrealdb::types::Value::String(def)) => Ok(Some(def.clone())),
+            _ => Ok(None),
+        }
     }
 
     /// Persist record-keeping stamps for rows written before those fields
@@ -512,11 +660,38 @@ impl SurrealStore {
 
     fn resource_doc_from(resource: &Resource) -> ResourceDoc {
         ResourceDoc {
+            subtitle: resource.subtitle.clone(),
+            title_addon: resource.title_addon.clone(),
+            short_title: resource.short_title.clone(),
+            place: resource.place.clone(),
+            volume: resource.volume.clone(),
+            issue: resource.issue.clone(),
+            pages: resource.pages.clone(),
+            total_pages: resource.total_pages.clone(),
+            article_number: resource.article_number.clone(),
+            edition: resource.edition.clone(),
+            doi: resource.doi.clone(),
+            url: resource.url.clone(),
+            eprint: resource.eprint.clone(),
+            isbns: resource.isbns.clone(),
+            issns: resource.issns.clone(),
+            isrns: resource.isrns.clone(),
+            original_date: resource.original_date.clone(),
+            event_date: resource.event_date.clone(),
+            language: resource.language.clone(),
+            document_type: resource.document_type.clone(),
+            publication_method: resource.publication_method.clone(),
+            institution: resource.institution.clone(),
+            organization: resource.organization.clone(),
+            school: resource.school.clone(),
+            abstract_text: resource.abstract_text.clone(),
+            keywords: resource.keywords.clone(),
             kind: resource.kind,
             title: resource.title.clone(),
             publisher: resource.publisher.clone(),
             published: resource.published.clone(),
             accessed: resource.accessed.clone(),
+            metadata: Some(resource.metadata.clone()),
             parent: resource.parent_id.map(Self::resource_key),
             series: resource.series_id.map(Self::series_key),
             series_number: resource
@@ -595,8 +770,35 @@ impl SurrealStore {
     }
 
     /// RELATE one `created` edge per creator with role / order / credited_as.
-    /// Callers own the surrounding transaction; this only writes the new
-    /// edges (deleting stale ones is the updater's job).
+    /// Callers own the surrounding SDK transaction; statement errors are
+    /// surfaced via [`IndexedResults::check`] so a failed edge cannot report success.
+    async fn relate_creators_in_txn(
+        txn: &surrealdb::method::Transaction<Db>,
+        id: ResourceId,
+        creators: &[Creator],
+    ) -> Result<(), StoreError> {
+        for creator in creators {
+            let credited = creator.credited_as.as_ref().map(|s| s.as_str().to_owned());
+            txn.query(
+                "RELATE $from -> created -> $to \
+                 SET role = $role, order = $order, credited_as = $credited",
+            )
+            .bind(("from", Self::person_key(creator.person_id)))
+            .bind(("to", Self::resource_key(id)))
+            .bind(("role", SerdeWrapper(creator.role)))
+            .bind(("order", creator.order))
+            .bind(("credited", credited))
+            .await
+            .map_err(map_err)?
+            .check()
+            .map_err(map_err)?;
+        }
+        Ok(())
+    }
+
+    /// Test helper: attach creators outside a multi-row write. Still checks
+    /// statement results so a bad RELATE cannot look like success.
+    #[cfg(test)]
     async fn relate_creators(
         &self,
         id: ResourceId,
@@ -615,6 +817,8 @@ impl SurrealStore {
                 .bind(("order", creator.order))
                 .bind(("credited", credited))
                 .await
+                .map_err(map_err)?
+                .check()
                 .map_err(map_err)?;
         }
         Ok(())
@@ -710,7 +914,10 @@ impl SurrealStore {
                     let parent_id = Self::thing_to_resource_id(thing)?;
                     title_by_id.get(&parent_id).cloned()
                 }
-                None => None,
+                None => row
+                    .venue
+                    .as_ref()
+                    .and_then(|v| NonEmptyStr::try_new(v).ok()),
             };
             let (date_added, date_edited) =
                 Self::recorded_dates(row.date_added, row.date_edited, id);
@@ -1102,12 +1309,10 @@ impl Store for SurrealStore {
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError> {
         let id = ResourceId::generate();
         let resource = Resource::try_new(id, new)?;
-
-        self.db.query("BEGIN TRANSACTION").await.map_err(map_err)?;
+        let txn = self.db.clone().begin().await.map_err(map_err)?;
 
         let persist = async {
-            let created: Option<ResourceDoc> = self
-                .db
+            let created: Option<ResourceDoc> = txn
                 .create(Self::resource_key(id))
                 .content(Self::resource_doc_from(&resource))
                 .await
@@ -1117,19 +1322,82 @@ impl Store for SurrealStore {
                     "create_resource returned empty for {id}"
                 )));
             }
-
-            self.relate_creators(id, &resource.creators).await?;
+            Self::relate_creators_in_txn(&txn, id, &resource.creators).await?;
             Ok(())
         }
         .await;
 
         match persist {
             Ok(()) => {
-                self.db.query("COMMIT TRANSACTION").await.map_err(map_err)?;
+                let _ = txn.commit().await.map_err(map_err)?;
                 Ok(resource)
             }
             Err(err) => {
-                let _ = self.db.query("CANCEL TRANSACTION").await;
+                let _ = txn.cancel().await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn create_imported_resource(
+        &self,
+        write: ImportedResourceWrite,
+    ) -> Result<Resource, StoreError> {
+        let id = ResourceId::generate();
+        let resource = Resource::try_new(id, write.resource)?;
+        let txn = self.db.clone().begin().await.map_err(map_err)?;
+
+        let persist = async {
+            for person in &write.new_people {
+                let created: Option<PersonDoc> = txn
+                    .create(Self::person_key(person.id))
+                    .content(Self::doc_from_person(person))
+                    .await
+                    .map_err(map_err)?;
+                if created.is_none() {
+                    return Err(StoreError::new(format!(
+                        "create_person returned empty for {}",
+                        person.id
+                    )));
+                }
+            }
+            if let Some(series) = &write.new_series {
+                let created: Option<SeriesDoc> = txn
+                    .create(Self::series_key(series.id))
+                    .content(SeriesDoc {
+                        title: series.title.clone(),
+                    })
+                    .await
+                    .map_err(map_err)?;
+                if created.is_none() {
+                    return Err(StoreError::new(format!(
+                        "create_series returned empty for {}",
+                        series.id
+                    )));
+                }
+            }
+            let created: Option<ResourceDoc> = txn
+                .create(Self::resource_key(id))
+                .content(Self::resource_doc_from(&resource))
+                .await
+                .map_err(map_err)?;
+            if created.is_none() {
+                return Err(StoreError::new(format!(
+                    "create_resource returned empty for {id}"
+                )));
+            }
+            Self::relate_creators_in_txn(&txn, id, &resource.creators).await?;
+            Ok(())
+        }
+        .await;
+
+        match persist {
+            Ok(()) => {
+                let _ = txn.commit().await.map_err(map_err)?;
+                Ok(resource)
+            }
+            Err(err) => {
+                let _ = txn.cancel().await;
                 Err(err)
             }
         }
@@ -1159,11 +1427,10 @@ impl Store for SurrealStore {
         // Bibliographic replace never clears the star.
         resource.favorite = existing_doc.favorite.unwrap_or(false);
 
-        self.db.query("BEGIN TRANSACTION").await.map_err(map_err)?;
+        let txn = self.db.clone().begin().await.map_err(map_err)?;
 
         let persist = async {
-            let updated: Option<ResourceDoc> = self
-                .db
+            let updated: Option<ResourceDoc> = txn
                 .update(Self::resource_key(id))
                 .content(Self::resource_doc_from(&resource))
                 .await
@@ -1176,23 +1443,24 @@ impl Store for SurrealStore {
 
             // Creators are replaced wholesale: the stale edges go before the
             // new list lands, so an update can never leave both behind.
-            self.db
-                .query("DELETE created WHERE out = $resource")
+            txn.query("DELETE created WHERE out = $resource")
                 .bind(("resource", Self::resource_key(id)))
                 .await
+                .map_err(map_err)?
+                .check()
                 .map_err(map_err)?;
-            self.relate_creators(id, &resource.creators).await?;
+            Self::relate_creators_in_txn(&txn, id, &resource.creators).await?;
             Ok(())
         }
         .await;
 
         match persist {
             Ok(()) => {
-                self.db.query("COMMIT TRANSACTION").await.map_err(map_err)?;
+                let _ = txn.commit().await.map_err(map_err)?;
                 Ok(resource)
             }
             Err(err) => {
-                let _ = self.db.query("CANCEL TRANSACTION").await;
+                let _ = txn.cancel().await;
                 Err(err)
             }
         }
@@ -1260,7 +1528,7 @@ impl Store for SurrealStore {
         };
         let (date_added, date_edited) = Self::recorded_dates(doc.date_added, doc.date_edited, id);
 
-        Resource::from_stored(
+        let mut resource = Resource::from_stored(
             id,
             doc.kind,
             doc.title,
@@ -1273,11 +1541,39 @@ impl Store for SurrealStore {
             series_number,
             tag_ids,
             collection_ids,
+            doc.metadata.unwrap_or_default(),
             doc.favorite.unwrap_or(false),
             date_added,
             date_edited,
         )
-        .map_err(StoreError::from)
+        .map_err(StoreError::from)?;
+        resource.subtitle = doc.subtitle;
+        resource.title_addon = doc.title_addon;
+        resource.short_title = doc.short_title;
+        resource.place = doc.place;
+        resource.volume = doc.volume;
+        resource.issue = doc.issue;
+        resource.pages = doc.pages;
+        resource.total_pages = doc.total_pages;
+        resource.article_number = doc.article_number;
+        resource.edition = doc.edition;
+        resource.doi = doc.doi;
+        resource.url = doc.url;
+        resource.eprint = doc.eprint;
+        resource.isbns = doc.isbns;
+        resource.issns = doc.issns;
+        resource.isrns = doc.isrns;
+        resource.original_date = doc.original_date;
+        resource.event_date = doc.event_date;
+        resource.language = doc.language;
+        resource.document_type = doc.document_type;
+        resource.publication_method = doc.publication_method;
+        resource.institution = doc.institution;
+        resource.organization = doc.organization;
+        resource.school = doc.school;
+        resource.abstract_text = doc.abstract_text;
+        resource.keywords = doc.keywords;
+        Ok(resource)
     }
 
     async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError> {
@@ -1337,7 +1633,7 @@ impl Store for SurrealStore {
             Some(before) => self
                 .db
                 .query(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited FROM resource \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited FROM resource \
                      WHERE id < $before ORDER BY id DESC LIMIT $limit",
                 )
                 .bind(("before", Self::resource_key(before)))
@@ -1346,7 +1642,7 @@ impl Store for SurrealStore {
             None => self
                 .db
                 .query(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited FROM resource \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited FROM resource \
                      ORDER BY id DESC LIMIT $limit",
                 )
                 .bind(("limit", fetch_limit))
@@ -1406,20 +1702,20 @@ impl Store for SurrealStore {
         let sql = match query.sort {
             // The default listing order, paged by offset instead of cursor.
             None => format!(
-                "SELECT id, kind, title, publisher, published, parent, date_added, date_edited FROM {from_sql}{where_sql} \
+                "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited FROM {from_sql}{where_sql} \
                  ORDER BY id DESC LIMIT $limit START $offset"
             ),
             Some((ResourceSort::Title, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited FROM {from_sql}{where_sql} \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited FROM {from_sql}{where_sql} \
                      ORDER BY title COLLATE {dir}, id DESC LIMIT $limit START $offset"
                 )
             }
             Some((ResourceSort::Published, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
                             published.instant AS sort_key, \
                             (IF published THEN false ELSE true END) AS sort_missing \
                      FROM {from_sql}{where_sql} \
@@ -1433,7 +1729,7 @@ impl Store for SurrealStore {
             Some((ResourceSort::Publisher, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
                             (IF publisher THEN false ELSE true END) AS sort_missing \
                      FROM {from_sql}{where_sql} \
                      ORDER BY sort_missing {dir}, publisher COLLATE {dir}, id DESC \
@@ -1447,7 +1743,7 @@ impl Store for SurrealStore {
             Some((ResourceSort::DateAdded, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
                             (IF date_added THEN false ELSE true END) AS sort_missing \
                      FROM {from_sql}{where_sql} \
                      ORDER BY sort_missing {dir}, date_added {dir}, id DESC \
@@ -1457,7 +1753,7 @@ impl Store for SurrealStore {
             Some((ResourceSort::DateEdited, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
                             (IF date_edited THEN false ELSE true END) AS sort_missing \
                      FROM {from_sql}{where_sql} \
                      ORDER BY sort_missing {dir}, date_edited {dir}, id DESC \
@@ -1468,7 +1764,7 @@ impl Store for SurrealStore {
             Some((ResourceSort::PrimaryCreator, direction)) => {
                 let dir = dir_literal(direction);
                 format!(
-                    "SELECT id, kind, title, publisher, published, parent, date_added, date_edited, \
+                    "SELECT id, kind, title, publisher, published, parent, metadata.venue AS venue, date_added, date_edited, \
                             primary_creator_last_name, \
                             (IF primary_creator_last_name THEN false ELSE true END) AS sort_missing \
                      FROM {from_sql}{where_sql} \
@@ -1620,6 +1916,84 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn imported_metadata_round_trips_and_legacy_rows_default() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let mut metadata = ResourceMetadata {
+            citekey: Some("smith2024".into()),
+            venue: Some("Journal".into()),
+            ..Default::default()
+        };
+        metadata
+            .source_fields
+            .insert("custom".into(), "{Original}".into());
+        let new = NewResource {
+            kind: ResourceKind::Book,
+            title: NonEmptyStr::try_new("Imported").unwrap(),
+            creators: vec![],
+            publisher: None,
+            published: None,
+            accessed: None,
+            parent_id: None,
+            series_id: None,
+            series_number: None,
+            tag_ids: vec![],
+            collection_ids: vec![],
+            subtitle: None,
+            title_addon: None,
+            short_title: None,
+            place: None,
+            volume: None,
+            issue: None,
+            pages: None,
+            total_pages: None,
+            article_number: None,
+            edition: None,
+            doi: None,
+            url: None,
+            eprint: None,
+            isbns: vec![],
+            issns: vec![],
+            isrns: vec![],
+            original_date: None,
+            event_date: None,
+            language: None,
+            document_type: None,
+            publication_method: None,
+            institution: None,
+            organization: None,
+            school: None,
+            abstract_text: None,
+            keywords: vec![],
+            metadata: metadata.clone(),
+        };
+        let created = store.create_resource(new).await.unwrap();
+        let fetched = store.get_resource(created.id).await.unwrap();
+        assert_eq!(fetched.metadata, metadata);
+        let updated = store
+            .update_resource(created.id, fetched.to_new())
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_resource(updated.id).await.unwrap().metadata,
+            metadata
+        );
+
+        let legacy = ResourceId::generate();
+        store
+            .db
+            .query("CREATE type::record('resource', $id) SET kind = $kind, title = $title")
+            .bind(("id", legacy.to_string()))
+            .bind(("kind", "book"))
+            .bind(("title", "Before metadata"))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_resource(legacy).await.unwrap().metadata,
+            ResourceMetadata::default()
+        );
+    }
+
+    #[tokio::test]
 
     async fn search_matches_title_or_publisher_before_paging() {
         let store = SurrealStore::open_memory().await.unwrap();
@@ -1648,6 +2022,33 @@ mod tests {
                     series_number: None,
                     tag_ids: vec![],
                     collection_ids: vec![],
+                    metadata: Default::default(),
+                    subtitle: None,
+                    title_addon: None,
+                    short_title: None,
+                    place: None,
+                    volume: None,
+                    issue: None,
+                    pages: None,
+                    total_pages: None,
+                    article_number: None,
+                    edition: None,
+                    doi: None,
+                    url: None,
+                    eprint: None,
+                    isbns: vec![],
+                    issns: vec![],
+                    isrns: vec![],
+                    original_date: None,
+                    event_date: None,
+                    language: None,
+                    document_type: None,
+                    publication_method: None,
+                    institution: None,
+                    organization: None,
+                    school: None,
+                    abstract_text: None,
+                    keywords: vec![],
                 })
                 .await
                 .unwrap();
@@ -1746,6 +2147,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap()
@@ -1790,6 +2218,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -1810,6 +2265,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -1858,6 +2340,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -1947,6 +2456,33 @@ mod tests {
                     series_number: None,
                     tag_ids: vec![],
                     collection_ids: vec![],
+                    metadata: Default::default(),
+                    subtitle: None,
+                    title_addon: None,
+                    short_title: None,
+                    place: None,
+                    volume: None,
+                    issue: None,
+                    pages: None,
+                    total_pages: None,
+                    article_number: None,
+                    edition: None,
+                    doi: None,
+                    url: None,
+                    eprint: None,
+                    isbns: vec![],
+                    issns: vec![],
+                    isrns: vec![],
+                    original_date: None,
+                    event_date: None,
+                    language: None,
+                    document_type: None,
+                    publication_method: None,
+                    institution: None,
+                    organization: None,
+                    school: None,
+                    abstract_text: None,
+                    keywords: vec![],
                 })
                 .await
                 .unwrap();
@@ -1990,6 +2526,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -2080,6 +2643,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap()
@@ -2099,6 +2689,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap()
@@ -2385,6 +3002,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap()
@@ -3348,6 +3992,33 @@ mod tests {
                 series_number: Some(NonEmptyStr::try_new("LCL 26").unwrap()),
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3415,6 +4086,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3494,6 +4192,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3572,6 +4297,14 @@ mod tests {
             .unwrap();
 
         let loaded = store.get_resource(id).await.unwrap();
+        assert!(loaded.subtitle.is_none());
+        assert!(loaded.doi.is_none());
+        assert!(loaded.original_date.is_none());
+        assert!(loaded.abstract_text.is_none());
+        assert!(loaded.isbns.is_empty());
+        assert!(loaded.issns.is_empty());
+        assert!(loaded.isrns.is_empty());
+        assert!(loaded.keywords.is_empty());
         // The id's ULID already encodes when the row was written, so the
         // backfill reads exactly that; a record that never changed reads
         // as edited the day it was added.
@@ -3625,6 +4358,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3759,6 +4519,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3809,6 +4596,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3843,6 +4657,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3870,6 +4711,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3938,6 +4806,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![tag.id],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();
@@ -3954,6 +4849,33 @@ mod tests {
                 series_number: None,
                 tag_ids: vec![],
                 collection_ids: vec![],
+                metadata: Default::default(),
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place: None,
+                volume: None,
+                issue: None,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition: None,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language: None,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
             })
             .await
             .unwrap();

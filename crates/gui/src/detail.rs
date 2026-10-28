@@ -98,6 +98,59 @@ pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
             vec![number.as_str().to_owned()],
         ));
     }
+    for (label, value) in [
+        ("Subtitle", detail.subtitle.as_ref().map(|s| s.as_str())),
+        (
+            "Title add-on",
+            detail.title_addon.as_ref().map(|s| s.as_str()),
+        ),
+        (
+            "Short title",
+            detail.short_title.as_ref().map(|s| s.as_str()),
+        ),
+        ("Place", detail.place.as_deref()),
+        ("Volume", detail.volume.as_deref()),
+        ("Issue", detail.issue.as_deref()),
+        ("Pages", detail.pages.as_deref()),
+        ("Total pages", detail.total_pages.as_deref()),
+        ("Article number", detail.article_number.as_deref()),
+        ("Edition", detail.edition.as_deref()),
+        ("DOI", detail.doi.as_deref()),
+        ("URL", detail.url.as_deref()),
+        ("Eprint", detail.eprint.as_deref()),
+        ("Language", detail.language.as_deref()),
+        ("Document type", detail.document_type.as_deref()),
+        ("Publication method", detail.publication_method.as_deref()),
+        ("Institution", detail.institution.as_deref()),
+        ("Organization", detail.organization.as_deref()),
+        ("School", detail.school.as_deref()),
+        ("Abstract", detail.abstract_text.as_deref()),
+    ] {
+        if let Some(value) = value {
+            rows.push((label.into(), vec![value.to_owned()]));
+        }
+    }
+    for (label, values) in [
+        ("ISBN", &detail.isbns),
+        ("ISSN", &detail.issns),
+        ("ISRN", &detail.isrns),
+        ("Keywords", &detail.keywords),
+    ] {
+        if !values.is_empty() {
+            rows.push((label.into(), values.clone()));
+        }
+    }
+    for (label, date) in [
+        ("Original date", &detail.original_date),
+        ("Event date", &detail.event_date),
+    ] {
+        if let Some(date) = date {
+            rows.push((
+                label.into(),
+                vec![format_published_label(date).as_str().to_owned()],
+            ));
+        }
+    }
     // Record-keeping stamps close the bibliographic block; tags are not a
     // text row here — the caller supplies a hashtag value the panel appends.
     rows.push((
@@ -236,10 +289,66 @@ mod tests {
         BibliographicDate, CreatorRole, DetailCreators, NonEmptyStr, ResourceDetail, ResourceId,
         ResourceKind, UtcMillis,
     };
+    #[test]
+    fn imported_bibliographic_fields_are_visible_in_the_detail_panel() {
+        // Reuse a stored resource projection through the public core types.
+        let mut detail = journal_article();
+        detail.doi = Some("10.1000/example".into());
+        detail.url = Some("https://example.org".into());
+        detail.pages = Some("10–20".into());
+        detail.isbns = vec!["978-0-306-40615-7".into()];
+        detail.keywords = vec!["history".into(), "computing".into()];
+        detail.abstract_text = Some("A summary".into());
+        let rows = field_rows(&detail);
+        for (label, values) in [
+            ("DOI", vec!["10.1000/example"]),
+            ("URL", vec!["https://example.org"]),
+            ("Pages", vec!["10–20"]),
+            ("ISBN", vec!["978-0-306-40615-7"]),
+            ("Keywords", vec!["history", "computing"]),
+            ("Abstract", vec!["A summary"]),
+        ] {
+            assert_eq!(
+                rows.iter().find(|r| r.0 == label).map(|r| r
+                    .1
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()),
+                Some(values),
+                "{label}"
+            );
+        }
+    }
 
     /// A journal article carrying every optional field the panel can show.
     fn journal_article() -> ResourceDetail {
         ResourceDetail {
+            subtitle: None,
+            title_addon: None,
+            short_title: None,
+            place: None,
+            volume: None,
+            issue: None,
+            pages: None,
+            total_pages: None,
+            article_number: None,
+            edition: None,
+            doi: None,
+            url: None,
+            eprint: None,
+            isbns: vec![],
+            issns: vec![],
+            isrns: vec![],
+            original_date: None,
+            event_date: None,
+            language: None,
+            document_type: None,
+            publication_method: None,
+            institution: None,
+            organization: None,
+            school: None,
+            abstract_text: None,
+            keywords: vec![],
             id: ResourceId::generate(),
             kind: ResourceKind::JournalArticle,
             title: NonEmptyStr::try_new("Quantum bibliometrics").unwrap(),
