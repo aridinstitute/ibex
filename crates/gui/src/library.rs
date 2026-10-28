@@ -1421,9 +1421,8 @@ const DETAIL_CACHE_CAPACITY: usize = 96;
 
 /// Fetched details keyed by id, first-in first-out. A hit renders the
 /// panel without a fetch, which is what makes nearby steps feel instant;
-/// details change only through an edit, and saving one invalidates that
-/// id's entry (see [`DetailCache::invalidate`]), so entries are otherwise
-/// never stale, and the oldest falls out past [`DETAIL_CACHE_CAPACITY`].
+/// details can inherit fields from other records, so resource edits discard
+/// the cache. Otherwise the oldest falls out past [`DETAIL_CACHE_CAPACITY`].
 struct DetailCache {
     entries: HashMap<ResourceId, ResourceDetail>,
     /// Insertion order, oldest first; drives eviction.
@@ -3246,7 +3245,6 @@ impl LibraryApp {
         cx.spawn_in(window, async move |app, window| {
             let reply = worker.resource_detail(id).await;
             _ = app.update_in(window, |app, window, cx| {
-                app.detail_inflight.remove(&id);
                 // The record this reply describes was edited after the
                 // fetch was issued; it must not enter the cache or the
                 // panel. The save's own refetch (issued at the new
@@ -3254,6 +3252,7 @@ impl LibraryApp {
                 if *app.detail_gens.get(&id).unwrap_or(&0) != fetch_epoch {
                     return;
                 }
+                app.detail_inflight.remove(&id);
                 match reply {
                     Ok(detail) => {
                         // Failures stay out of the cache: reselecting a
@@ -3913,9 +3912,12 @@ impl LibraryApp {
                             table.col_selectable = true;
                         });
                         app.selected = Some(id);
-                        *app.detail_gens.entry(id).or_default() += 1;
-                        app.detail_inflight.remove(&id);
-                        app.detail_cache.invalidate(&id);
+                        // Any cached article may inherit from the edited container.
+                        // Reject pre-edit replies as well as cached projections.
+                        for pending in app.detail_inflight.drain() {
+                            *app.detail_gens.entry(pending).or_default() += 1;
+                        }
+                        app.detail_cache = DetailCache::new();
                         app.detail = Some((id, DetailFetch::Loading));
                         app.fetch_detail(id, window, cx);
                         app.refresh_counts(window, cx);
@@ -4170,13 +4172,12 @@ impl LibraryApp {
                 match reply {
                     Ok(_) => {
                         app.edit = None;
-                        // The stored record changed under every detail
-                        // fetched for it: bump the id's generation so an
-                        // in-flight fetch's reply is dropped, forget the
-                        // cached detail, and refetch for the panel.
-                        *app.detail_gens.entry(id).or_default() += 1;
-                        app.detail_inflight.remove(&id);
-                        app.detail_cache.invalidate(&id);
+                        // Any cached article may inherit from the edited container.
+                        // Reject pre-edit replies as well as cached projections.
+                        for pending in app.detail_inflight.drain() {
+                            *app.detail_gens.entry(pending).or_default() += 1;
+                        }
+                        app.detail_cache = DetailCache::new();
                         app.detail = Some((id, DetailFetch::Loading));
                         app.fetch_detail(id, window, cx);
                         app.refresh_counts(window, cx);
@@ -6276,7 +6277,10 @@ mod biblatex_gui_tests {
             Some(vec![path.clone()])
         });
         cx.run_until_parked();
-        // Fence the external database thread, then process the GUI completion and reload.
+        // Preview and commit are separate worker round trips. Let the preview
+        // completion enqueue the commit before fencing its persisted rows.
+        worker.list_page_blocking(None, 50).unwrap();
+        cx.run_until_parked();
         assert_eq!(worker.list_page_blocking(None, 50).unwrap().rows.len(), 2);
         cx.run_until_parked();
         worker.list_page_blocking(None, 50).unwrap();
@@ -6287,7 +6291,7 @@ mod biblatex_gui_tests {
             assert!(window.try_find("biblatex-import-report").is_some());
             assert_eq!(
                 window.find("biblatex-import-report").label(),
-                Some("2 imported · 1 skipped · 0 warnings")
+                Some("2 imported · 0 reused · 1 skipped · 0 conflicted · 0 failed · 0 not attempted · 0 warnings")
             );
             assert_eq!(app.read(cx).counts.as_ref().unwrap().all_items, 2);
             assert_eq!(app.read(cx).table.read(cx).delegate().rows.len(), 2);

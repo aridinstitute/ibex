@@ -57,7 +57,7 @@ fn bare(kind: ResourceKind, title: &str, parent_id: Option<ResourceId>) -> NewRe
 }
 
 #[tokio::test]
-async fn parent_publisher_propagates_through_reopen_list_and_detail() {
+async fn parent_publisher_and_title_propagate_through_reopen_list_and_detail() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("library");
     let store = SurrealStore::open(&path).await.unwrap();
@@ -88,10 +88,10 @@ async fn parent_publisher_propagates_through_reopen_list_and_detail() {
         panic!("issue");
     };
 
+    let mut article = bare(ResourceKind::JournalArticle, "Paper", Some(issue.id));
+    article.metadata.venue = Some("Nature".into());
     let Outcome::CreateResource(article) = state
-        .execute(Command::CreateResource(CreateResource {
-            new: bare(ResourceKind::JournalArticle, "Paper", Some(issue.id)),
-        }))
+        .execute(Command::CreateResource(CreateResource { new: article }))
         .await
         .unwrap()
     else {
@@ -116,6 +116,7 @@ async fn parent_publisher_propagates_through_reopen_list_and_detail() {
 
     let mut edited = journal.to_new();
     edited.publisher = Some("New Pub".into());
+    edited.title = nes("Renamed Journal");
     let Outcome::UpdateResource(_) = state
         .execute(Command::UpdateResource(UpdateResource {
             id: journal.id,
@@ -155,6 +156,10 @@ async fn parent_publisher_propagates_through_reopen_list_and_detail() {
     };
     assert_eq!(after.publisher.as_deref(), Some("New Pub"));
     assert_eq!(after.volume.as_deref(), Some("1"));
+    assert_eq!(
+        after.container_title.as_ref().map(NonEmptyStr::as_str),
+        Some("Renamed Journal")
+    );
 
     let Outcome::ListResources(rows) = state
         .execute(Command::ListResources(ListResources))
@@ -167,7 +172,7 @@ async fn parent_publisher_propagates_through_reopen_list_and_detail() {
     assert_eq!(row.publisher.as_deref(), Some("New Pub"));
     assert_eq!(
         row.container_title.as_ref().map(|s| s.as_str()),
-        Some("Nature")
+        Some("Renamed Journal")
     );
 
     let Outcome::GetResource(stored) = state
@@ -179,4 +184,5 @@ async fn parent_publisher_propagates_through_reopen_list_and_detail() {
     };
     assert!(stored.publisher.is_none());
     assert!(stored.volume.is_none());
+    assert_eq!(stored.metadata.venue.as_deref(), Some("Nature"));
 }

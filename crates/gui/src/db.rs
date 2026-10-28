@@ -802,10 +802,15 @@ mod tests {
                 .surface(Surface::Test)
                 .build(),
         );
-        let report = worker.import_biblatex(path).await.unwrap();
+        let plan = worker.preview_biblatex(path).await.unwrap();
+        let report = worker
+            .import_biblatex(plan.source_text, ImportChoices::default())
+            .await
+            .unwrap();
         assert_eq!(report.imported.len(), 2);
         assert_eq!(report.skipped.len(), 1);
-        assert_eq!(worker.resource_counts().await.unwrap().all_items, 2);
+        // The article also materializes its linked journal container.
+        assert_eq!(worker.resource_counts().await.unwrap().all_items, 3);
         let book = worker
             .resource(report.imported[0].resource_id)
             .await
@@ -813,11 +818,11 @@ mod tests {
         assert_eq!(book.doi.as_deref(), Some("10.1000/book"));
         assert!(
             worker
-                .import_biblatex(dir.path().join("missing.bib"))
+                .preview_biblatex(dir.path().join("missing.bib"))
                 .await
                 .is_err()
         );
-        assert_eq!(worker.resource_counts().await.unwrap().all_items, 2);
+        assert_eq!(worker.resource_counts().await.unwrap().all_items, 3);
     }
 
     #[tokio::test]
