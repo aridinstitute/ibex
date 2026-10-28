@@ -89,6 +89,7 @@ async fn imported_metadata_round_trips_through_commands() {
         citekey: Some("smith2024".into()),
         venue: Some("Collected Works".into()),
         source_fields: BTreeMap::from([("customfield".into(), "{Unchanged}".into())]),
+        provenance: Default::default(),
     };
     new.metadata = metadata.clone();
     let Outcome::CreateResource(created) = state

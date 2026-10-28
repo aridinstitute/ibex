@@ -97,4 +97,60 @@ fn parse_biblatex_inherits_crossref_without_parent_resource_id() {
     );
     assert!(chapter.had_reference_fields);
     assert!(chapter.resource.parent_id.is_none());
+    // Pre-expansion originals omit inherited venue; expanded map and origins record it.
+    assert!(!chapter.provenance.original_fields.contains_key("booktitle"));
+    assert!(
+        chapter
+            .provenance
+            .inherited_origins
+            .contains_key("booktitle")
+            || chapter.provenance.expanded_fields.contains_key("booktitle")
+            || chapter.resource.metadata.venue.is_some()
+    );
+    assert_eq!(
+        chapter
+            .provenance
+            .inherited_origins
+            .get("year")
+            .map(String::as_str)
+            .or_else(|| chapter.provenance.inherited_origins.get("date").map(String::as_str)),
+        Some("parent")
+    );
+}
+
+#[test]
+fn parse_preserves_notes_particles_pages_and_optional_date_warnings() {
+    let source = r#"
+        @book{one,
+          title = {Names},
+          author = {van Beethoven, Ludwig and {World Bank} and others},
+          pages = {10--20},
+          note = {A note},
+          annotation = {An annotation},
+          year = {bad-year}
+        }
+    "#;
+    let draft = parse_biblatex(source).expect("parse");
+    assert_eq!(draft.entries.len(), 1);
+    let entry = &draft.entries[0];
+    assert_eq!(entry.provenance.note.as_deref(), Some("A note"));
+    assert_eq!(entry.provenance.annotation.as_deref(), Some("An annotation"));
+    assert!(entry.provenance.original_fields.contains_key("note"));
+    assert_eq!(
+        entry.unresolved_creators[0].name.particle(),
+        Some("van")
+    );
+    assert!(entry.unresolved_creators.iter().any(|c| c.name.is_literal()));
+    assert_eq!(
+        entry.resource.pages.as_ref().map(|p| p.spans[0].start.number),
+        Some(Some(10))
+    );
+    assert!(
+        draft.diagnostics.iter().any(|d| {
+            d.severity == oeuvre_core::DiagnosticSeverity::Warning
+                && (d.message.contains("and others") || d.field.as_deref() == Some("date"))
+        }),
+        "{:?}",
+        draft.diagnostics
+    );
 }

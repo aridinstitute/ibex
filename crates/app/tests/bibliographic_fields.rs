@@ -64,18 +64,12 @@ async fn bibliographic_fields_are_returned_in_detail_and_preserved_on_update() {
         "place",
         "volume",
         "issue",
-        "pages",
         "total_pages",
         "article_number",
         "edition",
         "doi",
         "url",
         "eprint",
-        "isbns",
-        "issns",
-        "isrns",
-        "original_date",
-        "event_date",
         "language",
         "document_type",
         "publication_method",
@@ -87,6 +81,13 @@ async fn bibliographic_fields_are_returned_in_detail_and_preserved_on_update() {
     ] {
         assert_eq!(detail[field], input[field], "detail lost {field}");
     }
+    assert_eq!(detail["pages"]["literal"], "10–20");
+    assert_eq!(detail["isbns"][0]["original"], "978-0-306-40615-7");
+    assert_eq!(detail["issns"][0]["original"], "1234-5678");
+    assert_eq!(detail["isrns"][0]["original"], "EXAMPLE-1");
+    assert_eq!(detail["original_date"]["instant"], 0);
+    assert_eq!(detail["original_date"]["display"], "1970");
+    assert_eq!(detail["event_date"]["instant"], 86400000);
     let mut edit = fetched.to_new();
     let _ = sink.take();
     edit.doi = Some("10.1234/updated".into());

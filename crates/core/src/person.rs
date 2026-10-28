@@ -1,5 +1,7 @@
 use std::fmt;
 
+use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NonEmptyStr(String);
 
@@ -31,12 +33,18 @@ pub enum NameError {
 }
 
 /// Mononyms (Augustine) live in `last` — the primary indexing / sort slot in bibliography
-/// convention.
+/// convention. Nobiliary particles stay in [`Self::particle`], not folded into `last`.
+/// Organizational names set [`Self::is_literal`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Name {
     first: Option<NonEmptyStr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    particle: Option<NonEmptyStr>,
     last: Option<NonEmptyStr>,
     suffix: Option<NonEmptyStr>,
+    /// Corporate / organizational name: opaque for matching, displayed as `last`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    literal: bool,
 }
 
 impl Name {
@@ -45,7 +53,17 @@ impl Name {
         last: Option<impl AsRef<str>>,
         suffix: Option<impl AsRef<str>>,
     ) -> Result<Self, NameError> {
+        Self::try_new_parts(first, None::<&str>, last, suffix)
+    }
+
+    pub fn try_new_parts(
+        first: Option<impl AsRef<str>>,
+        particle: Option<impl AsRef<str>>,
+        last: Option<impl AsRef<str>>,
+        suffix: Option<impl AsRef<str>>,
+    ) -> Result<Self, NameError> {
         let first = normalize_part(first)?;
+        let particle = normalize_part(particle)?;
         let last = normalize_part(last)?;
         let suffix = normalize_part(suffix)?;
         if first.is_none() && last.is_none() {
@@ -53,13 +71,34 @@ impl Name {
         }
         Ok(Self {
             first,
+            particle,
             last,
             suffix,
+            literal: false,
+        })
+    }
+
+    /// Organizational or otherwise opaque credited name (stored in `last`).
+    pub fn corporate(name: impl AsRef<str>) -> Result<Self, NameError> {
+        let last = normalize_part(Some(name))?;
+        let Some(last) = last else {
+            return Err(NameError::Empty);
+        };
+        Ok(Self {
+            first: None,
+            particle: None,
+            last: Some(last),
+            suffix: None,
+            literal: true,
         })
     }
 
     pub fn first(&self) -> Option<&str> {
         self.first.as_ref().map(NonEmptyStr::as_str)
+    }
+
+    pub fn particle(&self) -> Option<&str> {
+        self.particle.as_ref().map(NonEmptyStr::as_str)
     }
 
     pub fn last(&self) -> Option<&str> {
@@ -70,11 +109,24 @@ impl Name {
         self.suffix.as_ref().map(NonEmptyStr::as_str)
     }
 
-    /// Human display: "First Last, Suffix" / "Last" / "First" / "First, Suffix".
+    pub fn is_literal(&self) -> bool {
+        self.literal
+    }
+
+    /// Human display: "First Particle Last, Suffix" / corporate `last` alone.
     pub fn display(&self) -> String {
+        if self.literal {
+            return self.last().unwrap_or("").to_owned();
+        }
         let mut out = String::new();
         if let Some(first) = self.first() {
             out.push_str(first);
+        }
+        if let Some(particle) = self.particle() {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(particle);
         }
         if let Some(last) = self.last() {
             if !out.is_empty() {
@@ -96,27 +148,38 @@ impl Name {
 
 /// Index identity for a structured [`Name`].
 ///
-/// Wire form is ASCII-lowercased `last|first|suffix` (missing part → empty).
+/// Wire form is Unicode-normalized (NFKD, marks stripped, lowercased)
+/// `last|particle|first|suffix` (missing part → empty). Literal names use
+/// `*|normalized-display|||` so they do not collide with personal name slots.
 /// Not the display string — formatting must not change which people a lookup hits.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NameKey(String);
 
 impl NameKey {
     pub fn from_name(name: &Name) -> Self {
-        fn part(p: Option<&str>) -> String {
-            p.unwrap_or("").to_ascii_lowercase()
+        if name.is_literal() {
+            return Self(format!("*|{}|||", normalize_key_part(name.last().unwrap_or(""))));
         }
         Self(format!(
-            "{}|{}|{}",
-            part(name.last()),
-            part(name.first()),
-            part(name.suffix())
+            "{}|{}|{}|{}",
+            normalize_key_part(name.last().unwrap_or("")),
+            normalize_key_part(name.particle().unwrap_or("")),
+            normalize_key_part(name.first().unwrap_or("")),
+            normalize_key_part(name.suffix().unwrap_or(""))
         ))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Fold accents for matching without treating the fold as a unique identity.
+fn normalize_key_part(s: &str) -> String {
+    s.nfd()
+        .filter(|c| !is_combining_mark(*c))
+        .flat_map(|c| c.to_lowercase())
+        .collect()
 }
 
 fn normalize_part(part: Option<impl AsRef<str>>) -> Result<Option<NonEmptyStr>, NameError> {
@@ -271,19 +334,46 @@ mod tests {
         let a = Name::try_new(Some("Mark"), Some("Twain"), None::<&str>).unwrap();
         let b = Name::try_new(Some("MARK"), Some("TWAIN"), None::<&str>).unwrap();
         assert_eq!(a.key(), b.key());
-        assert_eq!(a.key().as_str(), "twain|mark|");
+        assert_eq!(a.key().as_str(), "twain||mark|");
     }
 
     #[test]
     fn name_key_mononym_in_last() {
         let name = Name::try_new(None::<&str>, Some("Augustine"), None::<&str>).unwrap();
-        assert_eq!(name.key().as_str(), "augustine||");
+        assert_eq!(name.key().as_str(), "augustine|||");
     }
 
     #[test]
     fn name_key_includes_suffix() {
         let name = Name::try_new(Some("Jane"), Some("Doe"), Some("Jr.")).unwrap();
-        assert_eq!(name.key().as_str(), "doe|jane|jr.");
+        assert_eq!(name.key().as_str(), "doe||jane|jr.");
+    }
+
+    #[test]
+    fn name_keeps_particle_separate() {
+        let name =
+            Name::try_new_parts(Some("Ludwig"), Some("van"), Some("Beethoven"), None::<&str>)
+                .unwrap();
+        assert_eq!(name.particle(), Some("van"));
+        assert_eq!(name.last(), Some("Beethoven"));
+        assert_eq!(name.display(), "Ludwig van Beethoven");
+        assert_eq!(name.key().as_str(), "beethoven|van|ludwig|");
+    }
+
+    #[test]
+    fn name_key_folds_accents_without_changing_display() {
+        let accented = Name::try_new(Some("José"), Some("García"), None::<&str>).unwrap();
+        let plain = Name::try_new(Some("Jose"), Some("Garcia"), None::<&str>).unwrap();
+        assert_eq!(accented.key(), plain.key());
+        assert_eq!(accented.display(), "José García");
+    }
+
+    #[test]
+    fn corporate_name_is_literal() {
+        let name = Name::corporate("World Bank").unwrap();
+        assert!(name.is_literal());
+        assert_eq!(name.display(), "World Bank");
+        assert!(name.key().as_str().starts_with("*|"));
     }
 
     #[test]
