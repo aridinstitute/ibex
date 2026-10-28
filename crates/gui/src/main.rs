@@ -143,6 +143,7 @@ fn run() -> Result<()> {
                     let delegate = LibraryDelegate::new(worker, first, settings);
                     let table = cx.new(|cx| {
                         TableState::new(delegate, window, cx)
+                            .select_on_modifier_click(false)
                             .col_movable(false)
                             .sortable(false)
                     });

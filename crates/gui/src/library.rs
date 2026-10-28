@@ -324,6 +324,9 @@ pub struct LibraryDelegate {
     /// Mirrors the table's selected row from its selection events, because
     /// `render_td` runs while the table state is borrowed and cannot ask it.
     selected_row: Option<usize>,
+    selected_ids: HashSet<ResourceId>,
+    selection_anchor: Option<ResourceId>,
+    preserve_selection: bool,
     /// Mirrors the table's selected column the same way; row and column
     /// selection are exclusive, and cell text follows whichever portion
     /// sits on the accent tint.
@@ -342,6 +345,11 @@ pub struct LibraryDelegate {
 }
 
 impl LibraryDelegate {
+    fn row_selected(&self, row_ix: usize) -> bool {
+        self.row_id(row_ix)
+            .is_some_and(|id| self.selected_ids.contains(&id))
+            || (self.selected_ids.is_empty() && self.selected_row == Some(row_ix))
+    }
     /// Reconcile editors by identity before publishing a new positional snapshot.
     fn rebuild_rows(&mut self) {
         self.rows = self.grid.visible();
@@ -457,6 +465,9 @@ impl LibraryDelegate {
             filters_visible: false,
             error: None,
             selected_row: None,
+            selected_ids: HashSet::new(),
+            selection_anchor: None,
+            preserve_selection: false,
             selected_col: None,
             settings,
             listing_gen: 0,
@@ -565,6 +576,8 @@ impl LibraryDelegate {
         cx: &mut Context<TableState<Self>>,
     ) {
         self.listing_gen += 1;
+        self.selected_ids.clear();
+        self.selection_anchor = None;
         self.reopen.extend(self.grid.expanded.iter().copied());
         self.reveal_selection = selected_id.filter(|_| restore_col.is_none());
         for page in self.grid.children.values_mut() {
@@ -794,6 +807,19 @@ fn restore_grid_selection(
         .or_else(|| fallback.and_then(|id| delegate.rows.iter().position(|row| row.id == id)));
     if let Some(ix) = ix {
         delegate.selected_row = Some(ix + draft);
+        // Structural restores move keyboard focus, not the user's selection.
+        if !delegate.selected_ids.is_empty() {
+            let visible: HashSet<_> = delegate.rows.iter().map(|row| row.id).collect();
+            delegate.selected_ids.retain(|id| visible.contains(id));
+            delegate.selected_ids.insert(delegate.rows[ix].id);
+            delegate.preserve_selection = true;
+            if delegate
+                .selection_anchor
+                .is_some_and(|id| !visible.contains(&id))
+            {
+                delegate.selection_anchor = Some(delegate.rows[ix].id);
+            }
+        }
         if delegate.reveal_selection == Some(id) {
             delegate.reveal_selection = None;
         }
@@ -922,7 +948,59 @@ impl TableDelegate for LibraryDelegate {
             ))
             .border_1()
             .border_color(transparent_white())
-            .when(self.selected_row == Some(row_ix), |row| {
+            .when(self.row_selected(row_ix), |row| {
+                row.bg(cx.theme().table_active)
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |table, event: &MouseDownEvent, window, cx| {
+                    if table.delegate().inline.is_some()
+                        || !(event.modifiers.secondary() || event.modifiers.shift)
+                    {
+                        return;
+                    }
+                    let delegate = table.delegate_mut();
+                    let Some(id) = delegate.row_id(row_ix) else {
+                        return;
+                    };
+                    if event.modifiers.shift {
+                        let anchor = delegate
+                            .selection_anchor
+                            .and_then(|id| delegate.rows.iter().position(|r| r.id == id))
+                            .unwrap_or(row_ix);
+                        let range = anchor.min(row_ix)..=anchor.max(row_ix);
+                        if !event.modifiers.secondary() {
+                            delegate.selected_ids.clear();
+                        }
+                        delegate
+                            .selected_ids
+                            .extend(delegate.rows[range].iter().map(|r| r.id));
+                    } else {
+                        if !delegate.selected_ids.remove(&id) {
+                            delegate.selected_ids.insert(id);
+                        }
+                        // Keep the range origin stable while toggling disjoint rows.
+                        delegate.selection_anchor = delegate.selection_anchor.or(Some(id));
+                    }
+                    let focused = if delegate.selected_ids.contains(&id) {
+                        Some(row_ix)
+                    } else {
+                        delegate
+                            .rows
+                            .iter()
+                            .position(|r| delegate.selected_ids.contains(&r.id))
+                    };
+                    delegate.preserve_selection = focused.is_some();
+                    if let Some(ix) = focused {
+                        table.set_selected_row(ix, cx);
+                    } else {
+                        table.clear_selection(cx);
+                    }
+                    table.focus_handle(cx).focus(window, cx);
+                    cx.notify();
+                }),
+            )
+            .when(self.row_selected(row_ix), |row| {
                 row.border_color(cx.theme().table_active_border.opacity(0.5))
                     .rounded(px(6.))
             })
@@ -1021,7 +1099,12 @@ impl TableDelegate for LibraryDelegate {
             .text_size(CELL_TEXT_SIZE);
         // Inline editors replace labels for the active row's editable columns.
         if let Some(form) = self.inline_editing_row(row_ix) {
-            let on_accent = cell_on_accent(self.selected_row, self.selected_col, row_ix, col_ix);
+            let on_accent = cell_on_accent(
+                self.row_selected(row_ix).then_some(row_ix),
+                self.selected_col,
+                row_ix,
+                col_ix,
+            );
             let (text, muted) = cell_text_colors(on_accent, cx.theme());
             let active = InlineField::from_col(col_ix) == Some(form.active_field);
             let cell = inline_active_cell(
@@ -1135,7 +1218,12 @@ impl TableDelegate for LibraryDelegate {
             return cell;
         };
         // The accent tint keeps foreground text readable on selected rows and columns.
-        let on_accent = cell_on_accent(self.selected_row, self.selected_col, row_ix, col_ix);
+        let on_accent = cell_on_accent(
+            self.row_selected(row_ix).then_some(row_ix),
+            self.selected_col,
+            row_ix,
+            col_ix,
+        );
         let (text, muted) = cell_text_colors(on_accent, cx.theme());
         let cell = cell.text_color(text);
         match col_ix {
@@ -1636,6 +1724,7 @@ fn sort_marker(direction: SortDirection, cx: &App) -> Icon {
 gpui_kit::actions!([
     ImportBiblatexFile,
     OpenCommandPalette,
+    SelectAllResources,
     ToggleLeftPanel,
     ToggleDetailPanel,
     CycleColumnSort,
@@ -2115,6 +2204,16 @@ impl LibraryApp {
     ) -> Self {
         cx.bind_keys([
             KeyBinding::new(
+                "cmd-a",
+                SelectAllResources,
+                Some("LibraryApp > DataTable && !InlineEdit"),
+            ),
+            KeyBinding::new(
+                "ctrl-a",
+                SelectAllResources,
+                Some("LibraryApp > DataTable && !InlineEdit"),
+            ),
+            KeyBinding::new(
                 "alt-right",
                 ExpandResource,
                 Some("LibraryApp && !Input && !InlineEdit"),
@@ -2140,6 +2239,11 @@ impl LibraryApp {
                         this.table.update(cx, |table, cx| {
                             let delegate = table.delegate_mut();
                             delegate.selected_row = Some(*row_ix);
+                            if !std::mem::take(&mut delegate.preserve_selection) {
+                                delegate.selected_ids =
+                                    delegate.row_id(*row_ix).into_iter().collect();
+                                delegate.selection_anchor = delegate.row_id(*row_ix);
+                            }
                             delegate.selected_col = None;
                             delegate.reveal_selection = None;
                             cx.notify();
@@ -2162,6 +2266,8 @@ impl LibraryApp {
                         this.table.update(cx, |table, cx| {
                             let delegate = table.delegate_mut();
                             delegate.selected_row = None;
+                            delegate.selected_ids.clear();
+                            delegate.selection_anchor = None;
                             delegate.selected_col = Some(*col_ix);
                             cx.notify();
                         });
@@ -2175,6 +2281,8 @@ impl LibraryApp {
                         this.table.update(cx, |table, cx| {
                             let delegate = table.delegate_mut();
                             delegate.selected_row = None;
+                            delegate.selected_ids.clear();
+                            delegate.selection_anchor = None;
                             delegate.selected_col = None;
                             cx.notify();
                         });
@@ -2797,9 +2905,27 @@ impl LibraryApp {
             return;
         }
         self.last_escape_at = None;
-        let target = self.selected;
+        let targets: Vec<_> = {
+            let delegate = self.table.read(cx).delegate();
+            if delegate.selected_ids.is_empty() {
+                self.selected.into_iter().collect()
+            } else {
+                delegate
+                    .rows
+                    .iter()
+                    .filter(|r| delegate.selected_ids.contains(&r.id))
+                    .map(|r| r.id)
+                    .collect()
+            }
+        };
         let grouped = self.table.read(cx).delegate().grouped;
-        let palette = cx.new(|cx| CommandPalette::new(target, grouped, window, cx));
+        let palette = cx.new(|cx| {
+            if targets.len() <= 1 {
+                CommandPalette::new(targets.first().copied(), grouped, window, cx)
+            } else {
+                CommandPalette::new_for_targets(targets.clone(), grouped, window, cx)
+            }
+        });
         cx.subscribe_in(
             &palette,
             window,
@@ -2823,32 +2949,43 @@ impl LibraryApp {
                 let palette = palette.downgrade();
                 let worker = app.table.read(cx).delegate().worker().clone();
                 cx.spawn_in(window, async move |app, window| {
-                    let result = apply_palette_request(&worker, &request).await;
+                    let result = apply_palette_batch(&worker, &request).await;
                     _ = app.update_in(window, |app, window, cx| {
-                        match result {
-                            Ok(record) => {
-                                let id = record.id;
-                                *app.detail_gens.entry(id).or_default() += 1;
-                                app.detail_inflight.remove(&id);
-                                app.detail_cache.invalidate(&id);
-                                if app.selected == Some(id) {
-                                    app.detail = Some((id, DetailFetch::Loading));
-                                    app.fetch_detail(id, window, cx);
-                                }
-                                app.refresh_counts(window, cx);
-                                let selected = app.selected;
-                                app.table.update(cx, |table, cx| {
-                                    table
-                                        .delegate_mut()
-                                        .reload_from_top(selected, None, window, cx);
-                                });
-                                if palette.upgrade().is_some() {
-                                    window.close_dialog(cx);
-                                }
+                        for id in &result.updated {
+                            *app.detail_gens.entry(*id).or_default() += 1;
+                            app.detail_inflight.remove(id);
+                            app.detail_cache.invalidate(id);
+                            if app.selected == Some(*id) {
+                                app.detail = Some((*id, DetailFetch::Loading));
+                                app.fetch_detail(*id, window, cx);
                             }
-                            Err(error) => {
-                                _ = palette.update(cx, |palette, cx| palette.failed(error, cx));
+                        }
+                        if !result.updated.is_empty() {
+                            app.refresh_counts(window, cx);
+                            let selected = app.selected;
+                            app.table.update(cx, |table, cx| {
+                                table
+                                    .delegate_mut()
+                                    .reload_from_top(selected, None, window, cx)
+                            });
+                        }
+                        if result.failed.is_empty() {
+                            if palette.upgrade().is_some() {
+                                window.close_dialog(cx);
                             }
+                        } else {
+                            let failures = result
+                                .failed
+                                .iter()
+                                .map(|(id, error)| format!("{id}: {error}"))
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            let message = format!(
+                                "{} updated; {} failed. Retry the same changes, or cancel to start a new edit. {failures}",
+                                result.updated.len(),
+                                result.failed.len()
+                            );
+                            _ = palette.update(cx, |palette, cx| palette.failed(message, cx));
                         }
                         cx.notify();
                     });
@@ -2874,20 +3011,27 @@ impl LibraryApp {
                 .p_0()
                 .child(content.clone())
         });
-        if let Some(id) = target {
+        if !targets.is_empty() {
             let worker = self.table.read(cx).delegate().worker().clone();
             let palette = palette.downgrade();
             cx.spawn_in(window, async move |_app, window| {
                 let result = async {
-                    let record = worker.resource(id).await?;
+                    let mut records = Vec::new();
+                    for id in targets {
+                        records.push(worker.resource(id).await?);
+                    }
                     let tags = worker.list_tags().await?;
                     let forest = worker.list_collection_forest().await?;
-                    Ok::<_, String>((record, tags, flatten_collections(&forest)))
+                    Ok::<_, String>((records, tags, flatten_collections(&forest)))
                 }
                 .await;
                 _ = palette.update_in(window, |palette, _, cx| match result {
-                    Ok((record, tags, collections)) => {
-                        palette.loaded(record, tags, collections, cx)
+                    Ok((mut records, tags, collections)) => {
+                        if records.len() == 1 {
+                            palette.loaded(records.pop().unwrap(), tags, collections, cx);
+                        } else {
+                            palette.loaded_resources(records, tags, collections, cx);
+                        }
                     }
                     Err(error) => palette.failed(error, cx),
                 });
@@ -5365,6 +5509,22 @@ impl Render for LibraryApp {
             .on_action(cx.listener(|this, _: &ImportBiblatexFile, window, cx| {
                 this.import_biblatex(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &SelectAllResources, window, cx| {
+                if this.has_inline(cx) || this.edit.is_some() {
+                    return;
+                }
+                this.table.update(cx, |table, cx| {
+                    let delegate = table.delegate_mut();
+                    delegate.selected_ids = delegate.rows.iter().map(|r| r.id).collect();
+                    delegate.selection_anchor = delegate.rows.first().map(|r| r.id);
+                    delegate.preserve_selection = !delegate.rows.is_empty();
+                    if !delegate.rows.is_empty() {
+                        table.set_selected_row(0, cx);
+                    }
+                });
+                this.focus_table(window, cx);
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &OpenCommandPalette, window, cx| {
                 this.open_command_palette(window, cx);
             }))
@@ -5728,6 +5888,39 @@ impl Render for LibraryApp {
     }
 }
 
+struct PaletteBatchResult {
+    updated: Vec<ResourceId>,
+    failed: Vec<(ResourceId, String)>,
+}
+
+async fn apply_palette_batch(worker: &DbWorker, request: &PaletteRequest) -> PaletteBatchResult {
+    let mut result = PaletteBatchResult {
+        updated: Vec::new(),
+        failed: Vec::new(),
+    };
+    let mut seen = HashSet::new();
+    for id in request
+        .resource_ids()
+        .into_iter()
+        .filter(|id| seen.insert(*id))
+    {
+        let single = match request {
+            PaletteRequest::EditTags(_, added, removed)
+            | PaletteRequest::EditTagsBulk(_, added, removed) => {
+                PaletteRequest::EditTags(id, added.clone(), removed.clone())
+            }
+            PaletteRequest::EditCollections(_, added, removed)
+            | PaletteRequest::EditCollectionsBulk(_, added, removed) => {
+                PaletteRequest::EditCollections(id, added.clone(), removed.clone())
+            }
+        };
+        match apply_palette_request(worker, &single).await {
+            Ok(_) => result.updated.push(id),
+            Err(error) => result.failed.push((id, error)),
+        }
+    }
+    result
+}
 async fn apply_palette_request(
     worker: &DbWorker,
     request: &crate::command_palette::PaletteRequest,
@@ -5737,7 +5930,8 @@ async fn apply_palette_request(
     let record = worker.resource(request.resource_id()).await?;
     let mut new = record.to_new();
     match request {
-        PaletteRequest::EditTags(_, ids, removed) => {
+        PaletteRequest::EditTags(_, ids, removed)
+        | PaletteRequest::EditTagsBulk(_, ids, removed) => {
             new.tag_ids.retain(|id| !removed.contains(id));
             for id in ids {
                 if !new.tag_ids.contains(id) {
@@ -5745,7 +5939,8 @@ async fn apply_palette_request(
                 }
             }
         }
-        PaletteRequest::EditCollections(_, ids, removed) => {
+        PaletteRequest::EditCollections(_, ids, removed)
+        | PaletteRequest::EditCollectionsBulk(_, ids, removed) => {
             new.collection_ids.retain(|id| !removed.contains(id));
             for id in ids {
                 if !new.collection_ids.contains(id) {
@@ -5766,6 +5961,161 @@ mod palette_persistence_tests {
     use gpui_kit::{AppContext as _, Focusable as _, KeyBinding};
     use oeuvre_core::{NonEmptyStr, ResourceId};
 
+    #[gpui_kit::test]
+    fn resource_modified_clicks_and_select_all(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::Modifiers;
+        use gpui_kit::test::TestWindowExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        cx.executor().allow_parking();
+        let store = oeuvre_app::testing::MemoryStore::new();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(oeuvre_app::seed::seed_demo_library(&store, 8))
+            .unwrap();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(store)
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let first = worker
+            .list_grid_page_blocking(
+                oeuvre_core::ResourceGridParent::Roots,
+                oeuvre_core::ResourceQuery::newest_first(),
+                0,
+                50,
+            )
+            .unwrap();
+        let ids: Vec<_> = first.rows.iter().map(|r| r.summary.id).collect();
+        assert!(ids.len() >= 3);
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let table = cx.new(|cx| {
+                    TableState::new(
+                        LibraryDelegate::new(worker, first, Settings::default()),
+                        window,
+                        cx,
+                    )
+                    .select_on_modifier_click(false)
+                });
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| app.focus_table(window, cx));
+            window.render_frame(cx);
+            window.click(format!("resource-row-{}", ids[0]), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click_with_modifiers(
+                format!("resource-row-{}", ids[2]),
+                Modifiers {
+                    platform: true,
+                    ..Default::default()
+                },
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(app.read(cx).table.read(cx).delegate().selected_ids.len(), 2);
+            window.render_frame(cx);
+            window.click_with_modifiers(
+                format!("resource-row-{}", ids[2]),
+                Modifiers {
+                    platform: true,
+                    ..Default::default()
+                },
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(app.read(cx).table.read(cx).delegate().selected_ids.len(), 1);
+            window.render_frame(cx);
+            window.click_with_modifiers(
+                format!("resource-row-{}", ids[2]),
+                Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+                cx,
+            );
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(app.read(cx).table.read(cx).delegate().selected_ids.len(), 3);
+            window.render_frame(cx);
+            window.press("cmd-a", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.table.read(cx).delegate().selected_ids.len(), ids.len())
+        });
+        cx.update_window(handle, |_, _, cx| {
+            let table = app.read(cx).table.clone();
+            table.update(cx, |table, cx| {
+                super::restore_grid_selection(table, Some(ids[0]), None, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        app.read_with(cx, |app, cx| {
+            assert_eq!(
+                app.table.read(cx).delegate().selected_ids.len(),
+                ids.len(),
+                "structural restoration must preserve bulk selection"
+            )
+        });
+    }
+    #[tokio::test]
+    async fn bulk_palette_preserves_memberships_and_reports_partial_failure() {
+        let store = oeuvre_app::testing::MemoryStore::new();
+        oeuvre_app::seed::seed_demo_library(&store, 2)
+            .await
+            .unwrap();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(store)
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let ids: Vec<_> = worker
+            .list_page(None, 2)
+            .await
+            .unwrap()
+            .rows
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        let before = worker.resource(ids[1]).await.unwrap();
+        let tag = worker
+            .create_tag(NonEmptyStr::try_new("bulk tag").unwrap())
+            .await
+            .unwrap();
+        let missing = ResourceId::generate();
+        let request = PaletteRequest::EditTagsBulk(
+            vec![ids[0], missing, ids[1], ids[0]],
+            vec![tag.id],
+            vec![],
+        );
+        let result = super::apply_palette_batch(&worker, &request).await;
+        assert_eq!(result.updated.len(), 2);
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(result.failed[0].0, missing);
+        let after = worker.resource(ids[1]).await.unwrap();
+        assert!(after.tag_ids.contains(&tag.id));
+        assert!(before.tag_ids.iter().all(|id| after.tag_ids.contains(id)));
+        assert_eq!(before.collection_ids, after.collection_ids);
+        assert_eq!(before.title, after.title);
+    }
     #[tokio::test]
     async fn palette_adds_tags_without_replacing_existing_memberships_or_fields() {
         let store = oeuvre_app::testing::MemoryStore::new();
