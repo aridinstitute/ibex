@@ -5,6 +5,7 @@
 mod app;
 pub mod command;
 mod event;
+pub mod import;
 pub mod seed;
 #[cfg(feature = "testing")]
 pub mod testing;
