@@ -138,15 +138,29 @@ async fn import_persists_people_roles_order_and_survives_reopen() {
         .iter()
         .map(|person| (person.id, person.name.display()))
         .collect();
-    assert_eq!(by_id.get(&book.creators[0].person_id).map(String::as_str), Some("Ada Lovelace"));
-    assert_eq!(by_id.get(&book.creators[1].person_id).map(String::as_str), Some("Grace Hopper"));
-    assert_eq!(by_id.get(&book.creators[2].person_id).map(String::as_str), Some("Donald Knuth"));
-    assert_eq!(by_id.get(&book.creators[3].person_id).map(String::as_str), Some("Alan Turing"));
+    assert_eq!(
+        by_id.get(&book.creators[0].person_id).map(String::as_str),
+        Some("Ada Lovelace")
+    );
+    assert_eq!(
+        by_id.get(&book.creators[1].person_id).map(String::as_str),
+        Some("Grace Hopper")
+    );
+    assert_eq!(
+        by_id.get(&book.creators[2].person_id).map(String::as_str),
+        Some("Donald Knuth")
+    );
+    assert_eq!(
+        by_id.get(&book.creators[3].person_id).map(String::as_str),
+        Some("Alan Turing")
+    );
 
     let series_id = book.series_id.expect("series linked");
     assert_eq!(book.series_number.as_ref().map(|s| s.as_str()), Some("3"));
     let Outcome::GetResourceDetail(detail) = state
-        .execute(Command::GetResourceDetail(GetResourceDetail { id: resource_id }))
+        .execute(Command::GetResourceDetail(GetResourceDetail {
+            id: resource_id,
+        }))
         .await
         .unwrap()
     else {
@@ -323,7 +337,11 @@ async fn imported_resource_write_rolls_back_new_deps_and_keeps_shared() {
     assert_eq!(people.len(), 1);
     assert_eq!(people[0].id, shared.id);
     assert!(
-        store.get_person(new_person.id).await.unwrap_err().is_not_found(),
+        store
+            .get_person(new_person.id)
+            .await
+            .unwrap_err()
+            .is_not_found(),
         "rolled-back person must not remain"
     );
     assert!(

@@ -16,9 +16,7 @@
 use std::hint::black_box;
 use std::time::Duration;
 
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
-};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use oeuvre_app::command::{ImportBiblatex, ImportCslJson};
 use oeuvre_app::import::{parse_biblatex, parse_csl_json};
 use oeuvre_app::testing::{MemorySink, MemoryStore};
@@ -202,10 +200,8 @@ fn bench_parse(c: &mut Criterion) {
                 format.label(),
                 text.len()
             );
-            group.bench_with_input(
-                BenchmarkId::new(format.label(), n),
-                &text,
-                |b, text| match format {
+            group.bench_with_input(BenchmarkId::new(format.label(), n), &text, |b, text| {
+                match format {
                     Format::Biblatex => b.iter(|| {
                         let draft = parse_biblatex(black_box(text)).expect("parse");
                         black_box(draft.entries.len());
@@ -214,8 +210,8 @@ fn bench_parse(c: &mut Criterion) {
                         let draft = parse_csl_json(black_box(text)).expect("parse");
                         black_box(draft.entries.len());
                     }),
-                },
-            );
+                }
+            });
         }
     }
     group.finish();

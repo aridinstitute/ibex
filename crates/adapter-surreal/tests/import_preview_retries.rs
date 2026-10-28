@@ -1,8 +1,8 @@
 //! Task 06: retry idempotency through the real Surreal adapter.
 
+use oeuvre_adapter_surreal::SurrealStore;
 use oeuvre_app::command::{ImportBiblatex, ListResources};
 use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_adapter_surreal::SurrealStore;
 
 #[tokio::test]
 async fn retry_same_source_reuses_committed_entries_through_surreal() {

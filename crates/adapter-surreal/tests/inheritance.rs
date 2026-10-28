@@ -77,8 +77,7 @@ async fn parent_publisher_and_title_propagate_through_reopen_list_and_detail() {
     issue.volume = Some("1".into());
     issue.issue = Some("1".into());
     issue.published = Some(
-        BibliographicDate::try_new(UtcMillis::jan_1_utc(2021).unwrap(), Some(nes("2021")))
-            .unwrap(),
+        BibliographicDate::try_new(UtcMillis::jan_1_utc(2021).unwrap(), Some(nes("2021"))).unwrap(),
     );
     let Outcome::CreateResource(issue) = state
         .execute(Command::CreateResource(CreateResource { new: issue }))

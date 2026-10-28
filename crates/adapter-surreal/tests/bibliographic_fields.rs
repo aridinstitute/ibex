@@ -28,7 +28,10 @@ fn example() -> NewResource {
         doi: Some("10.1234/example".into()),
         url: Some("https://example.org/companion".into()),
         eprint: Some("arXiv:1234.5678".into()),
-        isbns: vec![oeuvre_core::Identifier::from("978-0-306-40615-7"), oeuvre_core::Identifier::from("0-306-40615-2")],
+        isbns: vec![
+            oeuvre_core::Identifier::from("978-0-306-40615-7"),
+            oeuvre_core::Identifier::from("0-306-40615-2"),
+        ],
         issns: vec![oeuvre_core::Identifier::from("1234-5678")],
         isrns: vec![oeuvre_core::Identifier::from("EXAMPLE-REPORT-1")],
         original_date: Some(

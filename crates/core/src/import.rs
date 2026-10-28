@@ -7,9 +7,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::{
-    CreatorRole, Name, NewResource, NonEmptyStr, PersonId, ResourceId, ResourceKind,
-};
+use crate::{CreatorRole, Name, NewResource, NonEmptyStr, PersonId, ResourceId, ResourceKind};
 
 /// Parser/schema version stamped on drafts from this crate revision.
 pub const IMPORT_PARSER_VERSION: u32 = 2;
@@ -328,7 +326,9 @@ pub enum EntryChoice {
     /// Create a new resource even when a publication duplicate exists.
     IntentionalDuplicate,
     /// Attach to / reuse an existing library resource (no overwrite).
-    Reuse { resource_id: ResourceId },
+    Reuse {
+        resource_id: ResourceId,
+    },
 }
 
 /// Explicit resolution when several people share a name.
@@ -358,7 +358,9 @@ pub enum EntryProposal {
         resource_id: ResourceId,
         reason: String,
     },
-    Skip { reason: String },
+    Skip {
+        reason: String,
+    },
 }
 
 /// How a creator name matches the library.
@@ -366,13 +368,8 @@ pub enum EntryProposal {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum PersonMatchPreview {
     NoMatch,
-    Unique {
-        person_id: PersonId,
-        reason: String,
-    },
-    Ambiguous {
-        candidates: Vec<PersonCandidate>,
-    },
+    Unique { person_id: PersonId, reason: String },
+    Ambiguous { candidates: Vec<PersonCandidate> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

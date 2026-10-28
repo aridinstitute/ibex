@@ -3,13 +3,11 @@
 //! Task 07: CSL-JSON parser + shared pipeline equivalence + batching/cancel.
 
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use oeuvre_app::command::{GetResource, ImportBiblatex, ImportCslJson, ListPersons, ListResources};
-use oeuvre_app::import::{
-    parse_biblatex, parse_csl_json, save_draft_with_hooks, ImportHooks,
-};
+use oeuvre_app::import::{ImportHooks, parse_biblatex, parse_csl_json, save_draft_with_hooks};
 use oeuvre_app::testing::{MemorySink, MemoryStore};
 use oeuvre_app::{AppState, Command, Outcome, Surface};
 use oeuvre_core::{ImportFormat, ImportProgress, ResourceKind, import_codes};
@@ -84,10 +82,7 @@ fn parse_csl_json_maps_book_and_article_without_store() {
     assert_eq!(book.kind(), ResourceKind::Book);
     assert_eq!(book.title().as_str(), "Notes on the Analytical Engine");
     assert_eq!(book.unresolved_creators.len(), 1);
-    assert_eq!(
-        book.unresolved_creators[0].name.display(),
-        "Ada Lovelace"
-    );
+    assert_eq!(book.unresolved_creators[0].name.display(), "Ada Lovelace");
     assert_eq!(book.resource.doi.as_deref(), Some("10.1000/notes"));
     assert!(book.resource.creators.is_empty());
     assert!(book.resource.series_id.is_none());

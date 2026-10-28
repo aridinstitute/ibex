@@ -569,10 +569,7 @@ mod tests {
         assert_eq!(article.doi.as_deref(), Some("10.5555/demo.citations.0"));
         assert_eq!(article.volume.as_deref(), Some("1"));
         assert_eq!(article.issue.as_deref(), Some("1"));
-        assert_eq!(
-            article.pages.as_ref().map(|p| p.as_str()),
-            Some("1–12")
-        );
+        assert_eq!(article.pages.as_ref().map(|p| p.as_str()), Some("1–12"));
         assert_eq!(article.keywords, ["citation networks", "bibliometrics"]);
         assert!(!article.tag_ids.is_empty());
         assert!(article.abstract_text.is_some());

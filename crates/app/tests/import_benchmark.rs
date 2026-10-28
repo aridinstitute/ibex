@@ -164,11 +164,7 @@ fn peak_rss_kb() -> Option<u64> {
     None
 }
 
-async fn import(
-    format: Format,
-    state: &AppState,
-    text: &str,
-) -> oeuvre_core::ImportReport {
+async fn import(format: Format, state: &AppState, text: &str) -> oeuvre_core::ImportReport {
     match format {
         Format::Biblatex => {
             let Outcome::ImportBiblatex(report) = state
@@ -271,9 +267,10 @@ async fn run_case(format: Format, scenario: Scenario, n: usize) -> CaseResult {
             );
             assert_eq!(report.conflicted.len(), n);
             assert!(
-                report.conflicted.iter().all(|i| {
-                    i.code.as_deref() == Some(import_codes::PUBLICATION_DUPLICATE)
-                }),
+                report
+                    .conflicted
+                    .iter()
+                    .all(|i| { i.code.as_deref() == Some(import_codes::PUBLICATION_DUPLICATE) }),
                 "expected publication_duplicate: {:?}",
                 report.conflicted
             );
@@ -324,10 +321,7 @@ fn emit(r: &CaseResult) {
     eprintln!("find_persons_by_name={}", r.find_persons_by_name);
     eprintln!("list_persons={}", r.list_persons);
     eprintln!("get_resource={}", r.get_resource);
-    eprintln!(
-        "list_resources_for_import={}",
-        r.list_resources_for_import
-    );
+    eprintln!("list_resources_for_import={}", r.list_resources_for_import);
     match r.peak_rss_kb {
         Some(kb) => eprintln!("peak_rss_kb={kb}"),
         None => eprintln!("peak_rss_kb=unavailable"),

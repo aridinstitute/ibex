@@ -29,9 +29,8 @@ pub fn parse_csl_json(source: &str) -> Result<ImportDraft, ParseError> {
         ));
     }
     let source = source.trim_start_matches('\u{feff}').trim();
-    let value: Value = serde_json::from_str(source).map_err(|e| {
-        ParseError::new(import_codes::SYNTAX, format!("CSL-JSON syntax: {e}"))
-    })?;
+    let value: Value = serde_json::from_str(source)
+        .map_err(|e| ParseError::new(import_codes::SYNTAX, format!("CSL-JSON syntax: {e}")))?;
     let items = match value {
         Value::Array(items) => items,
         Value::Object(_) => vec![value],
@@ -243,10 +242,7 @@ impl CslStringOrList {
     fn values(&self) -> Vec<String> {
         match self {
             Self::One(s) => split_identifier_list(s),
-            Self::Many(v) => v
-                .iter()
-                .flat_map(|s| split_identifier_list(s))
-                .collect(),
+            Self::Many(v) => v.iter().flat_map(|s| split_identifier_list(s)).collect(),
         }
     }
 
@@ -348,7 +344,12 @@ fn map_item(
             }
         }
     }
-    let pages = match item.page.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let pages = match item
+        .page
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(raw) => match Pages::parse(raw) {
             Ok(pages) => Some(pages),
             Err(e) => {
@@ -360,8 +361,11 @@ fn map_item(
     };
     let issued = optional_date(item.issued.as_ref(), "issued", &mut field_warnings);
     let accessed = optional_date(item.accessed.as_ref(), "accessed", &mut field_warnings);
-    let original_date =
-        optional_date(item.original_date.as_ref(), "original-date", &mut field_warnings);
+    let original_date = optional_date(
+        item.original_date.as_ref(),
+        "original-date",
+        &mut field_warnings,
+    );
     let event_date = optional_date(item.event_date.as_ref(), "event-date", &mut field_warnings);
     let abstract_text = item
         .abstract_field
@@ -502,7 +506,9 @@ fn map_name(name: &CslName) -> Result<Option<Name>, String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        return Name::corporate(literal).map(Some).map_err(|e| e.to_string());
+        return Name::corporate(literal)
+            .map(Some)
+            .map_err(|e| e.to_string());
     }
     let particle = name
         .non_dropping_particle
@@ -510,9 +516,21 @@ fn map_name(name: &CslName) -> Result<Option<Name>, String> {
         .or(name.dropping_particle.as_deref())
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let family = name.family.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let given = name.given.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let suffix = name.suffix.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let family = name
+        .family
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let given = name
+        .given
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let suffix = name
+        .suffix
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     if family.is_none() && given.is_none() && particle.is_none() && suffix.is_none() {
         return Ok(None);
     }
@@ -595,11 +613,9 @@ fn csl_date(date: &CslDate, field: &str) -> Result<Option<BibliographicDate>, Ma
                 None,
                 precision,
                 certainty,
-                Some(
-                    NonEmptyStr::try_new(literal).map_err(|e| {
-                        map_field_err(import_codes::INVALID_FIELD, field, e.to_string())
-                    })?,
-                ),
+                Some(NonEmptyStr::try_new(literal).map_err(|e| {
+                    map_field_err(import_codes::INVALID_FIELD, field, e.to_string())
+                })?),
             )
             .map(Some)
             .map_err(|e| map_field_err(import_codes::INVALID_FIELD, field, e.to_string()));

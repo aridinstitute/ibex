@@ -10,9 +10,7 @@
 
 use std::collections::HashSet;
 
-use crate::{
-    BibliographicDate, Identifier, NonEmptyStr, Resource, ResourceId, ResourceKind,
-};
+use crate::{BibliographicDate, Identifier, NonEmptyStr, Resource, ResourceId, ResourceKind};
 
 /// Maximum parent-chain hops (journal → issue → article needs two).
 pub const INHERITANCE_MAX_DEPTH: usize = 8;
@@ -55,14 +53,9 @@ pub fn fields_inherited_from(
 ) -> &'static [InheritableField] {
     use InheritableField::*;
     match (child, parent) {
-        (ResourceKind::JournalArticle, ResourceKind::Issue) => &[
-            Volume,
-            IssueNumber,
-            Published,
-            Publisher,
-            Place,
-            Language,
-        ],
+        (ResourceKind::JournalArticle, ResourceKind::Issue) => {
+            &[Volume, IssueNumber, Published, Publisher, Place, Language]
+        }
         (ResourceKind::JournalArticle, ResourceKind::Journal) => {
             &[Publisher, Place, Language, Issns]
         }
@@ -516,11 +509,7 @@ mod tests {
         issue.issue = Some("3".into());
         issue.published = Some(year(2020));
 
-        let article = bare(
-            ResourceKind::JournalArticle,
-            "An Article",
-            Some(issue.id),
-        );
+        let article = bare(ResourceKind::JournalArticle, "An Article", Some(issue.id));
 
         let effective = resolve_effective(&article, &[issue.clone(), journal.clone()]).unwrap();
         assert_eq!(effective.volume.value.as_deref(), Some("12"));
@@ -537,10 +526,7 @@ mod tests {
             }
         );
         assert_eq!(effective.published.value, Some(year(2020)));
-        assert_eq!(
-            effective.language.value.as_deref(),
-            Some("en")
-        );
+        assert_eq!(effective.language.value.as_deref(), Some("en"));
         assert_eq!(
             effective.issns.value.as_ref().map(|v| v[0].as_str()),
             Some("0028-0836")
@@ -566,11 +552,7 @@ mod tests {
         issue.volume = Some("1".into());
         issue.issue = Some("1".into());
 
-        let mut article = bare(
-            ResourceKind::JournalArticle,
-            "Override",
-            Some(issue.id),
-        );
+        let mut article = bare(ResourceKind::JournalArticle, "Override", Some(issue.id));
         article.publisher = Some("Author Press".into());
         article.volume = Some("99".into());
         article.metadata.venue = Some("Custom Venue".into());
@@ -652,11 +634,7 @@ mod tests {
         let mut issue = bare(ResourceKind::Issue, "Vol. 1, no. 1", Some(journal.id));
         issue.doi = Some("10.issue/parent".into());
 
-        let article = bare(
-            ResourceKind::JournalArticle,
-            "Paper",
-            Some(issue.id),
-        );
+        let article = bare(ResourceKind::JournalArticle, "Paper", Some(issue.id));
         assert!(article.doi.is_none());
         assert!(article.pages.is_none());
         assert!(article.accessed.is_none());
@@ -714,11 +692,7 @@ mod tests {
         let mut journal = bare(ResourceKind::Journal, "Nature", None);
         journal.publisher = Some("SN".into());
         let issue = bare(ResourceKind::Issue, "Vol. 1, no. 1", Some(journal.id));
-        let article = bare(
-            ResourceKind::JournalArticle,
-            "Paper",
-            Some(issue.id),
-        );
+        let article = bare(ResourceKind::JournalArticle, "Paper", Some(issue.id));
         let before = article.clone();
         let _ = resolve_effective(&article, &[issue, journal]).unwrap();
         assert_eq!(article, before);
@@ -754,11 +728,7 @@ mod tests {
     fn direct_journal_parent_supplies_container_and_publisher() {
         let mut journal = bare(ResourceKind::Journal, "Science", None);
         journal.publisher = Some("AAAS".into());
-        let article = bare(
-            ResourceKind::JournalArticle,
-            "Letter",
-            Some(journal.id),
-        );
+        let article = bare(ResourceKind::JournalArticle, "Letter", Some(journal.id));
         let effective = resolve_effective(&article, &[journal.clone()]).unwrap();
         assert_eq!(effective.publisher.value.as_deref(), Some("AAAS"));
         assert_eq!(

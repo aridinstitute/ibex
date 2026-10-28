@@ -7,9 +7,9 @@ use oeuvre_app::import::save_draft;
 use oeuvre_app::testing::{MemorySink, MemoryStore};
 use oeuvre_app::{AppState, Command, Outcome, Surface};
 use oeuvre_core::{
-    CreatorRole, EntryProvenance, ImportDraft, ImportEntryDraft, ImportFormat, ImportTempId,
-    Name, NewResource, NonEmptyStr, ResourceKind, SourceProvenance, UnresolvedCreator,
-    IMPORT_PARSER_VERSION,
+    CreatorRole, EntryProvenance, IMPORT_PARSER_VERSION, ImportDraft, ImportEntryDraft,
+    ImportFormat, ImportTempId, Name, NewResource, NonEmptyStr, ResourceKind, SourceProvenance,
+    UnresolvedCreator,
 };
 
 fn book_draft(key: &str, title: &str, author: Name) -> ImportDraft {

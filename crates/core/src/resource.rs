@@ -343,8 +343,7 @@ impl BibliographicDate {
 
     /// Date-only access values must not present as an exact clock time.
     pub fn claims_exact_time(&self) -> bool {
-        self.precision == DatePrecision::DateTime
-            && self.certainty == DateCertainty::Exact
+        self.precision == DatePrecision::DateTime && self.certainty == DateCertainty::Exact
     }
 }
 

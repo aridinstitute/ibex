@@ -111,10 +111,7 @@ pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
         ("Place", detail.place.as_deref()),
         ("Volume", detail.volume.as_deref()),
         ("Issue", detail.issue.as_deref()),
-        (
-            "Pages",
-            detail.pages.as_ref().map(|p| p.as_str()),
-        ),
+        ("Pages", detail.pages.as_ref().map(|p| p.as_str())),
         ("Total pages", detail.total_pages.as_deref()),
         ("Article number", detail.article_number.as_deref()),
         ("Edition", detail.edition.as_deref()),

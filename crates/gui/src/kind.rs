@@ -163,9 +163,10 @@ pub fn kind_family(kind: ResourceKind) -> KindFamily {
         ResourceKind::Webpage | ResourceKind::BlogPost => KindFamily::Web,
         ResourceKind::PodcastEpisode => KindFamily::Audio,
         ResourceKind::Dataset | ResourceKind::ComputerProgram => KindFamily::Data,
-        ResourceKind::Journal | ResourceKind::Issue | ResourceKind::Podcast | ResourceKind::Blog => {
-            KindFamily::Serial
-        }
+        ResourceKind::Journal
+        | ResourceKind::Issue
+        | ResourceKind::Podcast
+        | ResourceKind::Blog => KindFamily::Serial,
     }
 }
 

@@ -58,7 +58,11 @@ async fn multi_article_same_issue_shares_one_journal_and_one_issue() {
           journaltitle={Nature}, volume={12}, number={3}, date={2020}}
     "#;
     let (state, report) = import(source).await;
-    assert_eq!(report.imported.len(), 2, "source entries only; inferred containers excluded");
+    assert_eq!(
+        report.imported.len(),
+        2,
+        "source entries only; inferred containers excluded"
+    );
     assert!(report.conflicted.is_empty());
 
     let rows = all_resources(&state).await;
@@ -89,7 +93,11 @@ async fn multi_article_same_issue_shares_one_journal_and_one_issue() {
             .unwrap()
             .resource_id;
         let article = resource(&state, id).await;
-        assert_eq!(article.parent_id, Some(issue_id), "{key} should parent to the shared issue");
+        assert_eq!(
+            article.parent_id,
+            Some(issue_id),
+            "{key} should parent to the shared issue"
+        );
         assert_eq!(article.kind, ResourceKind::JournalArticle);
     }
 }
@@ -198,7 +206,10 @@ async fn parent_before_child_and_child_before_parent_are_equivalent() {
     assert_eq!(report_a.imported.len() + report_a.reused.len(), 2);
     assert_eq!(report_b.imported.len() + report_b.reused.len(), 2);
 
-    async fn shape(state: &AppState, report: &oeuvre_core::ImportReport) -> (ResourceKind, Option<(Option<String>, Option<String>)>) {
+    async fn shape(
+        state: &AppState,
+        report: &oeuvre_core::ImportReport,
+    ) -> (ResourceKind, Option<(Option<String>, Option<String>)>) {
         let paper_id = report
             .imported
             .iter()
@@ -213,7 +224,10 @@ async fn parent_before_child_and_child_before_parent_are_equivalent() {
         )
     }
 
-    assert_eq!(shape(&state_a, &report_a).await, shape(&state_b, &report_b).await);
+    assert_eq!(
+        shape(&state_a, &report_a).await,
+        shape(&state_b, &report_b).await
+    );
 
     for state in [&state_a, &state_b] {
         let rows = all_resources(state).await;
@@ -263,7 +277,9 @@ async fn chapter_links_to_imported_book_and_series_survives() {
     assert_eq!(book.series_id, chapter.series_id);
     assert!(book.series_id.is_some());
     let Outcome::GetResourceDetail(detail) = state
-        .execute(Command::GetResourceDetail(GetResourceDetail { id: book_id }))
+        .execute(Command::GetResourceDetail(GetResourceDetail {
+            id: book_id,
+        }))
         .await
         .unwrap()
     else {
