@@ -5291,7 +5291,6 @@ impl Render for LibraryApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let delegate = self.table.read(cx).delegate();
         let error = delegate.error().map(str::to_owned);
-        let root_loading = delegate.loading;
         let filters_visible = delegate.filters_visible;
         let filter_active = delegate.filter.is_active();
         let search_input = delegate
@@ -5648,6 +5647,8 @@ impl Render for LibraryApp {
                                     table.header_row_height(height)
                                 });
                             let wrap = div()
+                                .id("library-grid-viewport")
+                                .test_support()
                                 .flex_1()
                                 .min_w_0()
                                 .h_full()
@@ -5695,16 +5696,6 @@ impl Render for LibraryApp {
                         )
                     }),
             )
-            .when(root_loading, |el| {
-                el.child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Loading resources…"),
-                )
-            })
             .when_some(error, |el, error| {
                 el.child(
                     h_flex()
@@ -7179,6 +7170,51 @@ mod cached_grid_interaction_tests {
             assert!(
                 table.read(cx).delegate().grid.expanded.contains(&id),
                 "disclosure must not move an active inline editor"
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn background_loading_keeps_the_grid_viewport_height(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.executor().allow_parking();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let first = ResourceGridPage {
+                    rows: vec![row("Book", false)],
+                    next_offset: Some(1),
+                };
+                let table = cx.new(|cx| {
+                    TableState::new(
+                        LibraryDelegate::new(worker, first, Settings::default()),
+                        window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let idle = window.find("library-grid-viewport").bounds();
+            let table = app.read(cx).table.clone();
+            table.update(cx, |table, cx| {
+                table.delegate_mut().loading = true;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("library-grid-viewport").bounds(),
+                idle,
+                "background page loading must not add a footer or shrink the grid"
             );
         })
         .unwrap();
