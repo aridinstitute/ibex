@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use oeuvre_core::{
-    Creator, NewResource, PersonId, Resource, ResourceCounts, ResourceDetail, ResourceError,
-    ResourceId, ResourcePage, ResourceQuery, ResourceSummary, SeriesId, SortedResourcePage,
-    StoreError, creator_label_name, detail_creator_groups,
+    Creator, InheritanceError, NewResource, PersonId, Resource, ResourceCounts, ResourceDetail,
+    ResourceError, ResourceId, ResourcePage, ResourceQuery, ResourceSummary, SeriesId,
+    SortedResourcePage, StoreError, creator_label_name, detail_creator_groups, resolve_effective,
 };
 
 use crate::event::{self, Event};
@@ -159,6 +159,32 @@ fn map_series_lookup(err: StoreError, id: SeriesId) -> CommandError {
 
 fn map_resource_err(err: ResourceError) -> CommandError {
     CommandError::Invalid(err.to_string())
+}
+
+fn map_inheritance_err(err: InheritanceError) -> CommandError {
+    CommandError::Invalid(err.to_string())
+}
+
+/// Load the parent chain for read-time inheritance (nearest parent first).
+async fn load_ancestors(
+    state: &AppState,
+    resource: &Resource,
+) -> Result<Vec<Resource>, CommandError> {
+    let mut chain = Vec::new();
+    let mut next = resource.parent_id;
+    while let Some(parent_id) = next {
+        if chain.len() >= oeuvre_core::INHERITANCE_MAX_DEPTH {
+            return Err(map_inheritance_err(InheritanceError::DepthExceeded));
+        }
+        let parent = state
+            .store()
+            .get_resource(parent_id)
+            .await
+            .map_err(|e| map_resource_lookup(e, parent_id))?;
+        next = parent.parent_id;
+        chain.push(parent);
+    }
+    Ok(chain)
 }
 
 fn map_store(err: StoreError) -> CommandError {
@@ -576,46 +602,11 @@ impl Handler for GetResourceDetail {
             people.insert(creator.person_id, person.name);
         }
 
-        // Detail views name the container and series rather than their ids,
-        // so resolve both here where a missing row still maps to the id the
-        // caller asked about.
-        let container_title = match resource.parent_id {
-            Some(parent_id) => {
-                let parent = state
-                    .store()
-                    .get_resource(parent_id)
-                    .await
-                    .map_err(|e| map_resource_lookup(e, parent_id))?;
-                // Issue titles are volume/number labels; prefer venue or the
-                // grandparent journal until Task 05 inheritance lands.
-                if parent.kind == oeuvre_core::ResourceKind::Issue {
-                    if let Some(venue) = resource
-                        .metadata
-                        .venue
-                        .as_ref()
-                        .and_then(|v| oeuvre_core::NonEmptyStr::try_new(v).ok())
-                    {
-                        Some(venue)
-                    } else if let Some(journal_id) = parent.parent_id {
-                        let journal = state
-                            .store()
-                            .get_resource(journal_id)
-                            .await
-                            .map_err(|e| map_resource_lookup(e, journal_id))?;
-                        Some(journal.title)
-                    } else {
-                        Some(parent.title)
-                    }
-                } else {
-                    Some(parent.title)
-                }
-            }
-            None => resource
-                .metadata
-                .venue
-                .as_ref()
-                .and_then(|v| oeuvre_core::NonEmptyStr::try_new(v).ok()),
-        };
+        // Central read-time inheritance: allowlisted fields + container title.
+        // Stored child rows are not mutated; GetResource still returns raw data.
+        let ancestors = load_ancestors(state, &resource).await?;
+        let effective = resolve_effective(&resource, &ancestors).map_err(map_inheritance_err)?;
+
         let series_title = match resource.series_id {
             Some(series_id) => {
                 let series = state
@@ -646,22 +637,22 @@ impl Handler for GetResourceDetail {
             subtitle: resource.subtitle,
             title_addon: resource.title_addon,
             short_title: resource.short_title,
-            place: resource.place,
-            volume: resource.volume,
-            issue: resource.issue,
+            place: effective.place.value,
+            volume: effective.volume.value,
+            issue: effective.issue.value,
             pages: resource.pages,
             total_pages: resource.total_pages,
             article_number: resource.article_number,
-            edition: resource.edition,
+            edition: effective.edition.value,
             doi: resource.doi,
             url: resource.url,
             eprint: resource.eprint,
-            isbns: resource.isbns,
-            issns: resource.issns,
+            isbns: effective.isbns.value.unwrap_or_default(),
+            issns: effective.issns.value.unwrap_or_default(),
             isrns: resource.isrns,
             original_date: resource.original_date,
             event_date: resource.event_date,
-            language: resource.language,
+            language: effective.language.value,
             document_type: resource.document_type,
             publication_method: resource.publication_method,
             institution: resource.institution,
@@ -680,10 +671,10 @@ impl Handler for GetResourceDetail {
                         .expect("person fetched above"),
                 )
             }),
-            publisher: resource.publisher,
-            published: resource.published,
+            publisher: effective.publisher.value,
+            published: effective.published.value,
             accessed: resource.accessed,
-            container_title,
+            container_title: effective.container_title.value,
             series_title,
             series_number: resource.series_number,
             favorite: resource.favorite,

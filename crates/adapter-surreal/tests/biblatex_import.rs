@@ -41,8 +41,13 @@ async fn imported_metadata_is_visible_in_library_rows_and_details() {
     else {
         panic!("rows");
     };
+    // Linked import may also create an inferred journal; assert the article row.
+    let article_row = rows
+        .iter()
+        .find(|r| r.kind == ResourceKind::JournalArticle)
+        .expect("imported article");
     assert_eq!(
-        rows[0].container_title.as_ref().map(|s| s.as_str()),
+        article_row.container_title.as_ref().map(|s| s.as_str()),
         Some("Example Journal")
     );
     for sort in [
@@ -64,8 +69,13 @@ async fn imported_metadata_is_visible_in_library_rows_and_details() {
         else {
             panic!("page");
         };
+        let article_row = page
+            .rows
+            .iter()
+            .find(|r| r.kind == ResourceKind::JournalArticle)
+            .expect("imported article");
         assert_eq!(
-            page.rows[0].container_title.as_ref().map(|s| s.as_str()),
+            article_row.container_title.as_ref().map(|s| s.as_str()),
             Some("Example Journal")
         );
     }

@@ -9,7 +9,7 @@ use oeuvre_core::{
     ResourceMetadata, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId,
     SortDirection, SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId, UtcMillis,
     build_collection_forest, collection_descendant_closure, creator_label_name,
-    format_creators_label, published_label_from,
+    format_creators_label, gather_ancestors, published_label_from, resolve_effective,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -284,7 +284,7 @@ struct ListCreatorEdgeRow {
 }
 
 #[derive(Debug, SurrealValue)]
-struct ContainerTitleRow {
+struct InheritanceAncestorRow {
     id: RecordId,
     #[surreal(wrap)]
     title: NonEmptyStr,
@@ -292,6 +292,19 @@ struct ContainerTitleRow {
     kind: ResourceKind,
     #[surreal(default)]
     parent: Option<RecordId>,
+    publisher: Option<String>,
+    #[surreal(wrap)]
+    published: Option<BibliographicDate>,
+    #[surreal(default)]
+    place: Option<String>,
+    #[surreal(default)]
+    volume: Option<String>,
+    #[surreal(default)]
+    issue: Option<String>,
+    #[surreal(default)]
+    edition: Option<String>,
+    #[surreal(default)]
+    language: Option<String>,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -1027,75 +1040,56 @@ impl SurrealStore {
             names.sort_by_key(|(order, _)| *order);
         }
 
-        let mut title_by_id: HashMap<ResourceId, NonEmptyStr> = HashMap::with_capacity(rows.len());
-        let mut kind_by_id: HashMap<ResourceId, ResourceKind> = HashMap::with_capacity(rows.len());
-        let mut parent_of: HashMap<ResourceId, ResourceId> = HashMap::new();
+        // Build ancestor stubs for in-page rows, then fetch off-page parents
+        // (and their parents) with allowlisted fields for read-time inheritance.
+        let mut by_id: HashMap<ResourceId, Resource> = HashMap::with_capacity(rows.len());
         for (row, id) in rows.iter().zip(&ids) {
-            title_by_id.insert(*id, row.title.clone());
-            kind_by_id.insert(*id, row.kind);
-            if let Some(parent) = &row.parent {
-                parent_of.insert(*id, Self::thing_to_resource_id(parent)?);
-            }
+            let parent_id = match &row.parent {
+                Some(thing) => Some(Self::thing_to_resource_id(thing)?),
+                None => None,
+            };
+            by_id.insert(
+                *id,
+                Self::inheritance_stub(
+                    *id,
+                    row.kind,
+                    row.title.clone(),
+                    parent_id,
+                    row.publisher.clone(),
+                    row.published.clone(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    row.venue.clone(),
+                )?,
+            );
         }
 
-        // Parents usually live outside the page (they must exist before their
-        // children), so resolve container titles the page itself missed with
-        // one follow-up query. Include kind/parent so Issue rows can surface
-        // the journal name until Task 05 inheritance.
         let mut missing: Vec<ResourceId> = Vec::new();
         for row in &rows {
             if let Some(parent) = &row.parent {
                 let parent_id = Self::thing_to_resource_id(parent)?;
-                if !title_by_id.contains_key(&parent_id) && !missing.contains(&parent_id) {
+                if !by_id.contains_key(&parent_id) && !missing.contains(&parent_id) {
                     missing.push(parent_id);
                 }
             }
         }
-        if !missing.is_empty() {
-            let parent_things: Vec<RecordId> =
-                missing.iter().map(|id| Self::resource_key(*id)).collect();
-            let mut response = self
-                .db
-                .query("SELECT id, title, kind, parent FROM resource WHERE id IN $ids")
-                .bind(("ids", parent_things))
-                .await
-                .map_err(map_err)?;
-            let title_rows: Vec<ContainerTitleRow> = response.take(0).map_err(map_err)?;
-            let mut grandparents: Vec<ResourceId> = Vec::new();
-            for title_row in title_rows {
-                let id = Self::thing_to_resource_id(&title_row.id)?;
-                title_by_id.insert(id, title_row.title);
-                kind_by_id.insert(id, title_row.kind);
-                if let Some(parent) = title_row.parent {
-                    let parent_id = Self::thing_to_resource_id(&parent)?;
-                    parent_of.insert(id, parent_id);
-                    if title_row.kind == ResourceKind::Issue
-                        && !title_by_id.contains_key(&parent_id)
-                        && !grandparents.contains(&parent_id)
-                    {
-                        grandparents.push(parent_id);
-                    }
-                }
-            }
-            if !grandparents.is_empty() {
-                let gp_things: Vec<RecordId> = grandparents
-                    .iter()
-                    .map(|id| Self::resource_key(*id))
-                    .collect();
-                let mut response = self
-                    .db
-                    .query("SELECT id, title, kind, parent FROM resource WHERE id IN $ids")
-                    .bind(("ids", gp_things))
-                    .await
-                    .map_err(map_err)?;
-                let gp_rows: Vec<ContainerTitleRow> = response.take(0).map_err(map_err)?;
-                for title_row in gp_rows {
-                    let id = Self::thing_to_resource_id(&title_row.id)?;
-                    title_by_id.insert(id, title_row.title);
-                    kind_by_id.insert(id, title_row.kind);
+        self.fetch_inheritance_ancestors(&mut by_id, &missing)
+            .await?;
+
+        // Second hop: issue → journal (and any other missing grandparents).
+        let mut grandparents: Vec<ResourceId> = Vec::new();
+        for resource in by_id.values() {
+            if let Some(parent_id) = resource.parent_id {
+                if !by_id.contains_key(&parent_id) && !grandparents.contains(&parent_id) {
+                    grandparents.push(parent_id);
                 }
             }
         }
+        self.fetch_inheritance_ancestors(&mut by_id, &grandparents)
+            .await?;
 
         let mut summaries = Vec::with_capacity(rows.len());
         for (row, id) in rows.into_iter().zip(ids) {
@@ -1105,28 +1099,15 @@ impl SurrealStore {
                 .into_iter()
                 .map(|(_, name)| name)
                 .collect();
-            let container_title = match row.parent {
-                Some(ref thing) => {
-                    let parent_id = Self::thing_to_resource_id(thing)?;
-                    if kind_by_id.get(&parent_id) == Some(&ResourceKind::Issue) {
-                        row.venue
-                            .as_ref()
-                            .and_then(|v| NonEmptyStr::try_new(v).ok())
-                            .or_else(|| {
-                                parent_of
-                                    .get(&parent_id)
-                                    .and_then(|jid| title_by_id.get(jid).cloned())
-                            })
-                            .or_else(|| title_by_id.get(&parent_id).cloned())
-                    } else {
-                        title_by_id.get(&parent_id).cloned()
-                    }
-                }
-                None => row
-                    .venue
-                    .as_ref()
-                    .and_then(|v| NonEmptyStr::try_new(v).ok()),
-            };
+            let child = by_id
+                .get(&id)
+                .ok_or_else(|| StoreError::new(format!("missing summary stub {id}")))?;
+            let ancestors = gather_ancestors(child, |parent_id| {
+                Ok(by_id.get(&parent_id).cloned())
+            })
+            .map_err(|e| StoreError::invalid(e.to_string()))?;
+            let effective = resolve_effective(child, &ancestors)
+                .map_err(|e| StoreError::invalid(e.to_string()))?;
             let (date_added, date_edited) =
                 Self::recorded_dates(row.date_added, row.date_edited, id);
             summaries.push(ResourceSummary {
@@ -1134,14 +1115,123 @@ impl SurrealStore {
                 kind: row.kind,
                 title: row.title,
                 creators_label: format_creators_label(&names),
-                published_label: published_label_from(row.published.as_ref()),
-                publisher: row.publisher,
-                container_title,
+                published_label: published_label_from(effective.published.value.as_ref()),
+                publisher: effective.publisher.value,
+                container_title: effective.container_title.value,
                 date_added,
                 date_edited,
             });
         }
         Ok(summaries)
+    }
+
+    fn inheritance_stub(
+        id: ResourceId,
+        kind: ResourceKind,
+        title: NonEmptyStr,
+        parent_id: Option<ResourceId>,
+        publisher: Option<String>,
+        published: Option<BibliographicDate>,
+        place: Option<String>,
+        volume: Option<String>,
+        issue: Option<String>,
+        edition: Option<String>,
+        language: Option<String>,
+        venue: Option<String>,
+    ) -> Result<Resource, StoreError> {
+        let mut metadata = ResourceMetadata::default();
+        metadata.venue = venue;
+        Resource::try_new(
+            id,
+            NewResource {
+                kind,
+                title,
+                creators: vec![],
+                publisher,
+                published,
+                accessed: None,
+                parent_id,
+                series_id: None,
+                series_number: None,
+                tag_ids: vec![],
+                collection_ids: vec![],
+                metadata,
+                subtitle: None,
+                title_addon: None,
+                short_title: None,
+                place,
+                volume,
+                issue,
+                pages: None,
+                total_pages: None,
+                article_number: None,
+                edition,
+                doi: None,
+                url: None,
+                eprint: None,
+                isbns: vec![],
+                issns: vec![],
+                isrns: vec![],
+                original_date: None,
+                event_date: None,
+                language,
+                document_type: None,
+                publication_method: None,
+                institution: None,
+                organization: None,
+                school: None,
+                abstract_text: None,
+                keywords: vec![],
+            },
+        )
+        .map_err(|e| StoreError::invalid(e.to_string()))
+    }
+
+    async fn fetch_inheritance_ancestors(
+        &self,
+        by_id: &mut HashMap<ResourceId, Resource>,
+        missing: &[ResourceId],
+    ) -> Result<(), StoreError> {
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let parent_things: Vec<RecordId> =
+            missing.iter().map(|id| Self::resource_key(*id)).collect();
+        let mut response = self
+            .db
+            .query(
+                "SELECT id, title, kind, parent, publisher, published, place, volume, issue, \
+                 edition, language FROM resource WHERE id IN $ids",
+            )
+            .bind(("ids", parent_things))
+            .await
+            .map_err(map_err)?;
+        let rows: Vec<InheritanceAncestorRow> = response.take(0).map_err(map_err)?;
+        for row in rows {
+            let id = Self::thing_to_resource_id(&row.id)?;
+            let parent_id = match row.parent {
+                Some(thing) => Some(Self::thing_to_resource_id(&thing)?),
+                None => None,
+            };
+            by_id.insert(
+                id,
+                Self::inheritance_stub(
+                    id,
+                    row.kind,
+                    row.title,
+                    parent_id,
+                    row.publisher,
+                    row.published,
+                    row.place,
+                    row.volume,
+                    row.issue,
+                    row.edition,
+                    row.language,
+                    None,
+                )?,
+            );
+        }
+        Ok(())
     }
 }
 
