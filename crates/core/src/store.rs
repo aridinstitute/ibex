@@ -178,6 +178,20 @@ pub trait Store: Send + Sync + 'static {
     /// `container_title` are read-time projections from edges / parent links.
     async fn list_resources(&self) -> Result<Vec<ResourceSummary>, StoreError>;
 
+    /// Full resource rows for import identity/container seeding.
+    ///
+    /// Default walks [`Self::list_resources`] + [`Self::get_resource`] (N+1).
+    /// Adapters should override with a batched read. Creators may be empty when
+    /// the caller only needs identifiers and container fields.
+    async fn list_resources_for_import(&self) -> Result<Vec<Resource>, StoreError> {
+        let rows = self.list_resources().await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(self.get_resource(row.id).await?);
+        }
+        Ok(out)
+    }
+
     /// Newest-first page of summary rows, starting strictly below `before`
     /// (`None` starts at the newest row).
     ///

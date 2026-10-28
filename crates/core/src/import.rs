@@ -38,6 +38,7 @@ pub mod codes {
     pub const ENTRY_FAILED: &str = "import.entry_failed";
     pub const ENTRY_NOT_ATTEMPTED: &str = "import.entry_not_attempted";
     pub const ALREADY_COMMITTED: &str = "import.already_committed";
+    pub const CANCELLED: &str = "import.cancelled";
 }
 
 /// Stable fingerprint for one import source (format + bytes). Citekeys are
@@ -47,6 +48,7 @@ pub fn source_fingerprint(format: ImportFormat, source: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     let tag = match format {
         ImportFormat::Biblatex => b"biblatex\0" as &[u8],
+        ImportFormat::CslJson => b"csl-json\0" as &[u8],
         ImportFormat::Test => b"test\0" as &[u8],
     };
     for byte in tag.iter().copied().chain(source.as_bytes().iter().copied()) {
@@ -81,6 +83,8 @@ impl fmt::Display for ImportTempId {
 #[serde(rename_all = "snake_case")]
 pub enum ImportFormat {
     Biblatex,
+    /// Citation Style Language JSON (citeproc-js item array or single item).
+    CslJson,
     /// In-memory draft for tests proving a second parser can reuse save.
     Test,
 }
@@ -461,4 +465,12 @@ impl ImportPreview {
     pub fn needs_review(&self) -> bool {
         self.entries.iter().any(EntryPreview::needs_review)
     }
+}
+
+/// Progress snapshot emitted between committed import units.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImportProgress {
+    pub completed_entries: usize,
+    pub total_entries: usize,
+    pub last_entry_key: Option<String>,
 }

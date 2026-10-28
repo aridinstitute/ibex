@@ -7,7 +7,8 @@ mod series;
 mod tag;
 
 pub use biblatex_import::{
-    ImportBiblatex, ImportIssue, ImportedEntry, PreviewBiblatex, SaveImportDraft,
+    ImportBiblatex, ImportCslJson, ImportIssue, ImportedEntry, PreviewBiblatex, PreviewCslJson,
+    SaveImportDraft,
 };
 pub use oeuvre_core::{ImportChoices, ImportPreview, ImportReport};
 pub use collection::{
@@ -58,7 +59,9 @@ pub enum Command {
     DeleteCollection(DeleteCollection),
     CreateResource(CreateResource),
     ImportBiblatex(ImportBiblatex),
+    ImportCslJson(ImportCslJson),
     PreviewBiblatex(PreviewBiblatex),
+    PreviewCslJson(PreviewCslJson),
     SaveImportDraft(SaveImportDraft),
     UpdateResource(UpdateResource),
     SetResourceFavorite(SetResourceFavorite),
@@ -94,7 +97,9 @@ pub enum Outcome {
     DeleteCollection(DeletedCollection),
     CreateResource(Resource),
     ImportBiblatex(ImportReport),
+    ImportCslJson(ImportReport),
     PreviewBiblatex(ImportPreview),
+    PreviewCslJson(ImportPreview),
     SaveImportDraft(ImportReport),
     UpdateResource(Resource),
     SetResourceFavorite(Resource),
@@ -157,7 +162,9 @@ impl Command {
             Command::DeleteCollection(_) => DeleteCollection::NAME,
             Command::CreateResource(_) => CreateResource::NAME,
             Command::ImportBiblatex(_) => ImportBiblatex::NAME,
+            Command::ImportCslJson(_) => ImportCslJson::NAME,
             Command::PreviewBiblatex(_) => PreviewBiblatex::NAME,
+            Command::PreviewCslJson(_) => PreviewCslJson::NAME,
             Command::SaveImportDraft(_) => SaveImportDraft::NAME,
             Command::UpdateResource(_) => UpdateResource::NAME,
             Command::SetResourceFavorite(_) => SetResourceFavorite::NAME,
@@ -210,7 +217,9 @@ pub(crate) async fn dispatch(
         Command::DeleteCollection(c) => drive(c, state, ev).await,
         Command::CreateResource(c) => drive(c, state, ev).await,
         Command::ImportBiblatex(c) => drive(c, state, ev).await,
+        Command::ImportCslJson(c) => drive(c, state, ev).await,
         Command::PreviewBiblatex(c) => drive(c, state, ev).await,
+        Command::PreviewCslJson(c) => drive(c, state, ev).await,
         Command::SaveImportDraft(c) => drive(c, state, ev).await,
         Command::UpdateResource(c) => drive(c, state, ev).await,
         Command::SetResourceFavorite(c) => drive(c, state, ev).await,

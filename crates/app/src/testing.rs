@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use oeuvre_core::{
@@ -226,6 +227,10 @@ pub struct MemoryStore {
     /// When set, the Nth subsequent `create_imported_resource` fails (0-based).
     import_fail_at: Arc<Mutex<Option<usize>>>,
     import_create_count: Arc<Mutex<usize>>,
+    get_resource_calls: Arc<AtomicUsize>,
+    find_persons_by_name_calls: Arc<AtomicUsize>,
+    list_persons_calls: Arc<AtomicUsize>,
+    list_resources_for_import_calls: Arc<AtomicUsize>,
 }
 
 impl MemoryStore {
@@ -240,7 +245,37 @@ impl MemoryStore {
             created: Arc::new(Mutex::new(Vec::new())),
             import_fail_at: Arc::new(Mutex::new(None)),
             import_create_count: Arc::new(Mutex::new(0)),
+            get_resource_calls: Arc::new(AtomicUsize::new(0)),
+            find_persons_by_name_calls: Arc::new(AtomicUsize::new(0)),
+            list_persons_calls: Arc::new(AtomicUsize::new(0)),
+            list_resources_for_import_calls: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    pub fn reset_query_counts(&self) {
+        self.get_resource_calls.store(0, AtomicOrdering::SeqCst);
+        self.find_persons_by_name_calls
+            .store(0, AtomicOrdering::SeqCst);
+        self.list_persons_calls.store(0, AtomicOrdering::SeqCst);
+        self.list_resources_for_import_calls
+            .store(0, AtomicOrdering::SeqCst);
+    }
+
+    pub fn get_resource_count(&self) -> usize {
+        self.get_resource_calls.load(AtomicOrdering::SeqCst)
+    }
+
+    pub fn find_persons_by_name_count(&self) -> usize {
+        self.find_persons_by_name_calls.load(AtomicOrdering::SeqCst)
+    }
+
+    pub fn list_persons_count(&self) -> usize {
+        self.list_persons_calls.load(AtomicOrdering::SeqCst)
+    }
+
+    pub fn list_resources_for_import_count(&self) -> usize {
+        self.list_resources_for_import_calls
+            .load(AtomicOrdering::SeqCst)
     }
 
     /// Fail the Nth `create_imported_resource` call (0-based) with a store error.
@@ -630,6 +665,8 @@ impl Store for MemoryStore {
     }
 
     async fn find_persons_by_name(&self, name: &Name) -> Result<Vec<Person>, StoreError> {
+        self.find_persons_by_name_calls
+            .fetch_add(1, AtomicOrdering::SeqCst);
         let state = self.people.lock().expect("MemoryStore lock");
         let key = name.key();
         let Some(ids) = state.by_name.get(&key) else {
@@ -642,6 +679,8 @@ impl Store for MemoryStore {
     }
 
     async fn list_persons(&self) -> Result<Vec<Person>, StoreError> {
+        self.list_persons_calls
+            .fetch_add(1, AtomicOrdering::SeqCst);
         let state = self.people.lock().expect("MemoryStore lock");
         Ok(state.by_id.values().cloned().collect())
     }
@@ -1117,6 +1156,8 @@ impl Store for MemoryStore {
     }
 
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError> {
+        self.get_resource_calls
+            .fetch_add(1, AtomicOrdering::SeqCst);
         let row = self
             .resources
             .lock()
@@ -1234,6 +1275,18 @@ impl Store for MemoryStore {
         // projection path serves both reads.
         let page = self.list_resources_page(None, u32::MAX).await?;
         Ok(page.rows)
+    }
+
+    async fn list_resources_for_import(&self) -> Result<Vec<Resource>, StoreError> {
+        self.list_resources_for_import_calls
+            .fetch_add(1, AtomicOrdering::SeqCst);
+        let resources = self.resources.lock().expect("MemoryStore lock");
+        let mut out = Vec::with_capacity(resources.len());
+        for (id, row) in resources.iter() {
+            // Identity/container seeding does not need creator edges.
+            out.push(row.to_resource(*id)?);
+        }
+        Ok(out)
     }
 
     async fn resource_counts(&self) -> Result<ResourceCounts, StoreError> {
