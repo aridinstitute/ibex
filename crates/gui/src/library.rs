@@ -1819,6 +1819,23 @@ enum SidebarNav {
     Collection(CollectionId),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum SidebarSection {
+    Kinds,
+    Tags,
+    Collections,
+}
+
+impl SidebarSection {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Kinds => "kinds",
+            Self::Tags => "tags",
+            Self::Collections => "collections",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ImportState {
     Idle,
@@ -1842,6 +1859,8 @@ pub struct LibraryApp {
     counts: Option<ResourceCounts>,
     counts_error: Option<String>,
     counts_gen: u64,
+    /// Independent disclosure state for the three sidebar sections.
+    collapsed_sections: HashSet<SidebarSection>,
     /// Library tags for the left-nav section, ordered by text.
     tags: Vec<Tag>,
     /// Nested collections for the left-nav tree.
@@ -2610,6 +2629,7 @@ impl LibraryApp {
             counts: None,
             counts_error: None,
             counts_gen: 0,
+            collapsed_sections: HashSet::new(),
             tags: Vec::new(),
             collection_forest: Vec::new(),
             expanded_collections: HashSet::new(),
@@ -3160,6 +3180,9 @@ impl LibraryApp {
     /// New collection at the same tree level as the current selection (sibling),
     /// or a root when no collection is selected.
     fn create_sidebar_collection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Keep the newly created row and inline rename visible even when the
+        // collection list was collapsed before the + button was pressed.
+        self.collapsed_sections.remove(&SidebarSection::Collections);
         // Sibling of the selected row: same tree parent (None → new root).
         let parent_id = match self.table.read(cx).delegate().filter.collection {
             Some(_) => self.collection_focus_parent,
@@ -4770,6 +4793,35 @@ impl LibraryApp {
             })
     }
 
+    fn sidebar_section_button(&self, section: SidebarSection, cx: &mut Context<Self>) -> Button {
+        let collapsed = self.collapsed_sections.contains(&section);
+        Button::new(SharedString::from(format!(
+            "toggle-section-{}",
+            section.key()
+        )))
+        .ghost()
+        .xsmall()
+        .icon(if collapsed {
+            Icon::new(IconName::ChevronRight).xsmall()
+        } else {
+            Icon::new(IconName::ChevronDown).xsmall()
+        })
+        .tooltip(match (section, collapsed) {
+            (SidebarSection::Kinds, true) => "Expand Kinds",
+            (SidebarSection::Kinds, false) => "Collapse Kinds",
+            (SidebarSection::Tags, true) => "Expand Tags",
+            (SidebarSection::Tags, false) => "Collapse Tags",
+            (SidebarSection::Collections, true) => "Expand Collections",
+            (SidebarSection::Collections, false) => "Collapse Collections",
+        })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if !this.collapsed_sections.remove(&section) {
+                this.collapsed_sections.insert(section);
+            }
+            cx.notify();
+        }))
+    }
+
     fn render_left_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let filter = self.table.read(cx).delegate().filter.clone();
         let selected_kind = filter.kind;
@@ -4780,12 +4832,21 @@ impl LibraryApp {
             && filter.tag.is_none()
             && filter.collection.is_none();
         let favorites_selected = filter.favorite == Some(true);
-        let collection_rows =
-            visible_collection_rows(&self.collection_forest, &self.expanded_collections);
+        let collection_rows = if self
+            .collapsed_sections
+            .contains(&SidebarSection::Collections)
+        {
+            Vec::new()
+        } else {
+            visible_collection_rows(&self.collection_forest, &self.expanded_collections)
+        };
         let kinds = ResourceKind::ALL
             .into_iter()
             .enumerate()
             .filter(|(_, kind)| {
+                if self.collapsed_sections.contains(&SidebarSection::Kinds) {
+                    return false;
+                }
                 self.counts.as_ref().is_none_or(|counts| {
                     counts.by_kind.get(kind).copied().unwrap_or(0) > 0
                         || selected_kind == Some(*kind)
@@ -4820,12 +4881,18 @@ impl LibraryApp {
                 ),
             )
             .child(
-                div()
+                h_flex()
                     .pt_4()
                     .pb_1()
                     .px_2()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Kinds"),
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Kinds"),
+                    )
+                    .child(self.sidebar_section_button(SidebarSection::Kinds, cx)),
             )
             .children(kinds.into_iter().map(|(index, kind)| {
                 self.sidebar_row(
@@ -4841,12 +4908,18 @@ impl LibraryApp {
                 )
             }))
             .child(
-                div()
+                h_flex()
                     .pt_4()
                     .pb_1()
                     .px_2()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Tags"),
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Tags"),
+                    )
+                    .child(self.sidebar_section_button(SidebarSection::Tags, cx)),
             )
             .children(self.tags.iter().enumerate().filter_map(|(index, tag)| {
                 let count = self
@@ -4854,7 +4927,9 @@ impl LibraryApp {
                     .as_ref()
                     .map(|counts| counts.by_tag.get(&tag.id).copied().unwrap_or(0))
                     .unwrap_or(0);
-                if count == 0 && selected_tag != Some(tag.id) {
+                if self.collapsed_sections.contains(&SidebarSection::Tags)
+                    || (count == 0 && selected_tag != Some(tag.id))
+                {
                     return None;
                 }
                 Some(self.sidebar_row(
@@ -4906,7 +4981,8 @@ impl LibraryApp {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.create_sidebar_collection(window, cx)
                             })),
-                    ),
+                    )
+                    .child(self.sidebar_section_button(SidebarSection::Collections, cx)),
             )
             .children(collection_rows.into_iter().enumerate().map(
                 |(index, (collection, depth, has_children, tree_parent))| {
@@ -7785,6 +7861,128 @@ mod cached_grid_interaction_tests {
                 idle,
                 "background page loading must not add a footer or shrink the grid"
             );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn sidebar_sections_toggle_independently_without_clearing_filter(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.executor().allow_parking();
+        let store = oeuvre_app::testing::MemoryStore::new();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(oeuvre_app::seed::seed_demo_library(&store, 8))
+            .unwrap();
+        let (tags, forest) = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use oeuvre_core::Store as _;
+            (
+                store.list_tags().await.unwrap(),
+                store.list_collection_forest().await.unwrap(),
+            )
+        });
+        let tag = tags.into_iter().next().unwrap();
+        let first_tag = tag.id;
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(store)
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let first = worker
+            .list_grid_page_blocking(
+                oeuvre_core::ResourceGridParent::Roots,
+                oeuvre_core::ResourceQuery::newest_first(),
+                0,
+                50,
+            )
+            .unwrap();
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(
+                gpui_kit::WindowOptions {
+                    window_bounds: Some(gpui_kit::WindowBounds::Windowed(gpui_kit::Bounds {
+                        origin: Default::default(),
+                        size: gpui_kit::size(gpui_kit::px(1100.), gpui_kit::px(700.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    let table = cx.new(|cx| {
+                        TableState::new(
+                            LibraryDelegate::new(
+                                worker,
+                                first,
+                                Settings {
+                                    left_sidebar_width: Some(240.),
+                                    right_sidebar_width: Some(360.),
+                                    ..Settings::default()
+                                },
+                            ),
+                            window,
+                            cx,
+                        )
+                    });
+                    cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+                },
+            )
+            .unwrap()
+        });
+        cx.run_until_parked();
+        app.update(cx, |app, cx| {
+            app.counts = Some(oeuvre_core::ResourceCounts {
+                all_items: 1,
+                by_kind: [(ResourceKind::Book, 1)].into(),
+                by_tag: [(first_tag, 1)].into(),
+                ..Default::default()
+            });
+            app.tags = vec![tag];
+            app.collection_forest = forest;
+            cx.notify();
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("toggle-section-kinds").is_some());
+            let kinds_arrow = window.find("toggle-section-kinds").bounds().center();
+            let tags_arrow = window.find("toggle-section-tags").bounds().center();
+            let collections_arrow = window.find("toggle-section-collections").bounds().center();
+            let new_collection = window.find("new-collection").bounds().center();
+            assert!((kinds_arrow.x - tags_arrow.x).abs() < gpui_kit::px(2.));
+            assert!((tags_arrow.x - collections_arrow.x).abs() < gpui_kit::px(2.));
+            assert!(new_collection.x < collections_arrow.x);
+            assert!((new_collection.y - collections_arrow.y).abs() < gpui_kit::px(2.));
+            let tags_before = window.find("toggle-section-tags").bounds().top();
+            app.update(cx, |app, cx| {
+                app.table.update(cx, |table, _| {
+                    table.delegate_mut().filter.kind = Some(ResourceKind::Book);
+                });
+            });
+            window.click("toggle-section-kinds", cx);
+            let tags_collapsed = window.find("toggle-section-tags").bounds().top();
+            assert!(
+                tags_collapsed < tags_before,
+                "hiding kind rows should move Tags upward"
+            );
+            assert_eq!(
+                app.read(cx).table.read(cx).delegate().filter.kind,
+                Some(ResourceKind::Book)
+            );
+            let collections_before = window.find("toggle-section-collections").bounds().top();
+            window.click("toggle-section-tags", cx);
+            assert!(window.find("toggle-section-collections").bounds().top() < collections_before);
+            window.click("toggle-section-collections", cx);
+            assert!(window.try_find("new-collection").is_some());
+            assert_eq!(app.read(cx).collapsed_sections.len(), 3);
+            window.click("new-collection", cx);
+            assert!(
+                !app.read(cx)
+                    .collapsed_sections
+                    .contains(&super::SidebarSection::Collections)
+            );
+            window.click("toggle-section-kinds", cx);
+            assert!(window.find("toggle-section-tags").bounds().top() > tags_collapsed);
+            window.click("toggle-section-tags", cx);
+            assert!(app.read(cx).collapsed_sections.is_empty());
         })
         .unwrap();
     }
