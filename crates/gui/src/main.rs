@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use oeuvre_adapter_surreal::SurrealStore;
 use oeuvre_app::{AppState, Surface};
+use oeuvre_core::{ResourceGridParent, ResourceQuery};
 
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::table::TableState;
@@ -68,7 +69,12 @@ fn run() -> Result<()> {
     // Fetch the first page before the window opens so the grid renders full
     // immediately; scrolling drives every later page.
     let first = worker
-        .list_page_blocking(None, PAGE_SIZE)
+        .list_grid_page_blocking(
+            ResourceGridParent::Roots,
+            ResourceQuery::newest_first(),
+            0,
+            PAGE_SIZE,
+        )
         .map_err(|e| anyhow::anyhow!("load first page: {e}"))?;
 
     gpui_kit::application()

@@ -1,19 +1,25 @@
 //! Store access for the UI: one OS thread owns a tokio runtime and serves
 //! page requests over channels, so gpui's executor never runs Surreal I/O.
 
+use oeuvre_app::command::ListResourceGridPage;
+#[cfg(test)]
+use oeuvre_app::command::ListResourcesPage;
 use oeuvre_app::command::{
     AddCollectionParent, CountResources, CreateCollection, CreatePerson, CreateResource, CreateTag,
     DeleteCollection, FindTagByText, GetResource, GetResourceDetail, ListCollectionForest,
-    ListPersons, ListResourcesPage, ListResourcesQueryPage, ListTags, RemoveCollectionParent,
-    RenameCollection, SetResourceFavorite, UpdateResource,
+    ListPersons, ListResourcesQueryPage, ListTags, RemoveCollectionParent, RenameCollection,
+    SetResourceFavorite, UpdateResource,
 };
 use oeuvre_app::command::{ImportBiblatex, ImportReport, PreviewBiblatex};
 use oeuvre_app::{AppState, Command, Outcome};
+#[cfg(test)]
+use oeuvre_core::ResourcePage;
 use oeuvre_core::{
     Collection, CollectionId, CollectionTreeNode, ImportChoices, ImportPreview, Name, NewResource,
-    NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId, ResourcePage,
-    ResourceQuery, SortedResourcePage, Tag,
+    NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId, ResourceQuery,
+    SortedResourcePage, Tag,
 };
+use oeuvre_core::{ResourceGridPage, ResourceGridParent};
 use std::{io::Read as _, path::PathBuf};
 use tokio::sync::oneshot;
 
@@ -34,6 +40,7 @@ pub enum DbRequest {
         choices: ImportChoices,
         reply: oneshot::Sender<Result<ImportReport, String>>,
     },
+    #[cfg(test)]
     ListPage {
         before: Option<ResourceId>,
         limit: u32,
@@ -44,6 +51,13 @@ pub enum DbRequest {
         offset: u64,
         limit: u32,
         reply: oneshot::Sender<Result<SortedResourcePage, String>>,
+    },
+    ListGridPage {
+        parent: ResourceGridParent,
+        query: ResourceQuery,
+        offset: u64,
+        limit: u32,
+        reply: oneshot::Sender<Result<ResourceGridPage, String>>,
     },
     CountResources {
         reply: oneshot::Sender<Result<ResourceCounts, String>>,
@@ -208,6 +222,7 @@ impl DbWorker {
                                 .await;
                                 let _ = reply.send(result);
                             }
+                            #[cfg(test)]
                             DbRequest::ListPage {
                                 before,
                                 limit,
@@ -250,6 +265,29 @@ impl DbWorker {
                                             Err("unexpected outcome from list_resources_query_page"
                                                 .into())
                                         }
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::ListGridPage {
+                                parent,
+                                query,
+                                offset,
+                                limit,
+                                reply,
+                            } => {
+                                let result = state
+                                    .execute(Command::ListResourceGridPage(ListResourceGridPage {
+                                        parent,
+                                        query,
+                                        offset,
+                                        limit,
+                                    }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::ResourceGridPage(page) => Ok(page),
+                                        _ => Err("unexpected outcome from list_resource_grid_page"
+                                            .into()),
                                     });
                                 let _ = reply.send(result);
                             }
@@ -506,6 +544,7 @@ impl DbWorker {
     }
 
     /// Request a page and wait for the reply off the UI thread.
+    #[cfg(test)]
     pub async fn list_page(
         &self,
         before: Option<ResourceId>,
@@ -541,6 +580,50 @@ impl DbWorker {
             })
             .map_err(|_| "db worker stopped".to_string())?;
         rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    /// Request one tree level through the app command boundary.
+    pub async fn list_grid_page(
+        &self,
+        parent: ResourceGridParent,
+        query: ResourceQuery,
+        offset: u64,
+        limit: u32,
+    ) -> Result<ResourceGridPage, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::ListGridPage {
+                parent,
+                query,
+                offset,
+                limit,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    /// Bootstrap a tree level before the UI's async context exists.
+    pub fn list_grid_page_blocking(
+        &self,
+        parent: ResourceGridParent,
+        query: ResourceQuery,
+        offset: u64,
+        limit: u32,
+    ) -> Result<ResourceGridPage, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::ListGridPage {
+                parent,
+                query,
+                offset,
+                limit,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.blocking_recv()
             .map_err(|_| "db worker dropped the request".to_string())?
     }
 
@@ -750,8 +833,8 @@ impl DbWorker {
             .map_err(|_| "db worker dropped the request".to_string())?
     }
 
-    /// Same request for the window bootstrap, where no async context exists
-    /// on the main thread yet.
+    /// A synchronous listing/barrier for worker and GUI tests.
+    #[cfg(test)]
     pub fn list_page_blocking(
         &self,
         before: Option<ResourceId>,
@@ -791,6 +874,99 @@ mod tests {
     use oeuvre_app::Surface;
     use oeuvre_app::testing::MemoryStore;
     use oeuvre_core::published_label_from;
+
+    #[tokio::test]
+    async fn worker_lists_grid_roots_and_children_with_metadata() {
+        let state = AppState::builder(MemoryStore::new())
+            .surface(Surface::Test)
+            .build();
+        let worker = DbWorker::spawn(state);
+        let book = NewResource {
+            kind: oeuvre_core::ResourceKind::Book,
+            title: oeuvre_core::NonEmptyStr::try_new("Grid book").expect("title non-empty"),
+            creators: vec![],
+            publisher: None,
+            published: None,
+            accessed: None,
+            parent_id: None,
+            series_id: None,
+            series_number: None,
+            tag_ids: vec![],
+            collection_ids: vec![],
+            metadata: Default::default(),
+            subtitle: None,
+            title_addon: None,
+            short_title: None,
+            place: None,
+            volume: None,
+            issue: None,
+            pages: None,
+            total_pages: None,
+            article_number: None,
+            edition: None,
+            doi: None,
+            url: None,
+            eprint: None,
+            isbns: vec![],
+            issns: vec![],
+            isrns: vec![],
+            original_date: None,
+            event_date: None,
+            language: None,
+            document_type: None,
+            publication_method: None,
+            institution: None,
+            organization: None,
+            school: None,
+            abstract_text: None,
+            keywords: vec![],
+        };
+        let chapter = NewResource {
+            kind: oeuvre_core::ResourceKind::BookSection,
+            title: NonEmptyStr::try_new("Grid chapter").unwrap(),
+            ..book.clone()
+        };
+        let book = worker.create_resource(book).await.unwrap();
+        let chapter = worker
+            .create_resource(NewResource {
+                parent_id: Some(book.id),
+                ..chapter
+            })
+            .await
+            .unwrap();
+
+        let roots = worker
+            .list_grid_page(
+                oeuvre_core::ResourceGridParent::Roots,
+                ResourceQuery::newest_first(),
+                0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(roots.rows.len(), 1);
+        assert_eq!(roots.rows[0].summary.id, book.id);
+        assert_eq!(roots.rows[0].summary.title.as_str(), "Grid book");
+        assert!(roots.rows[0].has_children);
+        assert_eq!(roots.next_offset, None);
+
+        let children = std::thread::spawn(move || {
+            worker.list_grid_page_blocking(
+                oeuvre_core::ResourceGridParent::Children(book.id),
+                ResourceQuery::newest_first(),
+                0,
+                10,
+            )
+        })
+        .join()
+        .unwrap()
+        .unwrap();
+        assert_eq!(children.rows.len(), 1);
+        assert_eq!(children.rows[0].summary.id, chapter.id);
+        assert_eq!(children.rows[0].summary.title.as_str(), "Grid chapter");
+        assert!(!children.rows[0].has_children);
+        assert_eq!(children.next_offset, None);
+    }
 
     #[tokio::test]
     async fn worker_imports_a_file_and_returns_report_with_persisted_rows() {

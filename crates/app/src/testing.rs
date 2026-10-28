@@ -1364,6 +1364,74 @@ impl Store for MemoryStore {
         let next_offset = (end < ids.len()).then(|| offset.saturating_add(u64::from(limit)));
         Ok(SortedResourcePage { rows, next_offset })
     }
+
+    async fn list_resource_grid_page(
+        &self,
+        parent: oeuvre_core::ResourceGridParent,
+        query: &ResourceQuery,
+        offset: u64,
+        limit: u32,
+    ) -> Result<oeuvre_core::ResourceGridPage, StoreError> {
+        use oeuvre_core::{ResourceGridPage, ResourceGridParent, ResourceGridRow};
+        if limit == 0 {
+            return Err(StoreError::invalid("page limit must be at least 1"));
+        }
+
+        let mut ids: Vec<_> = self
+            .resources
+            .lock()
+            .expect("MemoryStore lock")
+            .keys()
+            .copied()
+            .collect();
+        if let Some((field, direction)) = query.sort {
+            ids = self.sorted_ids(field, direction)?;
+        } else {
+            ids.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+        }
+        let mut visible: HashSet<_> = self
+            .filter_ids(ids.clone(), &query.filter)?
+            .into_iter()
+            .collect();
+        let parents: HashMap<_, _> = self
+            .resources
+            .lock()
+            .expect("MemoryStore lock")
+            .iter()
+            .map(|(id, row)| (*id, row.parent_id))
+            .collect();
+        let mut frontier: Vec<_> = visible.iter().copied().collect();
+        while let Some(id) = frontier.pop() {
+            if let Some(Some(parent)) = parents.get(&id) {
+                if visible.insert(*parent) {
+                    frontier.push(*parent);
+                }
+            }
+        }
+        let parent_id = match parent {
+            ResourceGridParent::Roots => None,
+            ResourceGridParent::Children(id) => Some(id),
+        };
+        ids.retain(|id| visible.contains(id) && parents.get(id) == Some(&parent_id));
+        let start = usize::try_from(offset).unwrap_or(usize::MAX).min(ids.len());
+        let end = start.saturating_add(limit as usize).min(ids.len());
+        let summaries = self.summaries_in_order(&ids[start..end])?;
+        let visible_parents: HashSet<_> = visible
+            .iter()
+            .filter_map(|id| parents.get(id).copied().flatten())
+            .collect();
+        let rows = summaries
+            .into_iter()
+            .map(|summary| ResourceGridRow {
+                has_children: visible_parents.contains(&summary.id),
+                summary,
+            })
+            .collect();
+        Ok(ResourceGridPage {
+            rows,
+            next_offset: (end < ids.len()).then_some(end as u64),
+        })
+    }
 }
 
 pub struct StubStore {

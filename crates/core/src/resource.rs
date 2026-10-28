@@ -574,6 +574,25 @@ pub struct SortedResourcePage {
     pub next_offset: Option<u64>,
 }
 
+/// Sibling set requested by the nested bibliographic grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceGridParent {
+    Roots,
+    Children(ResourceId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ResourceGridRow {
+    pub summary: ResourceSummary,
+    pub has_children: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ResourceGridPage {
+    pub rows: Vec<ResourceGridRow>,
+    pub next_offset: Option<u64>,
+}
+
 /// Creators of one role for a [`ResourceDetail`]: every credited name,
 /// bibliography order. Names stay a list; a shell stacks or joins them at
 /// display time (summaries truncate with `"et al."`; details show them all).
