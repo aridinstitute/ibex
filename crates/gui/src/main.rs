@@ -11,6 +11,7 @@ mod metadata;
 mod settings;
 mod tags;
 mod theme;
+mod theme_editor;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

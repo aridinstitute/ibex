@@ -63,7 +63,9 @@ use crate::inline_edit::{
 use crate::kind::{kind_color, kind_label, kind_symbol};
 use crate::settings::{Settings, ThemeColorTarget};
 use crate::tags::{TagChoice, TagDelegate};
+use crate::theme_editor::{ThemeEditor, ThemeEditorEvent};
 use gpui_kit::component::Disableable as _;
+use gpui_kit::component::popover::Popover;
 use oeuvre_app::command::ImportReport;
 
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
@@ -1851,6 +1853,8 @@ pub struct LibraryApp {
     table: Entity<TableState<LibraryDelegate>>,
     /// App data directory holding config.toml, where settings persist.
     settings_dir: PathBuf,
+    theme_editor: Entity<ThemeEditor>,
+    theme_editor_open: bool,
     /// Year boxes bracketing the published window; either side alone
     /// bounds the listing, so both re-key on every edit.
     published_from_input: Entity<InputState>,
@@ -2492,6 +2496,15 @@ impl LibraryApp {
         // unless a Combobox menu was open (List in the stack): that Esc only
         // dismisses the menu.
         cx.observe_keystrokes(|this, event, window, cx| {
+            if this.theme_editor_open
+                || event
+                    .context_stack
+                    .iter()
+                    .any(|ctx| ctx.contains("ThemeColorEditor"))
+            {
+                this.last_escape_at = None;
+                return;
+            }
             if event
                 .context_stack
                 .iter()
@@ -2617,12 +2630,63 @@ impl LibraryApp {
         )
         .detach();
 
+        let theme_editor = cx.new(|cx| ThemeEditor::new(window, cx));
+        cx.subscribe_in(
+            &theme_editor,
+            window,
+            |app, editor, event: &ThemeEditorEvent, window, cx| {
+                let mode = if cx.theme().is_dark() {
+                    ThemeMode::Dark
+                } else {
+                    ThemeMode::Light
+                };
+                match event {
+                    ThemeEditorEvent::Preview(theme) if app.theme_editor_open => {
+                        crate::theme::apply(mode, theme, cx);
+                        cx.notify();
+                    }
+                    ThemeEditorEvent::Save(theme) if app.theme_editor_open => {
+                        let started = Instant::now();
+                        let mut settings = app.table.read(cx).delegate().settings.clone();
+                        settings.theme = theme.clone();
+                        let result = settings.save(&app.settings_dir);
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "level": "INFO", "command": "save_theme_colors", "surface": "gui",
+                                "mode": if mode.is_dark() { "dark" } else { "light" },
+                                "duration_us": started.elapsed().as_micros() as u64,
+                                "status": if result.is_ok() { "ok" } else { "error" },
+                                "error": result.as_ref().err().map(|error| error.to_string()),
+                            })
+                        );
+                        match result {
+                            Ok(()) => {
+                                app.table.update(cx, |table, cx| {
+                                    table.delegate_mut().settings.theme = theme.clone();
+                                    cx.notify();
+                                });
+                                app.set_theme_editor_open(false, window, cx);
+                            }
+                            Err(error) => editor.update(cx, |editor, cx| {
+                                editor.failed(format!("Could not save colors: {error}"), cx)
+                            }),
+                        }
+                    }
+                    ThemeEditorEvent::Cancel => app.set_theme_editor_open(false, window, cx),
+                    _ => {}
+                }
+            },
+        )
+        .detach();
         Self {
             import_state: ImportState::Idle,
             import_gen: 0,
             import_task: None,
             table,
             settings_dir,
+            theme_editor,
+            theme_editor_open: false,
             published_from_input,
             published_to_input,
             detail_open: true,
@@ -2924,25 +2988,49 @@ impl LibraryApp {
         });
     }
 
+    fn set_theme_editor_open(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if open == self.theme_editor_open {
+            return;
+        }
+        let mode = if cx.theme().is_dark() {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
+        };
+        let settings = self.table.read(cx).delegate().settings.theme.clone();
+        if open {
+            if window.has_active_dialog(cx)
+                || self.import_state != ImportState::Idle
+                || self.edit.is_some()
+                || self.has_inline(cx)
+            {
+                return;
+            }
+            let accent = cx.theme().primary;
+            let secondary = workspace_gradient_stops(
+                mode.is_dark(),
+                accent,
+                settings.color(mode, ThemeColorTarget::Secondary),
+            )
+            .1;
+            self.theme_editor.update(cx, |editor, cx| {
+                editor.begin(mode, settings, [accent, secondary.into()], window, cx)
+            });
+        } else {
+            crate::theme::apply(mode, &settings, cx);
+        }
+        self.last_escape_at = None;
+        self.theme_editor_open = open;
+        if !open {
+            self.focus_table(window, cx);
+        }
+        cx.notify();
+    }
+
     fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_palette(None, window, cx);
-    }
-
-    fn open_theme_color(
-        &mut self,
-        target: ThemeColorTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_palette(Some(target), window, cx);
-    }
-
-    fn open_palette(
-        &mut self,
-        color: Option<ThemeColorTarget>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+        if self.theme_editor_open {
+            return;
+        }
         if self.import_state != ImportState::Idle {
             window.push_notification("Wait for the bibliography import to finish", cx);
             return;
@@ -3002,9 +3090,6 @@ impl LibraryApp {
                 CommandPalette::new_for_targets(targets.clone(), grouped, window, cx)
             };
             palette.set_colors(colors.0, colors.1);
-            if let Some(target) = color {
-                palette.open_color(target, window, cx);
-            }
             palette
         });
         cx.subscribe_in(
@@ -5648,6 +5733,23 @@ fn sidebar_kind_label(kind: ResourceKind) -> String {
 
 const LIGHT_GRADIENT_END: u32 = 0xd9dde5;
 const DARK_GRADIENT_END: u32 = 0x262c35;
+// CSS angles rotate clockwise from up: 225° points toward the bottom-left.
+const WORKSPACE_GRADIENT_ANGLE: f32 = 225.;
+
+/// Mirror the pinned GPUI renderer's aspect-corrected linear-gradient projection.
+fn workspace_gradient_fraction(x: f32, y: f32, width: f32, height: f32) -> f32 {
+    let width = width.max(1.);
+    let height = height.max(1.);
+    let (mut dy, mut dx) = (WORKSPACE_GRADIENT_ANGLE - 90.).to_radians().sin_cos();
+    if width > height {
+        dy *= height / width;
+    } else {
+        dx *= width / height;
+    }
+    let distance = ((x - width / 2.) * dx + (y - height / 2.) * dy) / dx.hypot(dy);
+    let span = if dx.abs() > dy.abs() { width } else { height };
+    (0.5 + distance / span).clamp(0., 1.)
+}
 const ISLAND_RADIUS: Pixels = px(16.);
 
 fn mix_rgb(from: Rgba, to: Rgba, amount: f32) -> Rgba {
@@ -5689,13 +5791,14 @@ fn island_corner_mask(stops: (Rgba, Rgba)) -> impl IntoElement {
             let x1 = x0 + f32::from(bounds.size.width);
             let y0 = f32::from(bounds.origin.y);
             let y1 = y0 + f32::from(bounds.size.height);
-            let width = f32::from(window.viewport_size().width).max(1.);
+            let width = f32::from(window.viewport_size().width);
+            let height = f32::from(window.viewport_size().height);
             for right in [false, true] {
                 let x = if right { x1 } else { x0 };
-                let t = (x / width).clamp(0., 1.);
-                let color = Hsla::from(mix_rgb(start, end, t));
                 for bottom in [false, true] {
                     let y = if bottom { y1 } else { y0 };
+                    let t = workspace_gradient_fraction(x, y, width, height);
+                    let color = Hsla::from(mix_rgb(start, end, t));
                     let sx = if right { -1. } else { 1. };
                     let sy = if bottom { -1. } else { 1. };
                     let at = |u: f32, v: f32| point(px(x + sx * u), px(y + sy * v));
@@ -5728,7 +5831,12 @@ impl Render for LibraryApp {
             .map(|inputs| inputs.title.clone());
         let danger = cx.theme().danger;
         let settings = &delegate.settings;
-        let secondary = settings.theme.color(
+        let theme_preferences = if self.theme_editor_open {
+            self.theme_editor.read(cx).draft()
+        } else {
+            &settings.theme
+        };
+        let secondary = theme_preferences.color(
             if cx.theme().is_dark() {
                 ThemeMode::Dark
             } else {
@@ -5769,14 +5877,14 @@ impl Render for LibraryApp {
 
         let stops = workspace_gradient_stops(cx.theme().is_dark(), cx.theme().primary, secondary);
         let background = linear_gradient(
-            90.,
+            WORKSPACE_GRADIENT_ANGLE,
             linear_color_stop(Hsla::from(stops.0), 0.),
             linear_color_stop(Hsla::from(stops.1), 1.),
         );
 
         v_flex()
             .size_full()
-            .bg(background.clone())
+            .bg(background)
             .text_color(cx.theme().foreground)
             .on_drag_move(cx.listener(Self::resize_sidebar))
             .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, _, cx| {
@@ -5886,7 +5994,8 @@ impl Render for LibraryApp {
                     .h(px(40.))
                     .pl_0()
                     .border_0()
-                    .bg(background)
+                    // Share the viewport backdrop instead of restarting the gradient here.
+                    .bg(transparent_black())
                     .child(
                         h_flex()
                             .w_full()
@@ -6018,21 +6127,33 @@ impl Render for LibraryApp {
                                                 cx.stop_propagation()
                                             })
                                             .child(
-                                                Button::new("set-accent-color")
-                                                    .ghost()
-                                                    .label("●")
-                                                    .text_color(cx.theme().primary)
-                                                    .tooltip("Set accent color")
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            cx.stop_propagation();
-                                                            this.open_theme_color(
-                                                                ThemeColorTarget::Accent,
-                                                                window,
-                                                                cx,
+                                                Popover::new("theme-colors-popover")
+                                                    .anchor(Anchor::TopRight)
+                                                    .open(self.theme_editor_open)
+                                                    .track_focus(
+                                                        &self.theme_editor.focus_handle(cx),
+                                                    )
+                                                    .on_open_change(cx.listener(
+                                                        |this, open: &bool, window, cx| {
+                                                            this.set_theme_editor_open(
+                                                                *open, window, cx,
                                                             );
                                                         },
-                                                    )),
+                                                    ))
+                                                    .trigger(
+                                                        Button::new("set-accent-color")
+                                                            .ghost()
+                                                            .label("●")
+                                                            .text_color(cx.theme().primary)
+                                                            .tooltip("Theme colors")
+                                                            .disabled(
+                                                                self.import_state
+                                                                    != ImportState::Idle
+                                                                    || self.edit.is_some()
+                                                                    || self.has_inline(cx),
+                                                            ),
+                                                    )
+                                                    .child(self.theme_editor.clone()),
                                             )
                                             .child(
                                                 Button::new("toggle-theme")
@@ -6798,12 +6919,41 @@ mod palette_persistence_tests {
     }
 
     #[gpui_kit::test]
-    fn toolbar_and_palette_edit_only_the_active_mode(cx: &mut gpui_kit::TestAppContext) {
+    fn workspace_paints_one_continuous_gradient_across_toolbar_and_body(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
         use gpui_kit::component::ActiveTheme as _;
-        use gpui_kit::component::ThemeMode;
         use gpui_kit::test::TestWindowExt as _;
-        use gpui_kit::{Hsla, rgb};
+        use gpui_kit::{Hsla, linear_color_stop, linear_gradient};
         let dir = tempfile::tempdir().unwrap();
+        let (handle, _) = open_theme_fixture(cx, &dir);
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let stops = super::workspace_gradient_stops(false, cx.theme().primary, None);
+            let background = linear_gradient(
+                super::WORKSPACE_GRADIENT_ANGLE,
+                linear_color_stop(Hsla::from(stops.0), 0.),
+                linear_color_stop(Hsla::from(stops.1), 1.),
+            );
+            let gradients = window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| quad.background == background)
+                .count();
+            assert_eq!(
+                gradients, 1,
+                "Only the viewport may paint the workspace gradient; the toolbar must reveal it"
+            );
+        })
+        .unwrap();
+    }
+
+    fn open_theme_fixture(
+        cx: &mut gpui_kit::TestAppContext,
+        dir: &tempfile::TempDir,
+    ) -> (gpui_kit::AnyWindowHandle, gpui_kit::Entity<LibraryApp>) {
+        use gpui_kit::component::ThemeMode;
         cx.executor().allow_parking();
         let worker = DbWorker::spawn(
             oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
@@ -6821,7 +6971,7 @@ mod palette_persistence_tests {
                 50,
             )
             .unwrap();
-        let (handle, app) = cx.update(|cx| {
+        cx.update(|cx| {
             gpui_kit::init(cx);
             crate::theme::apply(
                 ThemeMode::Light,
@@ -6844,7 +6994,75 @@ mod palette_persistence_tests {
                 cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
             })
             .unwrap()
-        });
+        })
+    }
+
+    #[gpui_kit::test]
+    fn theme_popover_dismissal_discards_preview_without_writing(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::component::ActiveTheme as _;
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{Hsla, rgb};
+        for dismissal in ["escape", "cancel", "outside"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (handle, app) = open_theme_fixture(cx, &dir);
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("set-accent-color", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            app.read_with(cx, |app, cx| {
+                assert_eq!(
+                    app.theme_editor.read(cx).draft(),
+                    &crate::settings::ThemeSettings::default()
+                );
+            });
+            cx.update_window(handle, |_, window, cx| {
+                window.click("theme-swatch-Blue-500", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                assert_eq!(cx.theme().primary, Hsla::from(rgb(0x3b82f6)));
+                match dismissal {
+                    "escape" => window.press("escape", cx),
+                    "cancel" => window.click("theme-color-cancel", cx),
+                    _ => window.click("toggle-theme", cx),
+                }
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                assert!(!app.read(cx).theme_editor_open);
+                assert_eq!(
+                    cx.theme().primary,
+                    Hsla::from(rgb(if dismissal == "outside" {
+                        0x0a84ff
+                    } else {
+                        0x0064ff
+                    }))
+                );
+                assert_eq!(
+                    app.read(cx).table.read(cx).delegate().settings,
+                    Settings::default()
+                );
+                window.render_frame(cx);
+                assert!(window.try_find("theme-color-editor").is_none());
+            })
+            .unwrap();
+            assert!(!dir.path().join("config.toml").exists());
+        }
+    }
+
+    #[gpui_kit::test]
+    fn theme_popover_rejects_invalid_hex_and_keeps_failed_saves_retryable(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::component::ActiveTheme as _;
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{Hsla, rgb};
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, app) = open_theme_fixture(cx, &dir);
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             window.click("set-accent-color", cx);
@@ -6852,20 +7070,118 @@ mod palette_persistence_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| {
-            assert!(window.has_active_dialog(cx));
+            window.click("theme-color-hex", cx);
             window.press("cmd-a", cx);
-            window.input("#FF8800", cx);
-            window.press("enter", cx);
+            window.input("invalid", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.click("theme-secondary-tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.click("theme-swatch-Cyan-400", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.click("theme-color-save", cx);
+            assert!(app.read(cx).theme_editor_open);
+            window.click("theme-accent-tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(!dir.path().join("config.toml").exists());
+        let blocked = dir.path().join("not-a-directory");
+        std::fs::write(&blocked, "blocked").unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.click("theme-swatch-Orange-500", cx);
+            app.update(cx, |app, _| app.settings_dir = blocked);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.click("theme-color-save", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            assert!(app.read(cx).theme_editor_open);
+            assert_eq!(
+                app.read(cx).table.read(cx).delegate().settings,
+                Settings::default()
+            );
+            window.render_frame(cx);
+            assert!(window.try_find("theme-color-error").is_some());
+            app.update(cx, |app, _| app.settings_dir = dir.path().to_path_buf());
+            window.click("theme-color-save", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let saved = Settings::load(dir.path());
+        assert_eq!(saved.theme.light.accent.as_deref(), Some("#F97316"));
+        assert_eq!(saved.theme.light.secondary.as_deref(), Some("#22D3EE"));
+        cx.update_window(handle, |_, _, cx| {
+            assert!(!app.read(cx).theme_editor_open);
+            assert_eq!(cx.theme().primary, Hsla::from(rgb(0xf97316)));
+        })
+        .unwrap();
+    }
+    #[gpui_kit::test]
+    fn toolbar_and_palette_edit_only_the_active_mode(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::component::ActiveTheme as _;
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{Hsla, rgb};
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, app) = open_theme_fixture(cx, &dir);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("set-accent-color", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            assert!(!window.has_active_dialog(cx));
+            window.render_frame(cx);
+            assert!(window.try_find("theme-color-tabs").is_some());
+            window.click("theme-swatch-Orange-500", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(cx.theme().primary, Hsla::from(rgb(0xf97316)));
+            assert_eq!(Settings::load(dir.path()), Settings::default());
+            window.click("theme-secondary-tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.click("theme-swatch-Cyan-400", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.click("theme-accent-tab", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            let editor = app.read(cx).theme_editor.read(cx);
+            assert_eq!(editor.draft().light.accent.as_deref(), Some("#F97316"));
+            assert_eq!(editor.draft().light.secondary.as_deref(), Some("#22D3EE"));
+            window.click("theme-color-save", cx);
         })
         .unwrap();
         cx.run_until_parked();
         assert_eq!(
             Settings::load(dir.path()).theme.light.accent.as_deref(),
-            Some("#FF8800")
+            Some("#F97316")
         );
         cx.update_window(handle, |_, window, cx| {
             assert!(!window.has_active_dialog(cx));
-            assert_eq!(cx.theme().primary, Hsla::from(rgb(0xff8800)));
+            assert_eq!(cx.theme().primary, Hsla::from(rgb(0xf97316)));
             window.click("toggle-theme", cx);
         })
         .unwrap();
@@ -6895,8 +7211,8 @@ mod palette_persistence_tests {
         cx.run_until_parked();
         let saved = Settings::load(dir.path());
         assert_eq!(saved.theme.dark.secondary.as_deref(), Some("#102030"));
-        assert_eq!(saved.theme.light.accent.as_deref(), Some("#FF8800"));
-        assert_eq!(saved.theme.light.secondary, None);
+        assert_eq!(saved.theme.light.accent.as_deref(), Some("#F97316"));
+        assert_eq!(saved.theme.light.secondary.as_deref(), Some("#22D3EE"));
         assert_eq!(saved.theme.dark.accent, None);
         cx.update_window(handle, |_, window, cx| {
             window.click("toggle-theme", cx);
@@ -6905,7 +7221,7 @@ mod palette_persistence_tests {
         cx.run_until_parked();
         cx.update_window(handle, |_, _, cx| {
             assert!(!cx.theme().is_dark());
-            assert_eq!(cx.theme().primary, Hsla::from(rgb(0xff8800)));
+            assert_eq!(cx.theme().primary, Hsla::from(rgb(0xf97316)));
         })
         .unwrap();
         app.read_with(cx, |app, cx| {
@@ -7060,6 +7376,23 @@ mod sidebar_selection_tests {
 
 #[cfg(test)]
 mod gradient_tests {
+
+    #[test]
+    fn workspace_gradient_starts_top_right_and_ends_bottom_left() {
+        use super::{WORKSPACE_GRADIENT_ANGLE, workspace_gradient_fraction};
+        assert_eq!(WORKSPACE_GRADIENT_ANGLE, 225.);
+        for (width, height) in [(800., 600.), (600., 800.), (800., 800.)] {
+            assert!(workspace_gradient_fraction(width, 0., width, height) < 1e-6);
+            assert!((workspace_gradient_fraction(0., height, width, height) - 1.).abs() < 1e-6);
+            assert!(
+                (workspace_gradient_fraction(width / 2., height / 2., width, height) - 0.5).abs()
+                    < 1e-6
+            );
+        }
+        // Match GPUI's aspect-corrected projection so corner masks use the backdrop's color.
+        assert!((workspace_gradient_fraction(0., 0., 800., 600.) - 0.675).abs() < 1e-6);
+        assert!((workspace_gradient_fraction(800., 600., 800., 600.) - 0.325).abs() < 1e-6);
+    }
 
     #[test]
     fn gradient_runs_from_exact_accent_to_exact_secondary_in_both_modes() {
