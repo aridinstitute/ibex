@@ -1,13 +1,14 @@
 //! Oeuvre's light and dark palettes: the kit's neutral surfaces with the
-//! macOS system blue as the one accent.
+//! configurable accents over the kit's neutral surfaces.
 
+use crate::settings::{ThemeColorTarget, ThemeSettings};
 use gpui_kit::component::{Theme, ThemeColor, ThemeMode};
 use gpui_kit::{App, px, rgb, rgba};
 
-pub fn apply(mode: ThemeMode, cx: &mut App) {
+pub fn apply(mode: ThemeMode, settings: &ThemeSettings, cx: &mut App) {
     Theme::change(mode, None, cx);
     Theme::update(cx, |theme| {
-        theme.colors = palette(mode, theme.colors);
+        theme.colors = configured_palette(mode, theme.colors, settings);
         // Root sets the window rem size from this, so every rem-based size
         // in the kit shrinks with it.
         theme.font_size = px(11.);
@@ -52,6 +53,61 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     colors.table_active_border = blue;
     colors.list_active = tint;
     colors.list_active_border = blue;
+    colors
+}
+
+fn configured_palette(mode: ThemeMode, colors: ThemeColor, settings: &ThemeSettings) -> ThemeColor {
+    let mut colors = palette(mode, colors);
+    let Some(value) = settings.color(ThemeColorTarget::Accent) else {
+        return colors;
+    };
+    let accent: gpui_kit::Hsla = rgb(value).into();
+    let focus = gpui_kit::Hsla {
+        l: (accent.l * 0.75).clamp(0., 1.),
+        ..accent
+    };
+    let hover = gpui_kit::Hsla {
+        l: if mode.is_dark() {
+            (accent.l + 0.1).min(1.)
+        } else {
+            accent.l * 0.88
+        },
+        ..accent
+    };
+    colors.primary = accent;
+    colors.primary_hover = hover;
+    colors.primary_active = focus;
+    // Choose the higher-contrast text, including for very bright custom accents.
+    let channel = |value: f32| {
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let color = rgb(value);
+    let luminance =
+        0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b);
+    colors.primary_foreground = rgb(if luminance > 0.179 {
+        0x000000
+    } else {
+        0xffffff
+    })
+    .into();
+    colors.button_primary = accent;
+    colors.button_primary_hover = hover;
+    colors.button_primary_active = focus;
+    colors.button_primary_foreground = colors.primary_foreground;
+    colors.ring = focus;
+    colors.caret = accent;
+    colors.link = accent;
+    colors.link_hover = hover;
+    colors.link_active = focus;
+    colors.selection = accent.opacity(if mode.is_dark() { 0.30 } else { 0.28 });
+    colors.table_active = accent.opacity(if mode.is_dark() { 0.20 } else { 0.15 });
+    colors.table_active_border = accent;
+    colors.list_active = colors.selection;
+    colors.list_active_border = accent;
     colors
 }
 
@@ -117,6 +173,24 @@ mod tests {
             ] {
                 assert_eq!(after, before, "{field} must keep the neutral base");
             }
+        }
+    }
+
+    #[test]
+    fn configured_accent_updates_both_modes_without_recoloring_surfaces() {
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let settings = crate::settings::ThemeSettings {
+                accent: Some("#FFFF00".into()),
+                secondary: Some("#102030".into()),
+            };
+            let colors = super::configured_palette(mode, neutral_base(), &settings);
+            assert_eq!(colors.primary, Hsla::from(rgb(0xffff00)));
+            assert_eq!(colors.button_primary, colors.primary);
+            assert_eq!(colors.primary_foreground, Hsla::from(rgb(0x000000)));
+            assert_eq!(colors.table_active.h, colors.primary.h);
+            assert!(colors.table_active.a < 0.25);
+            assert_eq!(colors.background, neutral_base().background);
+            assert_eq!(colors.accent, neutral_base().accent);
         }
     }
 }

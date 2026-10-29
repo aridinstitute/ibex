@@ -45,7 +45,7 @@ use oeuvre_core::{
 
 use crate::collections::{CollectionChoice, CollectionDelegate, flatten_collections};
 use crate::command_palette::{
-    CommandPalette, IdentifierRequest, PaletteRequest, ToggleResourceGrouping,
+    CommandPalette, IdentifierRequest, PaletteRequest, SetThemeColor, ToggleResourceGrouping,
 };
 use crate::db::DbWorker;
 use crate::detail::{
@@ -61,7 +61,7 @@ use crate::inline_edit::{
     creators_badge_trigger, person_items, person_name_from_query, selected_person_ids,
 };
 use crate::kind::{kind_color, kind_label, kind_symbol};
-use crate::settings::Settings;
+use crate::settings::{Settings, ThemeColorTarget};
 use crate::tags::{TagChoice, TagDelegate};
 use gpui_kit::component::Disableable as _;
 use oeuvre_app::command::ImportReport;
@@ -2925,6 +2925,24 @@ impl LibraryApp {
     }
 
     fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette(None, window, cx);
+    }
+
+    fn open_theme_color(
+        &mut self,
+        target: ThemeColorTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_palette(Some(target), window, cx);
+    }
+
+    fn open_palette(
+        &mut self,
+        color: Option<ThemeColorTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.import_state != ImportState::Idle {
             window.push_notification("Wait for the bibliography import to finish", cx);
             return;
@@ -2954,13 +2972,79 @@ impl LibraryApp {
             }
         };
         let grouped = self.table.read(cx).delegate().grouped;
+        let preferences = &self.table.read(cx).delegate().settings.theme;
+        let secondary = preferences
+            .color(ThemeColorTarget::Secondary)
+            .map(rgb)
+            .unwrap_or_else(|| {
+                workspace_gradient_stops(cx.theme().is_dark(), cx.theme().primary, None).1
+            });
+        let hex = |color: Rgba| {
+            format!(
+                "#{:02X}{:02X}{:02X}",
+                (color.r * 255.).round() as u8,
+                (color.g * 255.).round() as u8,
+                (color.b * 255.).round() as u8
+            )
+        };
+        let colors = (hex(cx.theme().primary.to_rgb()), hex(secondary));
         let palette = cx.new(|cx| {
-            if targets.len() <= 1 {
+            let mut palette = if targets.len() <= 1 {
                 CommandPalette::new(targets.first().copied(), grouped, window, cx)
             } else {
                 CommandPalette::new_for_targets(targets.clone(), grouped, window, cx)
+            };
+            palette.set_colors(colors.0, colors.1);
+            if let Some(target) = color {
+                palette.open_color(target, window, cx);
             }
+            palette
         });
+        cx.subscribe_in(
+            &palette,
+            window,
+            |app, palette, request: &SetThemeColor, window, cx| {
+                let started = std::time::Instant::now();
+                let mut settings = app.table.read(cx).delegate().settings.clone();
+                let result =
+                    settings.set_theme_color(request.target, &request.hex, &app.settings_dir);
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "level": "INFO", "command": "set_theme_color", "surface": "gui",
+                        "target": format!("{:?}", request.target), "color": request.hex,
+                        "duration_us": started.elapsed().as_micros() as u64,
+                        "status": if result.is_ok() { "ok" } else { "error" },
+                        "error": result.as_ref().err().map(|error| error.to_string()),
+                    })
+                );
+                match result {
+                    Ok(()) => {
+                        crate::theme::apply(
+                            if cx.theme().is_dark() {
+                                ThemeMode::Dark
+                            } else {
+                                ThemeMode::Light
+                            },
+                            &settings.theme,
+                            cx,
+                        );
+                        app.table.update(cx, |table, cx| {
+                            table.delegate_mut().settings = settings;
+                            cx.notify();
+                        });
+                        window.close_dialog(cx);
+                        app.focus_table(window, cx);
+                        cx.notify();
+                    }
+                    Err(error) => palette.update(cx, |palette, cx| {
+                        palette
+                            .identifier_failed(format!("Could not save theme color: {error}"), cx)
+                    }),
+                }
+            },
+        )
+        .detach();
         cx.subscribe_in(
             &palette,
             window,
@@ -5529,13 +5613,13 @@ fn favorite_star_color(dark: bool) -> Hsla {
     rgb(if dark { 0xf5c542 } else { 0xd4a017 }).into()
 }
 
-fn toggle_theme(cx: &mut App) {
+fn toggle_theme(settings: &crate::settings::ThemeSettings, cx: &mut App) {
     let mode = if cx.theme().is_dark() {
         ThemeMode::Light
     } else {
         ThemeMode::Dark
     };
-    crate::theme::apply(mode, cx);
+    crate::theme::apply(mode, settings, cx);
 }
 
 fn sidebar_kind_label(kind: ResourceKind) -> String {
@@ -5546,8 +5630,8 @@ fn sidebar_kind_label(kind: ResourceKind) -> String {
     }
 }
 
-const LIGHT_GRADIENT: (u32, u32) = (0xeae8e2, 0xd9dde5);
-const DARK_GRADIENT: (u32, u32) = (0x292722, 0x262c35);
+const LIGHT_GRADIENT_END: u32 = 0xd9dde5;
+const DARK_GRADIENT_END: u32 = 0x262c35;
 const ISLAND_RADIUS: Pixels = px(16.);
 
 fn mix_rgb(from: Rgba, to: Rgba, amount: f32) -> Rgba {
@@ -5559,12 +5643,21 @@ fn mix_rgb(from: Rgba, to: Rgba, amount: f32) -> Rgba {
     }
 }
 
-/// The far edge borrows the active theme's accent, not a second hard-coded blue.
+/// Fade from the exact accent to secondary (or an accent-tinted default endpoint).
 /// Share the stops with the corner mask so its cutouts match the backdrop.
-fn workspace_gradient_stops(dark: bool, accent: Hsla) -> (Rgba, Rgba) {
-    let (start, end) = if dark { DARK_GRADIENT } else { LIGHT_GRADIENT };
+fn workspace_gradient_stops(dark: bool, accent: Hsla, secondary: Option<u32>) -> (Rgba, Rgba) {
+    let end = if dark {
+        DARK_GRADIENT_END
+    } else {
+        LIGHT_GRADIENT_END
+    };
     let amount = if dark { 0.16 } else { 0.12 };
-    (rgb(start), mix_rgb(rgb(end), accent.to_rgb(), amount))
+    (
+        accent.to_rgb(),
+        secondary
+            .map(rgb)
+            .unwrap_or_else(|| mix_rgb(rgb(end), accent.to_rgb(), amount)),
+    )
 }
 
 /// GPUI's overflow clip is rectangular. Paint just the four regions outside
@@ -5619,6 +5712,7 @@ impl Render for LibraryApp {
             .map(|inputs| inputs.title.clone());
         let danger = cx.theme().danger;
         let settings = &delegate.settings;
+        let secondary = settings.theme.color(ThemeColorTarget::Secondary);
         let (left_target, right_target) = sidebar_target_widths(
             window.viewport_size().width,
             self.left_panel_open.then_some(settings.left_sidebar_width),
@@ -5650,7 +5744,7 @@ impl Render for LibraryApp {
         // The accent caret stays visible on the pale selection tint.
         let editing = self.has_inline(cx);
 
-        let stops = workspace_gradient_stops(cx.theme().is_dark(), cx.theme().primary);
+        let stops = workspace_gradient_stops(cx.theme().is_dark(), cx.theme().primary, secondary);
         let background = linear_gradient(
             90.,
             linear_color_stop(Hsla::from(stops.0), 0.),
@@ -5900,14 +5994,22 @@ impl Render for LibraryApp {
                                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                                 cx.stop_propagation()
                                             })
-                                            .on_click(
-                                                cx.listener(|_, _, _window, cx| toggle_theme(cx)),
-                                            )
                                             .child(
-                                                div()
-                                                    .size(px(10.))
-                                                    .rounded_full()
-                                                    .bg(cx.theme().primary),
+                                                Button::new("set-accent-color")
+                                                    .ghost()
+                                                    .label("●")
+                                                    .text_color(cx.theme().primary)
+                                                    .tooltip("Set accent color")
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            cx.stop_propagation();
+                                                            this.open_theme_color(
+                                                                ThemeColorTarget::Accent,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
                                             )
                                             .child(
                                                 Button::new("toggle-theme")
@@ -5924,10 +6026,19 @@ impl Render for LibraryApp {
                                                     } else {
                                                         "Switch to dark theme"
                                                     })
-                                                    .on_click(cx.listener(|_, _, _window, cx| {
-                                                        cx.stop_propagation();
-                                                        toggle_theme(cx);
-                                                    })),
+                                                    .on_click(cx.listener(
+                                                        |this, _, _window, cx| {
+                                                            cx.stop_propagation();
+                                                            let settings = this
+                                                                .table
+                                                                .read(cx)
+                                                                .delegate()
+                                                                .settings
+                                                                .theme
+                                                                .clone();
+                                                            toggle_theme(&settings, cx);
+                                                        },
+                                                    )),
                                             ),
                                     ),
                             ),
@@ -6662,6 +6773,106 @@ mod palette_persistence_tests {
         })
         .unwrap();
     }
+
+    #[gpui_kit::test]
+    fn toolbar_and_palette_save_theme_colors_and_keep_them_when_toggling(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::component::ActiveTheme as _;
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{Hsla, rgb};
+        let dir = tempfile::tempdir().unwrap();
+        cx.executor().allow_parking();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let first = worker
+            .list_grid_page_blocking(
+                oeuvre_core::ResourceGridParent::Roots,
+                oeuvre_core::ResourceQuery {
+                    sort: None,
+                    filter: oeuvre_core::ResourceFilter::none(),
+                },
+                0,
+                50,
+            )
+            .unwrap();
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.bind_keys([KeyBinding::new(
+                "cmd-k",
+                OpenCommandPalette,
+                Some("LibraryApp"),
+            )]);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let table = cx.new(|cx| {
+                    TableState::new(
+                        LibraryDelegate::new(worker, first, Settings::default()),
+                        window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("set-accent-color", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            assert!(window.has_active_dialog(cx));
+            window.press("cmd-a", cx);
+            window.input("#FF8800", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            Settings::load(dir.path()).theme.accent.as_deref(),
+            Some("#FF8800")
+        );
+        cx.update_window(handle, |_, window, cx| {
+            assert!(!window.has_active_dialog(cx));
+            assert_eq!(cx.theme().primary, Hsla::from(rgb(0xff8800)));
+            window.click("toggle-theme", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            assert_eq!(cx.theme().primary, Hsla::from(rgb(0xff8800)));
+            window.press("cmd-k", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.input("secondary", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.press("cmd-a", cx);
+            window.input("#102030", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let saved = Settings::load(dir.path());
+        assert_eq!(saved.theme.secondary.as_deref(), Some("#102030"));
+        assert_eq!(saved.theme.accent.as_deref(), Some("#FF8800"));
+        app.read_with(cx, |app, cx| {
+            assert_eq!(app.table.read(cx).delegate().settings, saved);
+        });
+    }
 }
 
 #[cfg(test)]
@@ -6810,15 +7021,33 @@ mod sidebar_selection_tests {
 
 #[cfg(test)]
 mod gradient_tests {
+
+    #[test]
+    fn gradient_runs_from_exact_accent_to_exact_secondary_in_both_modes() {
+        for dark in [false, true] {
+            for accent in [0x0064ff, 0xff8800] {
+                let (start, end) =
+                    workspace_gradient_stops(dark, Hsla::from(rgb(accent)), Some(0x102030));
+                let expected = rgb(accent);
+                // HSL→RGB conversion has small floating-point rounding differences.
+                assert!((start.r - expected.r).abs() < 1e-6);
+                assert!((start.g - expected.g).abs() < 1e-6);
+                assert!((start.b - expected.b).abs() < 1e-6);
+                assert_eq!(end, rgb(0x102030));
+            }
+        }
+    }
     use super::workspace_gradient_stops;
     use gpui_kit::{Hsla, rgb};
 
     #[test]
     fn workspace_gradient_follows_the_accent_in_both_themes() {
         for dark in [false, true] {
-            let (start, blue_end) = workspace_gradient_stops(dark, Hsla::from(rgb(0x0064ff)));
-            let (_, red_end) = workspace_gradient_stops(dark, Hsla::from(rgb(0xff6400)));
-            assert_eq!(start, rgb(if dark { 0x292722 } else { 0xeae8e2 }));
+            let (start, blue_end) = workspace_gradient_stops(dark, Hsla::from(rgb(0x0064ff)), None);
+            let (_, red_end) = workspace_gradient_stops(dark, Hsla::from(rgb(0xff6400)), None);
+            assert!(start.r.abs() < 1e-6);
+            assert!((start.g - 100. / 255.).abs() < 1e-6);
+            assert!((start.b - 1.).abs() < 1e-6);
             assert!(blue_end.b > red_end.b);
             assert!(red_end.r > blue_end.r);
         }
