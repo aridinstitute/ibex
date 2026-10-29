@@ -3013,7 +3013,6 @@ impl LibraryApp {
             let accent = cx.theme().primary;
             let secondary = workspace_gradient_stops(
                 mode.is_dark(),
-                accent,
                 settings.color(mode, ThemeColorTarget::Secondary),
             )
             .1;
@@ -3075,9 +3074,7 @@ impl LibraryApp {
                 ThemeColorTarget::Secondary,
             )
             .map(rgb)
-            .unwrap_or_else(|| {
-                workspace_gradient_stops(cx.theme().is_dark(), cx.theme().primary, None).1
-            });
+            .unwrap_or_else(|| workspace_gradient_stops(cx.theme().is_dark(), None).1);
         let hex = |color: Rgba| {
             format!(
                 "#{:02X}{:02X}{:02X}",
@@ -5781,8 +5778,8 @@ const SIDEBAR_KIND_ORDER: [ResourceKind; 21] = [
     ResourceKind::ComputerProgram,
 ];
 
-const LIGHT_GRADIENT_END: u32 = 0xd9dde5;
-const DARK_GRADIENT_END: u32 = 0x262c35;
+const LIGHT_GRADIENT: (u32, u32) = (0xeae8e2, 0xd9dde5);
+const DARK_GRADIENT: (u32, u32) = (0x292722, 0x262c35);
 // CSS angles rotate clockwise from up: 225° points toward the bottom-left.
 const WORKSPACE_GRADIENT_ANGLE: f32 = 225.;
 
@@ -5811,31 +5808,57 @@ fn mix_rgb(from: Rgba, to: Rgba, amount: f32) -> Rgba {
     }
 }
 
-/// Fade from the exact accent to secondary (or an accent-tinted default endpoint).
+/// A neutral wash from the top-right to the bottom-left end; a configured
+/// secondary replaces that end exactly. The accent lives in [`WorkspaceGlow`].
 /// Share the stops with the corner mask so its cutouts match the backdrop.
-fn workspace_gradient_stops(dark: bool, accent: Hsla, secondary: Option<u32>) -> (Rgba, Rgba) {
-    let end = if dark {
-        DARK_GRADIENT_END
-    } else {
-        LIGHT_GRADIENT_END
-    };
-    let amount = if dark { 0.16 } else { 0.12 };
-    (
-        accent.to_rgb(),
-        secondary
-            .map(rgb)
-            .unwrap_or_else(|| mix_rgb(rgb(end), accent.to_rgb(), amount)),
-    )
+fn workspace_gradient_stops(dark: bool, secondary: Option<u32>) -> (Rgba, Rgba) {
+    let (start, end) = if dark { DARK_GRADIENT } else { LIGHT_GRADIENT };
+    (rgb(start), secondary.map(rgb).unwrap_or(rgb(end)))
+}
+
+/// Gradient fraction at which the accent glow has fully dissolved.
+const GLOW_REACH: f32 = 0.4;
+
+/// A vivid accent glow in the top-right corner that dissolves into the wash
+/// well before the middle. GPUI gradients carry only two stops, so the glow is
+/// a second translucent layer over the neutral → secondary wash.
+#[derive(Clone, Copy)]
+struct WorkspaceGlow {
+    accent: Rgba,
+    alpha: f32,
+}
+
+impl WorkspaceGlow {
+    fn new(dark: bool, accent: Hsla) -> Self {
+        Self {
+            accent: accent.to_rgb(),
+            alpha: if dark { 0.35 } else { 0.25 },
+        }
+    }
+
+    fn background(self) -> Background {
+        let accent = Hsla::from(self.accent);
+        linear_gradient(
+            WORKSPACE_GRADIENT_ANGLE,
+            linear_color_stop(accent.opacity(self.alpha), 0.),
+            linear_color_stop(accent.opacity(0.), GLOW_REACH),
+        )
+    }
+
+    /// The opaque color the glow composited over the wash produces at `t`.
+    fn over(self, stops: (Rgba, Rgba), t: f32) -> Rgba {
+        let alpha = self.alpha * (1. - t / GLOW_REACH).max(0.);
+        mix_rgb(mix_rgb(stops.0, stops.1, t), self.accent, alpha)
+    }
 }
 
 /// GPUI's overflow clip is rectangular. Paint just the four regions outside
 /// the island's round outline over its square-edged children, without insetting
 /// the table or inspector. This canvas has no hitbox and cannot block clicks.
-fn island_corner_mask(stops: (Rgba, Rgba)) -> impl IntoElement {
+fn island_corner_mask(stops: (Rgba, Rgba), glow: WorkspaceGlow) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
-            let (start, end) = stops;
             let radius = f32::from(ISLAND_RADIUS);
             let x0 = f32::from(bounds.origin.x);
             let x1 = x0 + f32::from(bounds.size.width);
@@ -5848,7 +5871,7 @@ fn island_corner_mask(stops: (Rgba, Rgba)) -> impl IntoElement {
                 for bottom in [false, true] {
                     let y = if bottom { y1 } else { y0 };
                     let t = workspace_gradient_fraction(x, y, width, height);
-                    let color = Hsla::from(mix_rgb(start, end, t));
+                    let color = Hsla::from(glow.over(stops, t));
                     let sx = if right { -1. } else { 1. };
                     let sy = if bottom { -1. } else { 1. };
                     let at = |u: f32, v: f32| point(px(x + sx * u), px(y + sy * v));
@@ -5925,12 +5948,13 @@ impl Render for LibraryApp {
         // The accent caret stays visible on the pale selection tint.
         let editing = self.has_inline(cx);
 
-        let stops = workspace_gradient_stops(cx.theme().is_dark(), cx.theme().primary, secondary);
+        let stops = workspace_gradient_stops(cx.theme().is_dark(), secondary);
         let background = linear_gradient(
             WORKSPACE_GRADIENT_ANGLE,
             linear_color_stop(Hsla::from(stops.0), 0.),
             linear_color_stop(Hsla::from(stops.1), 1.),
         );
+        let glow = WorkspaceGlow::new(cx.theme().is_dark(), cx.theme().primary);
 
         v_flex()
             .size_full()
@@ -6040,6 +6064,8 @@ impl Render for LibraryApp {
                     cx.propagate();
                 }
             }))
+            // First child paints beneath the toolbar and body; it has no hitbox.
+            .child(div().absolute().inset_0().bg(glow.background()))
             .child(
                 // The toolbar doubles as the window's title bar; reserve space
                 // for the native traffic lights without adding a bottom rule.
@@ -6314,11 +6340,11 @@ impl Render for LibraryApp {
                                 wrap.track_focus(&self.inline_trap)
                                     .focus_trap("inline-edit-trap", &self.inline_trap)
                                     .child(table)
-                                    .child(island_corner_mask(stops))
+                                    .child(island_corner_mask(stops, glow))
                                     .into_any_element()
                             } else {
                                 wrap.child(table)
-                                    .child(island_corner_mask(stops))
+                                    .child(island_corner_mask(stops, glow))
                                     .into_any_element()
                             }
                         },
@@ -6339,7 +6365,7 @@ impl Render for LibraryApp {
                                 .bg(cx.theme().background)
                                 .flex_shrink_0()
                                 .child(self.render_side_panel(cx))
-                                .child(island_corner_mask(stops))
+                                .child(island_corner_mask(stops, glow))
                                 .when(self.detail_open, |el| {
                                     el.child(self.sidebar_resize_handle(false, sidebar_width, cx))
                                 }),
@@ -6983,21 +7009,26 @@ mod palette_persistence_tests {
         cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
-            let stops = super::workspace_gradient_stops(false, cx.theme().primary, None);
+            let stops = super::workspace_gradient_stops(false, None);
             let background = linear_gradient(
                 super::WORKSPACE_GRADIENT_ANGLE,
                 linear_color_stop(Hsla::from(stops.0), 0.),
                 linear_color_stop(Hsla::from(stops.1), 1.),
             );
-            let gradients = window
-                .painted_quads()
-                .into_iter()
-                .filter(|quad| quad.background == background)
-                .count();
+            let glow = super::WorkspaceGlow::new(false, cx.theme().primary).background();
+            let quads = window.painted_quads();
+            let count = |target| {
+                quads
+                    .iter()
+                    .filter(|quad| quad.background == target)
+                    .count()
+            };
             assert_eq!(
-                gradients, 1,
+                count(background),
+                1,
                 "Only the viewport may paint the workspace gradient; the toolbar must reveal it"
             );
+            assert_eq!(count(glow), 1, "One accent glow spans toolbar and body");
         })
         .unwrap();
     }
@@ -7448,33 +7479,43 @@ mod gradient_tests {
     }
 
     #[test]
-    fn gradient_runs_from_exact_accent_to_exact_secondary_in_both_modes() {
+    fn wash_runs_neutral_to_the_exact_secondary_in_both_modes() {
         for dark in [false, true] {
-            for accent in [0x0064ff, 0xff8800] {
-                let (start, end) =
-                    workspace_gradient_stops(dark, Hsla::from(rgb(accent)), Some(0x102030));
-                let expected = rgb(accent);
-                // HSL→RGB conversion has small floating-point rounding differences.
-                assert!((start.r - expected.r).abs() < 1e-6);
-                assert!((start.g - expected.g).abs() < 1e-6);
-                assert!((start.b - expected.b).abs() < 1e-6);
-                assert_eq!(end, rgb(0x102030));
-            }
+            let neutral = rgb(if dark { 0x292722 } else { 0xeae8e2 });
+            assert_eq!(
+                workspace_gradient_stops(dark, Some(0x102030)),
+                (neutral, rgb(0x102030))
+            );
+            let end = rgb(if dark { 0x262c35 } else { 0xd9dde5 });
+            assert_eq!(workspace_gradient_stops(dark, None), (neutral, end));
         }
     }
-    use super::workspace_gradient_stops;
+    use super::{GLOW_REACH, WorkspaceGlow, mix_rgb, workspace_gradient_stops};
     use gpui_kit::{Hsla, rgb};
 
     #[test]
-    fn workspace_gradient_follows_the_accent_in_both_themes() {
+    fn accent_glow_is_vivid_in_the_corner_and_gone_past_its_reach() {
         for dark in [false, true] {
-            let (start, blue_end) = workspace_gradient_stops(dark, Hsla::from(rgb(0x0064ff)), None);
-            let (_, red_end) = workspace_gradient_stops(dark, Hsla::from(rgb(0xff6400)), None);
-            assert!(start.r.abs() < 1e-6);
-            assert!((start.g - 100. / 255.).abs() < 1e-6);
-            assert!((start.b - 1.).abs() < 1e-6);
-            assert!(blue_end.b > red_end.b);
-            assert!(red_end.r > blue_end.r);
+            let stops = workspace_gradient_stops(dark, None);
+            let glow = WorkspaceGlow::new(dark, Hsla::from(rgb(0xff3b30)));
+            // The corner leans visibly toward the accent without becoming it.
+            let corner = glow.over(stops, 0.);
+            assert_eq!(corner, mix_rgb(stops.0, glow.accent, glow.alpha));
+            let shift = [
+                corner.r - stops.0.r,
+                corner.g - stops.0.g,
+                corner.b - stops.0.b,
+            ]
+            .map(f32::abs)
+            .into_iter()
+            .fold(0., f32::max);
+            assert!(shift > 0.1, "{corner:?}");
+            assert_ne!(corner, rgb(0xff3b30));
+            // Beyond its reach the backdrop is the plain wash, ending exactly.
+            for t in [GLOW_REACH, 0.5, 1.] {
+                assert_eq!(glow.over(stops, t), mix_rgb(stops.0, stops.1, t));
+            }
+            assert_eq!(glow.over(stops, 1.), stops.1);
         }
     }
 }
