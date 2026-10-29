@@ -338,6 +338,9 @@ impl DbWorker {
         let (tx, rx) = std::sync::mpsc::channel::<DbRequest>();
         std::thread::Builder::new()
             .name("oeuvre-db".into())
+            // SurrealDB update evaluation plus this worker's request future can
+            // exceed the OS default stack in debug builds (even for one record).
+            .stack_size(8 * 1024 * 1024)
             .spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
@@ -1141,6 +1144,38 @@ mod tests {
     use oeuvre_app::Surface;
     use oeuvre_app::testing::MemoryStore;
     use oeuvre_core::published_label_from;
+
+    // Use the real adapter: MemoryStore does not exercise SurrealDB's stack usage.
+    #[tokio::test]
+    async fn worker_toggles_favorite_with_surreal_store() {
+        use oeuvre_adapter_surreal::SurrealStore;
+        use oeuvre_core::{ResourceKind, Store};
+
+        let store = SurrealStore::open_memory().await.unwrap();
+        let created = store
+            .create_resource(
+                crate::metadata::empty_resource("Favorite", ResourceKind::Book).unwrap(),
+            )
+            .await
+            .unwrap();
+        let state = AppState::builder(store).surface(Surface::Test).build();
+        let worker = DbWorker::spawn(state);
+
+        let before = worker.resource(created.id).await.unwrap();
+        assert!(!before.favorite);
+        let updated = worker
+            .set_resource_favorite(created.id, true)
+            .await
+            .unwrap();
+        assert!(updated.favorite);
+        assert!(worker.resource(created.id).await.unwrap().favorite);
+        let updated = worker
+            .set_resource_favorite(created.id, false)
+            .await
+            .unwrap();
+        assert!(!updated.favorite);
+        assert!(!worker.resource(created.id).await.unwrap().favorite);
+    }
 
     #[tokio::test]
     async fn doi_editors_are_linked_with_distinct_role() {

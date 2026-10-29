@@ -2,7 +2,7 @@
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::description_list::{DescriptionItem, DescriptionList};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -197,6 +197,59 @@ fn value_element(lines: &[String]) -> AnyElement {
     }
 }
 
+/// Reject parser repairs of relative, hostless, or malformed stored text.
+/// Trimming affects only the navigation target, never the displayed/stored value.
+fn browser_url_target(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let (scheme, rest) = value.split_once("://")?;
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
+        || rest.starts_with(['/', '?', '#'])
+        || value
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control() || ch == '\\')
+    {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(value).ok()?;
+    parsed.has_host().then_some(value)
+}
+
+fn field_value_element(label: &str, lines: &[String], cx: &App) -> AnyElement {
+    if let ("URL", [value]) = (label, lines)
+        && let Some(target) = browser_url_target(value)
+    {
+        let muted = cx.theme().muted_foreground;
+        let link = cx.theme().link;
+        let ring = cx.theme().ring;
+        return h_flex()
+            .gap_2()
+            .items_start()
+            .child(div().flex_1().min_w_0().child(value.clone()))
+            .child(
+                gpui_kit::base::Link::new("detail-open-url")
+                    .debug_selector(|| "detail-open-url".into())
+                    .key_context("BrowserLink")
+                    .href(target.to_owned())
+                    .accessibility_label("Open URL in browser")
+                    .open_with(|href, _, _, cx| cx.open_url(href))
+                    // Icon-only affordance: muted until hover, with the
+                    // invisible 1px border doubling as the keyboard focus ring.
+                    .flex_shrink_0()
+                    .px_1()
+                    .border_1()
+                    .border_color(cx.theme().background)
+                    .cursor_pointer()
+                    .text_color(muted)
+                    .hover(|style| style.text_color(link))
+                    .active(|style| style.text_color(link.opacity(0.6)))
+                    .focus_visible(|style| style.border_color(ring))
+                    .child(Icon::new(IconName::ExternalLink).with_size(FIELD_TEXT_SIZE)),
+            )
+            .into_any_element();
+    }
+    value_element(lines)
+}
+
 /// The right-side sidebar for the current [`DetailView`]: a column beside
 /// the grid, sharing the row with it rather than overlapping it, so the
 /// grid's rows are never behind the sidebar's empty stretches. Opaque,
@@ -288,7 +341,8 @@ pub fn render_panel(
                         .columns(1)
                         .label_width(FIELD_LABEL_WIDTH)
                         .children(field_rows(detail).into_iter().map(|(label, lines)| {
-                            DescriptionItem::new(label).value(value_element(&lines))
+                            let value = field_value_element(&label, &lines, cx);
+                            DescriptionItem::new(label).value(value)
                         }))
                         .when_some(tags_value, |list, value| {
                             list.child(DescriptionItem::new("Tags").value(value))
@@ -324,6 +378,265 @@ mod tests {
         BibliographicDate, CreatorRole, DetailCreators, NonEmptyStr, ResourceDetail, ResourceId,
         ResourceKind, UtcMillis,
     };
+
+    struct DetailPanel(ResourceDetail, gpui_kit::FocusHandle, Vec<&'static str>);
+
+    fn press_key(cx: &mut gpui_kit::VisualTestContext, key: &str) {
+        let keystroke = gpui_kit::Keystroke::parse(key).unwrap();
+        cx.simulate_event(gpui_kit::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui_kit::KeyUpEvent { keystroke });
+    }
+
+    const NO_ACTION_URL: &str = "https://no-action.invalid/";
+
+    fn arm_url_probe(cx: &mut gpui_kit::VisualTestContext) {
+        // opened_url() clones the last request rather than consuming it.
+        // A distinct sentinel makes every assertion detect a fresh activation.
+        cx.update(|_, cx| cx.open_url(NO_ACTION_URL));
+    }
+
+    #[test]
+    fn browser_targets_require_absolute_http_urls_with_hosts() {
+        for value in [
+            "https://example.org/path?q=one#section",
+            "http://localhost:8080/",
+            "HTTPS://Example.org/Case",
+            "https://127.0.0.1/",
+            "http://[::1]:8080/",
+            "https://例え.テスト/論文",
+        ] {
+            assert_eq!(super::browser_url_target(value), Some(value), "{value}");
+        }
+        assert_eq!(
+            super::browser_url_target("  https://example.org/a  "),
+            Some("https://example.org/a")
+        );
+        for value in [
+            "",
+            " ",
+            "example.org",
+            "/article",
+            "//example.org/a",
+            "https:example.org",
+            "https:/example.org",
+            "https:///example.org",
+            "https://",
+            "https://?q=one",
+            "https://#fragment",
+            "https://bad host/",
+            "https://exam\nple.org",
+            "https://exam\tple.org",
+            "https://example.org\\path",
+            "https://[::1",
+            "https://example.org:bad/",
+            "javascript:alert(1)",
+            "data:text/html,test",
+            "file:///tmp/article",
+            "mailto:author@example.org",
+            "ftp://example.org/",
+        ] {
+            assert_eq!(super::browser_url_target(value), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn url_validation_preserves_stored_text_and_unrelated_metadata() {
+        let mut detail = journal_article();
+        for value in [
+            "  https://example.org/a  ",
+            "not a URL",
+            "javascript:alert(1)",
+        ] {
+            detail.url = Some(value.into());
+            detail.doi = Some("https://doi.org/10.1000/example".into());
+            let before = field_rows(&detail);
+            let _ = super::browser_url_target(detail.url.as_deref().unwrap());
+            assert_eq!(field_rows(&detail), before);
+            assert_eq!(detail.url.as_deref(), Some(value));
+            assert_eq!(
+                before.iter().find(|(label, _)| label == "URL").unwrap().1,
+                [value]
+            );
+            assert_eq!(
+                before.iter().find(|(label, _)| label == "DOI").unwrap().1,
+                ["https://doi.org/10.1000/example"]
+            );
+        }
+    }
+
+    impl gpui_kit::Render for DetailPanel {
+        fn render(
+            &mut self,
+            _: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::{InteractiveElement as _, ParentElement as _, Styled as _};
+            gpui_kit::div()
+                .size_full()
+                .track_focus(&self.1)
+                .key_context("LibraryApp")
+                .on_action(
+                    cx.listener(|this, _: &crate::library::ToggleEditMode, _, _| {
+                        this.2.push("edit");
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &crate::library::CycleColumnSort, _, _| {
+                        this.2.push("sort");
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this, _: &crate::library::OpenCommandPalette, _, _| {
+                        this.2.push("palette");
+                    }),
+                )
+                .child(super::render_panel(
+                    super::DetailView::Fields(&self.0),
+                    None,
+                    None,
+                    cx,
+                ))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn url_action_opens_stored_target_with_pointer_and_keyboard(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(crate::bind_library_keys);
+        let mut detail = journal_article();
+        detail.url = Some("https://example.org/article?q=one#section".into());
+        use gpui_kit::AppContext as _;
+        // The real library starts with focus in its table. Root's contextual
+        // Tab binding needs a focused descendant; a bare test window has none.
+        let panel = cx.new(|cx| DetailPanel(detail, cx.focus_handle().tab_stop(false), Vec::new()));
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            panel.read(cx).1.clone().focus(window, cx);
+            gpui_kit::base::Root::new(panel.clone(), window, cx)
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        // The table shortcuts remain available before focus enters the link.
+        press_key(cx, "enter");
+        press_key(cx, "space");
+        cx.update(|_, cx| {
+            panel.update(cx, |panel, _| {
+                assert_eq!(panel.2, ["edit", "sort"]);
+                panel.2.clear();
+            });
+        });
+        press_key(cx, "tab");
+        cx.update(|window, cx| {
+            assert!(window.focused(cx).is_some());
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(cx.opened_url(), None);
+        press_key(cx, "enter");
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://example.org/article?q=one#section")
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = cx.debug_bounds("detail-open-url").expect("URL open action");
+        assert!(bounds.size.width > gpui_kit::px(0.));
+        arm_url_probe(cx);
+        cx.simulate_click(bounds.center(), gpui_kit::Modifiers::default());
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some("https://example.org/article?q=one#section")
+        );
+        // Each event must replace the sentinel with the stored target.
+        for key in ["enter", "space"] {
+            arm_url_probe(cx);
+            press_key(cx, key);
+            assert_eq!(
+                cx.opened_url().as_deref(),
+                Some("https://example.org/article?q=one#section")
+            );
+        }
+        // Unrelated application shortcuts must still reach the ancestor.
+        press_key(cx, "cmd-k");
+        cx.update(|_, cx| assert_eq!(panel.read(cx).2, ["palette"]));
+        cx.update(|_, cx| {
+            assert_eq!(
+                panel.read(cx).0.url.as_deref(),
+                Some("https://example.org/article?q=one#section")
+            );
+        });
+        // Selection changes must replace the old callback, trim only the target,
+        // and leave both the stored URL and its metadata text untouched.
+        let stored = "  https://example.org/replacement?q=two#part  ";
+        cx.update(|_, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.0.url = Some(stored.into());
+                cx.notify();
+            });
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = cx.debug_bounds("detail-open-url").unwrap();
+        arm_url_probe(cx);
+        cx.simulate_click(bounds.center(), gpui_kit::Modifiers::default());
+        assert_eq!(cx.opened_url().as_deref(), Some(stored.trim()));
+        cx.update(|_, cx| {
+            assert_eq!(panel.read(cx).0.url.as_deref(), Some(stored));
+            assert_eq!(
+                field_rows(&panel.read(cx).0)
+                    .iter()
+                    .find(|(label, _)| label == "URL")
+                    .unwrap()
+                    .1,
+                [stored]
+            );
+        });
+
+        // Replacing the selected detail must not retain the old URL's action.
+        for value in [
+            Some("javascript:alert(1)"),
+            Some("https:///missing-host"),
+            Some("https://bad host/"),
+            Some("/relative"),
+            Some(""),
+            Some("  "),
+            None,
+        ] {
+            cx.update(|_, cx| {
+                panel.update(cx, |panel, cx| {
+                    panel.0.url = value.map(str::to_owned);
+                    panel.0.doi = Some("https://doi.org/10.1000/example".into());
+                    cx.notify();
+                });
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert!(cx.debug_bounds("detail-open-url").is_none(), "{value:?}");
+            arm_url_probe(cx);
+            cx.simulate_click(bounds.center(), gpui_kit::Modifiers::default());
+            for key in ["tab", "enter", "space"] {
+                press_key(cx, key);
+                assert_eq!(
+                    cx.opened_url().as_deref(),
+                    Some(NO_ACTION_URL),
+                    "{value:?}: {key}"
+                );
+            }
+            cx.update(|_, cx| {
+                let detail = &panel.read(cx).0;
+                assert_eq!(detail.url.as_deref(), value);
+                let rows = field_rows(detail);
+                assert_eq!(
+                    rows.iter()
+                        .find(|(label, _)| label == "URL")
+                        .map(|(_, lines)| lines[0].as_str()),
+                    value
+                );
+                assert_eq!(
+                    detail.doi.as_deref(),
+                    Some("https://doi.org/10.1000/example")
+                );
+            });
+        }
+    }
     #[test]
     fn imported_bibliographic_fields_are_visible_in_the_detail_panel() {
         // Reuse a stored resource projection through the public core types.
