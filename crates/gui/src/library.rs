@@ -5781,8 +5781,8 @@ const SIDEBAR_KIND_ORDER: [ResourceKind; 21] = [
     ResourceKind::ComputerProgram,
 ];
 
-const LIGHT_GRADIENT_END: u32 = 0xd9dde5;
-const DARK_GRADIENT_END: u32 = 0x262c35;
+const LIGHT_GRADIENT: (u32, u32) = (0xeae8e2, 0xd9dde5);
+const DARK_GRADIENT: (u32, u32) = (0x292722, 0x262c35);
 // CSS angles rotate clockwise from up: 225° points toward the bottom-left.
 const WORKSPACE_GRADIENT_ANGLE: f32 = 225.;
 
@@ -5811,17 +5811,14 @@ fn mix_rgb(from: Rgba, to: Rgba, amount: f32) -> Rgba {
     }
 }
 
-/// Fade from the exact accent to secondary (or an accent-tinted default endpoint).
+/// A neutral wash whose far edge borrows the accent, not a second hard-coded
+/// color; a configured secondary replaces that tinted edge exactly.
 /// Share the stops with the corner mask so its cutouts match the backdrop.
 fn workspace_gradient_stops(dark: bool, accent: Hsla, secondary: Option<u32>) -> (Rgba, Rgba) {
-    let end = if dark {
-        DARK_GRADIENT_END
-    } else {
-        LIGHT_GRADIENT_END
-    };
+    let (start, end) = if dark { DARK_GRADIENT } else { LIGHT_GRADIENT };
     let amount = if dark { 0.16 } else { 0.12 };
     (
-        accent.to_rgb(),
+        rgb(start),
         secondary
             .map(rgb)
             .unwrap_or_else(|| mix_rgb(rgb(end), accent.to_rgb(), amount)),
@@ -7448,16 +7445,13 @@ mod gradient_tests {
     }
 
     #[test]
-    fn gradient_runs_from_exact_accent_to_exact_secondary_in_both_modes() {
+    fn gradient_starts_neutral_and_ends_at_the_exact_secondary_in_both_modes() {
         for dark in [false, true] {
             for accent in [0x0064ff, 0xff8800] {
                 let (start, end) =
                     workspace_gradient_stops(dark, Hsla::from(rgb(accent)), Some(0x102030));
-                let expected = rgb(accent);
-                // HSL→RGB conversion has small floating-point rounding differences.
-                assert!((start.r - expected.r).abs() < 1e-6);
-                assert!((start.g - expected.g).abs() < 1e-6);
-                assert!((start.b - expected.b).abs() < 1e-6);
+                // The accent never saturates the wash; a configured secondary is exact.
+                assert_eq!(start, rgb(if dark { 0x292722 } else { 0xeae8e2 }));
                 assert_eq!(end, rgb(0x102030));
             }
         }
@@ -7466,13 +7460,18 @@ mod gradient_tests {
     use gpui_kit::{Hsla, rgb};
 
     #[test]
-    fn workspace_gradient_follows_the_accent_in_both_themes() {
+    fn gradient_far_edge_borrows_the_accent_in_both_themes() {
         for dark in [false, true] {
-            let (start, blue_end) = workspace_gradient_stops(dark, Hsla::from(rgb(0x0064ff)), None);
-            let (_, red_end) = workspace_gradient_stops(dark, Hsla::from(rgb(0xff6400)), None);
-            assert!(start.r.abs() < 1e-6);
-            assert!((start.g - 100. / 255.).abs() < 1e-6);
-            assert!((start.b - 1.).abs() < 1e-6);
+            let (blue_start, blue_end) =
+                workspace_gradient_stops(dark, Hsla::from(rgb(0x0064ff)), None);
+            let (red_start, red_end) =
+                workspace_gradient_stops(dark, Hsla::from(rgb(0xff6400)), None);
+            // The wash starts on one neutral color; only the far edge follows the accent.
+            assert_eq!(blue_start, red_start);
+            assert_eq!(blue_start, rgb(if dark { 0x292722 } else { 0xeae8e2 }));
+            // The tint nudges the neutral endpoint without replacing it.
+            let neutral_end = rgb(if dark { 0x262c35 } else { 0xd9dde5 });
+            assert!(blue_end.b > neutral_end.b && blue_end.b < 1.);
             assert!(blue_end.b > red_end.b);
             assert!(red_end.r > blue_end.r);
         }
