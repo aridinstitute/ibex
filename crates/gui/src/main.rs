@@ -7,6 +7,7 @@ mod icons;
 mod inline_edit;
 mod kind;
 mod library;
+mod metadata;
 mod settings;
 mod tags;
 mod theme;

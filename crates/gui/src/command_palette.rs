@@ -43,11 +43,17 @@ impl PaletteRequest {
 /// Library-wide view preference; independent of resource membership edits.
 pub struct ToggleResourceGrouping;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Debug)]
+pub struct IdentifierRequest {
+    pub identifier: String,
+    pub target: Option<ResourceId>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
     Commands,
     Tags,
     Collections,
+    Identifier,
 }
 
 pub struct CommandPalette {
@@ -74,10 +80,13 @@ pub struct CommandPalette {
     // A partially persisted draft may only be retried unchanged or dismissed.
     submitted: bool,
     error: Option<String>,
+    identifier_target: Option<ResourceId>,
+    suggested_identifier: Option<String>,
 }
 
 impl EventEmitter<PaletteRequest> for CommandPalette {}
 impl EventEmitter<ToggleResourceGrouping> for CommandPalette {}
+impl EventEmitter<IdentifierRequest> for CommandPalette {}
 
 impl CommandPalette {
     pub fn new(
@@ -134,6 +143,8 @@ impl CommandPalette {
             saving: false,
             submitted: false,
             error: None,
+            identifier_target: None,
+            suggested_identifier: None,
         }
     }
 
@@ -173,6 +184,16 @@ impl CommandPalette {
             records[0].title.as_str().to_owned()
         } else {
             format!("{} resources selected", records.len())
+        };
+        self.suggested_identifier = if records.len() == 1 {
+            records[0].doi.clone().or_else(|| {
+                records[0]
+                    .isbns
+                    .first()
+                    .map(|isbn| isbn.as_str().to_owned())
+            })
+        } else {
+            None
         };
         self.existing_tags = records
             .iter()
@@ -228,6 +249,7 @@ impl CommandPalette {
                     Screen::Commands => "Type a command…",
                     Screen::Tags => "Search tags…",
                     Screen::Collections => "Search collections…",
+                    Screen::Identifier => "Enter ISBN or DOI…",
                 },
                 window,
                 cx,
@@ -242,8 +264,11 @@ impl CommandPalette {
     fn option_disabled(&self, row: usize) -> bool {
         self.saving
             || self.submitted
-            || (!(self.screen == Screen::Commands && row == 2)
-                && (!self.ready || self.targets.is_empty()))
+            || match row {
+                2 | 3 if self.screen == Screen::Commands => false,
+                4 if self.screen == Screen::Commands => !self.ready || self.targets.len() != 1,
+                _ => !self.ready || self.targets.is_empty(),
+            }
     }
 
     fn visible_options(&self, cx: &App) -> Vec<(usize, SharedString, bool)> {
@@ -253,6 +278,8 @@ impl CommandPalette {
                 (0, "Edit tags…".into(), false),
                 (1, "Edit collections…".into(), false),
                 (2, "Group children under parents".into(), self.grouped),
+                (3, "Add by ISBN or DOI…".into(), false),
+                (4, "Update metadata by ISBN or DOI…".into(), false),
             ],
             Screen::Tags => self
                 .tags
@@ -287,6 +314,7 @@ impl CommandPalette {
                     )
                 })
                 .collect(),
+            Screen::Identifier => vec![],
         };
         options
             .into_iter()
@@ -337,6 +365,21 @@ impl CommandPalette {
             Screen::Commands => match row {
                 0 => self.navigate(Screen::Tags, window, cx),
                 1 => self.navigate(Screen::Collections, window, cx),
+                3 | 4 => {
+                    self.identifier_target = if row == 4 {
+                        self.targets.first().copied()
+                    } else {
+                        None
+                    };
+                    self.navigate(Screen::Identifier, window, cx);
+                    if row == 4 {
+                        if let Some(identifier) = &self.suggested_identifier {
+                            self.state.update(cx, |state, cx| {
+                                state.set_value(identifier.clone(), window, cx)
+                            });
+                        }
+                    }
+                }
                 2 => cx.emit(ToggleResourceGrouping),
                 _ => {}
             },
@@ -356,6 +399,7 @@ impl CommandPalette {
                     self.selected_collections.remove(&collection.id);
                 }
             }
+            Screen::Identifier => self.apply_identifier(cx),
         }
         cx.notify();
     }
@@ -363,6 +407,7 @@ impl CommandPalette {
     fn change_count(&self) -> usize {
         match self.screen {
             Screen::Commands => 0,
+            Screen::Identifier => 0,
             Screen::Tags => {
                 self.selected_tags
                     .symmetric_difference(&self.existing_tags)
@@ -428,7 +473,7 @@ impl CommandPalette {
                     .copied()
                     .collect(),
             ),
-            Screen::Commands => return,
+            Screen::Commands | Screen::Identifier => return,
         };
         let request = if self.targets.len() > 1 {
             match request {
@@ -447,6 +492,28 @@ impl CommandPalette {
         self.submitted = true;
         self.error = None;
         cx.emit(request);
+        cx.notify();
+    }
+}
+
+impl CommandPalette {
+    fn apply_identifier(&mut self, cx: &mut Context<Self>) {
+        let identifier = self.state.read(cx).value().trim().to_owned();
+        if identifier.is_empty() || self.saving {
+            return;
+        }
+        self.saving = true;
+        self.error = None;
+        cx.emit(IdentifierRequest {
+            identifier,
+            target: self.identifier_target,
+        });
+        cx.notify();
+    }
+
+    pub fn identifier_failed(&mut self, message: String, cx: &mut Context<Self>) {
+        self.saving = false;
+        self.error = Some(message);
         cx.notify();
     }
 }
@@ -502,6 +569,7 @@ impl CommandPalette {
                 .get(row)
                 .is_some_and(|collection| self.mixed_collections.contains(&collection.id)),
             Screen::Commands => false,
+            Screen::Identifier => false,
         };
         h_flex()
             .id(("palette-row", row))
@@ -561,6 +629,13 @@ impl Render for CommandPalette {
             Screen::Commands => "Commands",
             Screen::Tags => "Commands / Edit tags",
             Screen::Collections => "Commands / Edit collections",
+            Screen::Identifier => {
+                if self.identifier_target.is_some() {
+                    "Commands / Update metadata"
+                } else {
+                    "Commands / Add resource"
+                }
+            }
         };
         let list_height = (options.len().max(1) as f32 * 2.25).min(18.75);
         v_flex()
@@ -573,9 +648,17 @@ impl Render for CommandPalette {
             .on_action(cx.listener(|this, _: &PaletteBack, window, cx| this.back(window, cx)))
             .on_action(cx.listener(|this, _: &PaletteNext, _, cx| this.move_highlight(1, cx)))
             .on_action(cx.listener(|this, _: &PalettePrevious, _, cx| this.move_highlight(-1, cx)))
-            .on_action(cx.listener(|this, _: &PaletteApply, _, cx| this.apply(cx)))
+            .on_action(cx.listener(|this, _: &PaletteApply, _, cx| {
+                if this.screen == Screen::Identifier {
+                    this.apply_identifier(cx)
+                } else {
+                    this.apply(cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &PaletteConfirm, window, cx| {
-                if let Some(row) = this.highlighted {
+                if this.screen == Screen::Identifier {
+                    this.apply_identifier(cx);
+                } else if let Some(row) = this.highlighted {
                     this.confirm(row, window, cx);
                 }
             }))
@@ -612,6 +695,7 @@ impl Render for CommandPalette {
                         Screen::Commands => "palette-commands",
                         Screen::Tags => "palette-tags",
                         Screen::Collections => "palette-collections",
+                        Screen::Identifier => "palette-identifier",
                     })
                     .test_support()
                     .role(Role::ListBox)
@@ -625,7 +709,15 @@ impl Render for CommandPalette {
                                 .h_9()
                                 .px_3()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("No matching options"),
+                                .child(if self.screen == Screen::Identifier {
+                                    if self.identifier_target.is_some() {
+                                        "Enter an ISBN or DOI. Only missing fields will be filled."
+                                    } else {
+                                        "Enter a valid ISBN or DOI, then press Enter."
+                                    }
+                                } else {
+                                    "No matching options"
+                                }),
                         )
                     })
                     .children(
@@ -675,7 +767,9 @@ impl Render for CommandPalette {
                             div()
                                 .text_base()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(if self.submitted {
+                                .child(if self.screen == Screen::Identifier {
+                                    "↵ Look up"
+                                } else if self.submitted {
                                     "⌘↵ Retry · Esc Cancel"
                                 } else {
                                     "↵ Toggle · ⌘↵ Apply"
@@ -687,13 +781,25 @@ impl Render for CommandPalette {
                                 .text_base()
                                 .label(if self.saving {
                                     "Saving…".to_owned()
+                                } else if self.screen == Screen::Identifier {
+                                    "Look up".to_owned()
                                 } else if self.submitted {
                                     "Retry".to_owned()
                                 } else {
                                     format!("Apply ({})", self.change_count())
                                 })
-                                .disabled(unavailable || self.change_count() == 0)
-                                .on_click(cx.listener(|this, _, _, cx| this.apply(cx))),
+                                .disabled(if self.screen == Screen::Identifier {
+                                    self.saving || self.state.read(cx).value().trim().is_empty()
+                                } else {
+                                    unavailable || self.change_count() == 0
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if this.screen == Screen::Identifier {
+                                        this.apply_identifier(cx)
+                                    } else {
+                                        this.apply(cx)
+                                    }
+                                })),
                         )
                     }),
             )
@@ -702,7 +808,7 @@ impl Render for CommandPalette {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommandPalette, PaletteRequest, Screen};
+    use super::{CommandPalette, IdentifierRequest, PaletteRequest, Screen};
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
@@ -878,6 +984,63 @@ mod tests {
             collections: collection_ids,
             requests,
         }
+    }
+
+    #[gpui_kit::test]
+    fn identifier_commands_are_available_in_the_right_context(cx: &mut TestAppContext) {
+        let f = open(cx, false, false);
+        cx.update_window(f.window, |_, window, cx| {
+            assert!(!f.palette.read(cx).option_disabled(3));
+            assert!(f.palette.read(cx).option_disabled(4));
+            window.click(("palette-row", 3usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            f.palette.read_with(cx, |palette, _| palette.screen),
+            Screen::Identifier
+        );
+
+        let f = open(cx, true, true);
+        cx.update_window(f.window, |_, window, cx| {
+            assert!(!f.palette.read(cx).option_disabled(4));
+            window.click(("palette-row", 4usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(
+            f.palette
+                .read_with(cx, |palette, _| palette.identifier_target.is_some())
+        );
+    }
+
+    #[gpui_kit::test]
+    fn adding_identifier_emits_the_lookup_request(cx: &mut TestAppContext) {
+        let f = open(cx, false, false);
+        let requests = Rc::new(RefCell::new(Vec::<IdentifierRequest>::new()));
+        let sink = requests.clone();
+        cx.update_window(f.window, |_, window, cx| {
+            f.palette.update(cx, |_, cx| {
+                cx.subscribe(&f.palette, move |_, _, request: &IdentifierRequest, _| {
+                    sink.borrow_mut().push(request.clone());
+                })
+                .detach();
+            });
+            window.click(("palette-row", 3usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.window, |_, window, cx| {
+            let state = f.palette.read(cx).state.clone();
+            state.update(cx, |state, cx| state.set_value("9780306406157", window, cx));
+            window.click("palette-apply", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let requests = requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].identifier, "9780306406157");
+        assert_eq!(requests[0].target, None);
     }
 
     #[gpui_kit::test]

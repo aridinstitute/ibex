@@ -44,7 +44,9 @@ use oeuvre_core::{
 };
 
 use crate::collections::{CollectionChoice, CollectionDelegate, flatten_collections};
-use crate::command_palette::{CommandPalette, PaletteRequest, ToggleResourceGrouping};
+use crate::command_palette::{
+    CommandPalette, IdentifierRequest, PaletteRequest, ToggleResourceGrouping,
+};
 use crate::db::DbWorker;
 use crate::detail::{
     DetailFetch, DetailView, FIELD_LABEL_WIDTH, FIELD_TEXT_SIZE, PANEL_WIDTH, render_panel,
@@ -3021,6 +3023,51 @@ impl LibraryApp {
                             _ = palette.update(cx, |palette, cx| palette.failed(message, cx));
                         }
                         cx.notify();
+                    });
+                })
+                .detach();
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &palette,
+            window,
+            |app, palette, request: &IdentifierRequest, window, cx| {
+                let request = request.clone();
+                let palette = palette.downgrade();
+                let worker = app.table.read(cx).delegate().worker().clone();
+                cx.spawn_in(window, async move |app, window| {
+                    let result = worker
+                        .resolve_identifier(request.identifier, request.target)
+                        .await;
+                    _ = app.update_in(window, |app, window, cx| match result {
+                        Ok(resource) => {
+                            *app.detail_gens.entry(resource.id).or_default() += 1;
+                            app.detail_inflight.remove(&resource.id);
+                            app.detail_cache.invalidate(&resource.id);
+                            if app.selected == Some(resource.id) {
+                                app.detail = Some((resource.id, DetailFetch::Loading));
+                                app.fetch_detail(resource.id, window, cx);
+                            }
+                            app.refresh_counts(window, cx);
+                            let selected = app.selected;
+                            app.table.update(cx, |table, cx| {
+                                table
+                                    .delegate_mut()
+                                    .reload_from_top(selected, None, window, cx)
+                            });
+                            if palette.upgrade().is_some() {
+                                window.close_dialog(cx);
+                            }
+                            window.push_notification(
+                                format!("Saved {}", resource.title.as_str()),
+                                cx,
+                            );
+                        }
+                        Err(error) => {
+                            _ = palette
+                                .update(cx, |palette, cx| palette.identifier_failed(error, cx));
+                        }
                     });
                 })
                 .detach();
