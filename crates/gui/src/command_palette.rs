@@ -1,6 +1,7 @@
 //! Nested membership editors. Checked rows are the draft; only Apply persists its diff.
 use std::collections::HashSet;
 
+use crate::settings::{ThemeColorTarget, parse_hex_color};
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::Cancel;
@@ -11,6 +12,12 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use oeuvre_core::{Collection, CollectionId, Resource, ResourceId, Tag, TagId};
+
+#[derive(Clone, Debug)]
+pub struct SetThemeColor {
+    pub target: ThemeColorTarget,
+    pub hex: String,
+}
 
 #[derive(Clone, Debug)]
 pub enum PaletteRequest {
@@ -54,6 +61,7 @@ enum Screen {
     Tags,
     Collections,
     Identifier,
+    Color(ThemeColorTarget),
 }
 
 pub struct CommandPalette {
@@ -82,13 +90,54 @@ pub struct CommandPalette {
     error: Option<String>,
     identifier_target: Option<ResourceId>,
     suggested_identifier: Option<String>,
+    colors: [String; 2],
 }
 
 impl EventEmitter<PaletteRequest> for CommandPalette {}
 impl EventEmitter<ToggleResourceGrouping> for CommandPalette {}
 impl EventEmitter<IdentifierRequest> for CommandPalette {}
+impl EventEmitter<SetThemeColor> for CommandPalette {}
 
 impl CommandPalette {
+    pub fn set_colors(&mut self, accent: String, secondary: String) {
+        self.colors = [accent, secondary];
+    }
+
+    pub fn open_color(
+        &mut self,
+        target: ThemeColorTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate(Screen::Color(target), window, cx);
+        let value = self.colors[if target == ThemeColorTarget::Accent {
+            0
+        } else {
+            1
+        }]
+        .clone();
+        self.state
+            .update(cx, |state, cx| state.set_value(value, window, cx));
+    }
+
+    fn apply_color(&mut self, cx: &mut Context<Self>) {
+        let Screen::Color(target) = self.screen else {
+            return;
+        };
+        if self.saving {
+            return;
+        }
+        let hex = self.state.read(cx).value().trim().to_owned();
+        if let Err(error) = parse_hex_color(&hex) {
+            self.error = Some(error.into());
+            cx.notify();
+            return;
+        }
+        self.saving = true;
+        self.error = None;
+        cx.emit(SetThemeColor { target, hex });
+        cx.notify();
+    }
     pub fn new(
         target: Option<ResourceId>,
         grouped: bool,
@@ -145,6 +194,7 @@ impl CommandPalette {
             error: None,
             identifier_target: None,
             suggested_identifier: None,
+            colors: [String::new(), String::new()],
         }
     }
 
@@ -242,6 +292,7 @@ impl CommandPalette {
 
     fn navigate(&mut self, screen: Screen, window: &mut Window, cx: &mut Context<Self>) {
         self.screen = screen;
+        self.error = None;
         self.state.update(cx, |state, cx| {
             state.set_value("", window, cx);
             state.set_placeholder(
@@ -250,6 +301,7 @@ impl CommandPalette {
                     Screen::Tags => "Search tags…",
                     Screen::Collections => "Search collections…",
                     Screen::Identifier => "Enter ISBN or DOI…",
+                    Screen::Color(_) => "Enter #RRGGBB…",
                 },
                 window,
                 cx,
@@ -265,7 +317,7 @@ impl CommandPalette {
         self.saving
             || self.submitted
             || match row {
-                2 | 3 if self.screen == Screen::Commands => false,
+                2 | 3 | 5 | 6 if self.screen == Screen::Commands => false,
                 4 if self.screen == Screen::Commands => !self.ready || self.targets.len() != 1,
                 _ => !self.ready || self.targets.is_empty(),
             }
@@ -280,6 +332,8 @@ impl CommandPalette {
                 (2, "Group children under parents".into(), self.grouped),
                 (3, "Add by ISBN or DOI…".into(), false),
                 (4, "Update metadata by ISBN or DOI…".into(), false),
+                (5, "Set accent color…".into(), false),
+                (6, "Set secondary color…".into(), false),
             ],
             Screen::Tags => self
                 .tags
@@ -314,7 +368,7 @@ impl CommandPalette {
                     )
                 })
                 .collect(),
-            Screen::Identifier => vec![],
+            Screen::Identifier | Screen::Color(_) => vec![],
         };
         options
             .into_iter()
@@ -381,6 +435,8 @@ impl CommandPalette {
                     }
                 }
                 2 => cx.emit(ToggleResourceGrouping),
+                5 => self.open_color(ThemeColorTarget::Accent, window, cx),
+                6 => self.open_color(ThemeColorTarget::Secondary, window, cx),
                 _ => {}
             },
             Screen::Tags => {
@@ -400,6 +456,7 @@ impl CommandPalette {
                 }
             }
             Screen::Identifier => self.apply_identifier(cx),
+            Screen::Color(_) => self.apply_color(cx),
         }
         cx.notify();
     }
@@ -407,7 +464,7 @@ impl CommandPalette {
     fn change_count(&self) -> usize {
         match self.screen {
             Screen::Commands => 0,
-            Screen::Identifier => 0,
+            Screen::Identifier | Screen::Color(_) => 0,
             Screen::Tags => {
                 self.selected_tags
                     .symmetric_difference(&self.existing_tags)
@@ -473,7 +530,7 @@ impl CommandPalette {
                     .copied()
                     .collect(),
             ),
-            Screen::Commands | Screen::Identifier => return,
+            Screen::Commands | Screen::Identifier | Screen::Color(_) => return,
         };
         let request = if self.targets.len() > 1 {
             match request {
@@ -569,7 +626,7 @@ impl CommandPalette {
                 .get(row)
                 .is_some_and(|collection| self.mixed_collections.contains(&collection.id)),
             Screen::Commands => false,
-            Screen::Identifier => false,
+            Screen::Identifier | Screen::Color(_) => false,
         };
         h_flex()
             .id(("palette-row", row))
@@ -627,6 +684,20 @@ impl Render for CommandPalette {
         let unavailable = !self.ready || self.saving || self.targets.is_empty();
         let heading = match self.screen {
             Screen::Commands => "Commands",
+            Screen::Color(ThemeColorTarget::Accent) => {
+                if cx.theme().is_dark() {
+                    "Commands / Set dark accent color"
+                } else {
+                    "Commands / Set light accent color"
+                }
+            }
+            Screen::Color(ThemeColorTarget::Secondary) => {
+                if cx.theme().is_dark() {
+                    "Commands / Set dark secondary color"
+                } else {
+                    "Commands / Set light secondary color"
+                }
+            }
             Screen::Tags => "Commands / Edit tags",
             Screen::Collections => "Commands / Edit collections",
             Screen::Identifier => {
@@ -649,14 +720,18 @@ impl Render for CommandPalette {
             .on_action(cx.listener(|this, _: &PaletteNext, _, cx| this.move_highlight(1, cx)))
             .on_action(cx.listener(|this, _: &PalettePrevious, _, cx| this.move_highlight(-1, cx)))
             .on_action(cx.listener(|this, _: &PaletteApply, _, cx| {
-                if this.screen == Screen::Identifier {
+                if matches!(this.screen, Screen::Color(_)) {
+                    this.apply_color(cx)
+                } else if this.screen == Screen::Identifier {
                     this.apply_identifier(cx)
                 } else {
                     this.apply(cx)
                 }
             }))
             .on_action(cx.listener(|this, _: &PaletteConfirm, window, cx| {
-                if this.screen == Screen::Identifier {
+                if matches!(this.screen, Screen::Color(_)) {
+                    this.apply_color(cx)
+                } else if this.screen == Screen::Identifier {
                     this.apply_identifier(cx);
                 } else if let Some(row) = this.highlighted {
                     this.confirm(row, window, cx);
@@ -672,7 +747,12 @@ impl Render for CommandPalette {
                         div()
                             .text_base()
                             .text_color(cx.theme().muted_foreground)
-                            .child(self.title.clone()),
+                            .child(if matches!(self.screen, Screen::Color(_)) {
+                                "Edits affect only this appearance and are saved to config.toml"
+                                    .to_owned()
+                            } else {
+                                self.title.clone()
+                            }),
                     ),
             )
             .child(
@@ -696,6 +776,7 @@ impl Render for CommandPalette {
                         Screen::Tags => "palette-tags",
                         Screen::Collections => "palette-collections",
                         Screen::Identifier => "palette-identifier",
+                        Screen::Color(_) => "palette-color",
                     })
                     .test_support()
                     .role(Role::ListBox)
@@ -709,7 +790,9 @@ impl Render for CommandPalette {
                                 .h_9()
                                 .px_3()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(if self.screen == Screen::Identifier {
+                                .child(if matches!(self.screen, Screen::Color(_)) {
+                                    "Enter #RRGGBB, then press Enter to save."
+                                } else if self.screen == Screen::Identifier {
                                     if self.identifier_target.is_some() {
                                         "Enter an ISBN or DOI. Only missing fields will be filled."
                                     } else {
@@ -769,6 +852,8 @@ impl Render for CommandPalette {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(if self.screen == Screen::Identifier {
                                     "↵ Look up"
+                                } else if matches!(self.screen, Screen::Color(_)) {
+                                    "↵ Save · Esc Back"
                                 } else if self.submitted {
                                     "⌘↵ Retry · Esc Cancel"
                                 } else {
@@ -781,6 +866,8 @@ impl Render for CommandPalette {
                                 .text_base()
                                 .label(if self.saving {
                                     "Saving…".to_owned()
+                                } else if matches!(self.screen, Screen::Color(_)) {
+                                    "Save".to_owned()
                                 } else if self.screen == Screen::Identifier {
                                     "Look up".to_owned()
                                 } else if self.submitted {
@@ -788,13 +875,19 @@ impl Render for CommandPalette {
                                 } else {
                                     format!("Apply ({})", self.change_count())
                                 })
-                                .disabled(if self.screen == Screen::Identifier {
-                                    self.saving || self.state.read(cx).value().trim().is_empty()
-                                } else {
-                                    unavailable || self.change_count() == 0
-                                })
+                                .disabled(
+                                    if self.screen == Screen::Identifier
+                                        || matches!(self.screen, Screen::Color(_))
+                                    {
+                                        self.saving || self.state.read(cx).value().trim().is_empty()
+                                    } else {
+                                        unavailable || self.change_count() == 0
+                                    },
+                                )
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    if this.screen == Screen::Identifier {
+                                    if matches!(this.screen, Screen::Color(_)) {
+                                        this.apply_color(cx)
+                                    } else if this.screen == Screen::Identifier {
                                         this.apply_identifier(cx)
                                     } else {
                                         this.apply(cx)
@@ -1012,6 +1105,56 @@ mod tests {
             f.palette
                 .read_with(cx, |palette, _| palette.identifier_target.is_some())
         );
+    }
+
+    #[gpui_kit::test]
+    fn theme_color_commands_validate_input_without_a_resource(cx: &mut TestAppContext) {
+        use super::SetThemeColor;
+        use crate::settings::ThemeColorTarget;
+        for (row, target) in [
+            (5, ThemeColorTarget::Accent),
+            (6, ThemeColorTarget::Secondary),
+        ] {
+            let f = open(cx, false, false);
+            let requests = Rc::new(RefCell::new(Vec::<SetThemeColor>::new()));
+            let sink = requests.clone();
+            cx.update_window(f.window, |_, window, cx| {
+                f.palette.update(cx, |_, cx| {
+                    cx.subscribe(&f.palette, move |_, _, request: &SetThemeColor, _| {
+                        sink.borrow_mut().push(request.clone());
+                    })
+                    .detach();
+                });
+                assert!(!f.palette.read(cx).option_disabled(row));
+                window.click(("palette-row", row), cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(f.window, |_, window, cx| {
+                assert_eq!(f.palette.read(cx).screen, Screen::Color(target));
+                let state = f.palette.read(cx).state.clone();
+                state.update(cx, |state, cx| state.set_value("not a color", window, cx));
+                window.press("enter", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            assert!(requests.borrow().is_empty());
+            assert!(
+                f.palette
+                    .read_with(cx, |palette, _| palette.error.is_some())
+            );
+            cx.update_window(f.window, |_, window, cx| {
+                let state = f.palette.read(cx).state.clone();
+                state.update(cx, |state, cx| state.set_value("#AB12EF", window, cx));
+                window.click("palette-apply", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            let requests = requests.borrow();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].target, target);
+            assert_eq!(requests[0].hex, "#AB12EF");
+        }
     }
 
     #[gpui_kit::test]

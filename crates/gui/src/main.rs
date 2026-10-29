@@ -11,6 +11,7 @@ mod metadata;
 mod settings;
 mod tags;
 mod theme;
+mod theme_editor;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -82,7 +83,7 @@ fn run() -> Result<()> {
         .with_assets(AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            crate::theme::apply(cx.window_appearance().into(), cx);
+            crate::theme::apply(cx.window_appearance().into(), &settings.theme, cx);
             // `LibraryApp` is an ancestor of every control in the window, so these
             // fire whether the table, toolbar, or sidebar holds focus. Letter keys
             // skip `Input` so typing is undisturbed. Double-Esc to clear filters
