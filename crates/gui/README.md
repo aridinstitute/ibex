@@ -18,12 +18,12 @@ secondary = "#262C35"
 ```
 
 - `accent` colors buttons, links, focus borders, selection tints, and tints the
-  background gradient's bottom-left far edge; the wash itself stays neutral.
-- `secondary` replaces that tinted far edge exactly as the background gradient's
-  bottom-left end corner: **neutral → secondary**.
+  background gradient's top-right starting corner; the wash itself stays neutral.
+- `secondary` sets the background gradient's bottom-left end corner exactly:
+  **accent-tinted → secondary**.
 - Colors use `#RRGGBB`, case-insensitive, without transparency.
-- Omit `accent` to use system blue; omit `secondary` to use an accent-tinted
-  neutral endpoint. Invalid hex values fall back to those defaults without
+- Omit `accent` to use system blue; omit `secondary` to use the neutral
+  endpoint. Invalid hex values fall back to those defaults without
   discarding other preferences.
 
 Click the toolbar's color dot to open a popover with **Accent** and **Secondary**
