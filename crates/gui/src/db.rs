@@ -6,23 +6,185 @@ use oeuvre_app::command::ListResourceGridPage;
 use oeuvre_app::command::ListResourcesPage;
 use oeuvre_app::command::{
     AddCollectionParent, CountResources, CreateCollection, CreatePerson, CreateResource, CreateTag,
-    DeleteCollection, FindTagByText, GetResource, GetResourceDetail, ListCollectionForest,
-    ListPersons, ListResourcesQueryPage, ListTags, RemoveCollectionParent, RenameCollection,
-    SetResourceFavorite, UpdateResource,
+    DeleteCollection, FindPersonsByName, FindTagByText, GetResource, GetResourceDetail,
+    ListCollectionForest, ListPersons, ListResources, ListResourcesQueryPage, ListTags,
+    RemoveCollectionParent, RenameCollection, SetResourceFavorite, UpdateResource,
 };
 use oeuvre_app::command::{ImportBiblatex, ImportReport, PreviewBiblatex};
 use oeuvre_app::{AppState, Command, Outcome};
 #[cfg(test)]
 use oeuvre_core::ResourcePage;
 use oeuvre_core::{
-    Collection, CollectionId, CollectionTreeNode, ImportChoices, ImportPreview, Name, NewResource,
-    NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId, ResourceQuery,
-    SortedResourcePage, Tag,
+    Collection, CollectionId, CollectionTreeNode, CreatorRole, CreatorSpec, ImportChoices,
+    ImportPreview, Name, NewResource, NonEmptyStr, Person, Resource, ResourceCounts,
+    ResourceDetail, ResourceId, ResourceQuery, SortedResourcePage, Tag,
 };
 use oeuvre_core::{ResourceGridPage, ResourceGridParent};
 use std::{io::Read as _, path::PathBuf};
 use tokio::sync::oneshot;
 
+async fn link_creators(
+    state: &AppState,
+    creators: Vec<(CreatorRole, Name)>,
+    new: &mut NewResource,
+) -> Result<(), String> {
+    for (role, name) in creators {
+        let found = state
+            .execute(Command::FindPersonsByName(FindPersonsByName {
+                name: name.clone(),
+            }))
+            .await
+            .map_err(|e| e.to_string())?;
+        let id = match found {
+            Outcome::FindPersonsByName(people) if !people.is_empty() => people[0].id,
+            Outcome::FindPersonsByName(_) => match state
+                .execute(Command::CreatePerson(CreatePerson {
+                    name,
+                    aliases: vec![],
+                }))
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                Outcome::CreatePerson(person) => person.id,
+                _ => return Err("unexpected outcome from create_person".into()),
+            },
+            _ => return Err("unexpected outcome from find_persons_by_name".into()),
+        };
+        if !new
+            .creators
+            .iter()
+            .any(|creator| creator.person_id == id && creator.role == role)
+        {
+            new.creators.push(CreatorSpec {
+                person_id: id,
+                role,
+                credited_as: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a Crossref journal to an existing container or create one before the article.
+/// Never replace a manually chosen parent or guess among ambiguous matches.
+async fn link_journal(
+    state: &AppState,
+    journal: NewResource,
+    article: &mut NewResource,
+) -> Result<(), String> {
+    if article.parent_id.is_some() || article.kind != oeuvre_core::ResourceKind::JournalArticle {
+        return Ok(());
+    }
+    let rows = match state
+        .execute(Command::ListResources(ListResources))
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        Outcome::ListResources(rows) => rows,
+        _ => return Err("unexpected outcome from list_resources".into()),
+    };
+    let mut journals = Vec::new();
+    for row in rows
+        .into_iter()
+        .filter(|r| r.kind == oeuvre_core::ResourceKind::Journal)
+    {
+        match state
+            .execute(Command::GetResource(GetResource { id: row.id }))
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Outcome::GetResource(resource) => journals.push(resource),
+            _ => return Err("unexpected outcome from get_resource".into()),
+        }
+    }
+    let title = journal.title.as_str();
+    let by_title: Vec<_> = journals
+        .iter()
+        .filter(|r| r.title.as_str().trim().eq_ignore_ascii_case(title.trim()))
+        .collect();
+    let by_issn: Vec<_> = journals
+        .iter()
+        .filter(|r| {
+            r.issns.iter().any(|known| {
+                journal
+                    .issns
+                    .iter()
+                    .any(|incoming| known.lookup_key() == incoming.lookup_key())
+            })
+        })
+        .collect();
+    let matched = if journal.issns.is_empty() {
+        match by_title.as_slice() {
+            [] => None,
+            [one] => Some(*one),
+            _ => {
+                return Err(format!(
+                    "ambiguous journal title '{title}'; select a parent manually"
+                ));
+            }
+        }
+    } else {
+        match by_issn.as_slice() {
+            [one] if one.title.as_str().trim().eq_ignore_ascii_case(title.trim()) => Some(*one),
+            [one] => {
+                return Err(format!(
+                    "ISSN matches journal '{}' but Crossref calls it '{title}'",
+                    one.title.as_str()
+                ));
+            }
+            [] => match by_title.as_slice() {
+                [one] if one.issns.is_empty() => Some(*one),
+                [] => None,
+                _ => {
+                    return Err(format!(
+                        "ambiguous or conflicting journal '{title}'; select a parent manually"
+                    ));
+                }
+            },
+            _ => {
+                return Err(format!(
+                    "ambiguous ISSN for journal '{title}'; select a parent manually"
+                ));
+            }
+        }
+    };
+    article.parent_id = Some(if let Some(existing) = matched {
+        let mut enriched = existing.to_new();
+        let mut changed = false;
+        if enriched.issns.is_empty() && !journal.issns.is_empty() {
+            enriched.issns = journal.issns;
+            changed = true;
+        }
+        if enriched.short_title.is_none() && journal.short_title.is_some() {
+            enriched.short_title = journal.short_title;
+            changed = true;
+        }
+        if enriched.publisher.is_none() && journal.publisher.is_some() {
+            enriched.publisher = journal.publisher;
+            changed = true;
+        }
+        if changed {
+            state
+                .execute(Command::UpdateResource(UpdateResource {
+                    id: existing.id,
+                    new: enriched,
+                }))
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        existing.id
+    } else {
+        match state
+            .execute(Command::CreateResource(CreateResource { new: journal }))
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Outcome::CreateResource(resource) => resource.id,
+            _ => return Err("unexpected outcome from create_resource".into()),
+        }
+    });
+    Ok(())
+}
 /// File contents plus preview for the GUI review step.
 #[derive(Debug, Clone)]
 pub struct BiblatexImportPlan {
@@ -82,6 +244,11 @@ pub enum DbRequest {
     },
     CreateResource {
         new: NewResource,
+        reply: oneshot::Sender<Result<Resource, String>>,
+    },
+    ResolveIdentifier {
+        identifier: String,
+        target: Option<ResourceId>,
         reply: oneshot::Sender<Result<Resource, String>>,
     },
     ListPersons {
@@ -368,6 +535,88 @@ impl DbWorker {
                                         Outcome::CreateResource(resource) => Ok(resource),
                                         _ => Err("unexpected outcome from create_resource".into()),
                                     });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::ResolveIdentifier {
+                                identifier,
+                                target,
+                                reply,
+                            } => {
+                                let result = async {
+                                    let existing = if let Some(id) = target {
+                                        match state
+                                            .execute(Command::GetResource(GetResource { id }))
+                                            .await
+                                            .map_err(|e| e.to_string())?
+                                        {
+                                            Outcome::GetResource(resource) => Some(resource),
+                                            _ => {
+                                                return Err(
+                                                    "unexpected outcome from get_resource".into()
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    let fetched = crate::metadata::lookup(&identifier).await?;
+                                    let mut new = fetched.resource;
+                                    let has_role = |role| {
+                                        existing.as_ref().is_some_and(|record| {
+                                            record
+                                                .creators
+                                                .iter()
+                                                .any(|creator| creator.role == role)
+                                        })
+                                    };
+                                    let mut creators = Vec::new();
+                                    if !has_role(CreatorRole::Author) {
+                                        creators.extend(
+                                            fetched
+                                                .authors
+                                                .into_iter()
+                                                .map(|name| (CreatorRole::Author, name)),
+                                        );
+                                    }
+                                    if !has_role(CreatorRole::Editor) {
+                                        creators.extend(
+                                            fetched
+                                                .editors
+                                                .into_iter()
+                                                .map(|name| (CreatorRole::Editor, name)),
+                                        );
+                                    }
+                                    link_creators(&state, creators, &mut new).await?;
+                                    if existing.as_ref().is_none_or(|r| r.parent_id.is_none()) {
+                                        if let Some(journal) = fetched.journal {
+                                            link_journal(&state, journal, &mut new).await?;
+                                        }
+                                    }
+                                    let outcome = if let Some(record) = existing {
+                                        state
+                                            .execute(Command::UpdateResource(UpdateResource {
+                                                id: record.id,
+                                                new: crate::metadata::fill_gaps(&record, new),
+                                            }))
+                                            .await
+                                            .map_err(|e| e.to_string())?
+                                    } else {
+                                        state
+                                            .execute(Command::CreateResource(CreateResource {
+                                                new,
+                                            }))
+                                            .await
+                                            .map_err(|e| e.to_string())?
+                                    };
+                                    match outcome {
+                                        Outcome::CreateResource(resource)
+                                        | Outcome::UpdateResource(resource) => Ok(resource),
+                                        _ => {
+                                            Err("unexpected outcome from identifier lookup".into())
+                                        }
+                                    }
+                                }
+                                .await;
                                 let _ = reply.send(result);
                             }
                             DbRequest::ListPersons { reply } => {
@@ -833,6 +1082,24 @@ impl DbWorker {
             .map_err(|_| "db worker dropped the request".to_string())?
     }
 
+    /// Look up an ISBN or DOI, then create or fill missing fields on a selected record.
+    pub async fn resolve_identifier(
+        &self,
+        identifier: String,
+        target: Option<ResourceId>,
+    ) -> Result<Resource, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::ResolveIdentifier {
+                identifier,
+                target,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
     /// A synchronous listing/barrier for worker and GUI tests.
     #[cfg(test)]
     pub fn list_page_blocking(
@@ -874,6 +1141,165 @@ mod tests {
     use oeuvre_app::Surface;
     use oeuvre_app::testing::MemoryStore;
     use oeuvre_core::published_label_from;
+
+    #[tokio::test]
+    async fn doi_editors_are_linked_with_distinct_role() {
+        use oeuvre_core::ResourceKind;
+        let state = AppState::builder(MemoryStore::new())
+            .surface(Surface::Test)
+            .build();
+        let name = Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap();
+        let mut book = crate::metadata::empty_resource("Book", ResourceKind::Book).unwrap();
+        link_creators(
+            &state,
+            vec![
+                (CreatorRole::Author, name.clone()),
+                (CreatorRole::Editor, name),
+            ],
+            &mut book,
+        )
+        .await
+        .unwrap();
+        let saved = state
+            .execute(Command::CreateResource(CreateResource { new: book }))
+            .await
+            .unwrap();
+        assert!(
+            matches!(saved, Outcome::CreateResource(r) if r.creators.len() == 2
+            && r.creators[0].role == CreatorRole::Author && r.creators[1].role == CreatorRole::Editor
+            && r.creators[0].person_id == r.creators[1].person_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn doi_article_creates_and_reuses_journal_parent() {
+        use oeuvre_core::{Identifier, ResourceKind};
+        let state = AppState::builder(MemoryStore::new())
+            .surface(Surface::Test)
+            .build();
+        let mut journal =
+            crate::metadata::empty_resource("Journal of Tests", ResourceKind::Journal).unwrap();
+        journal.issns = vec![Identifier::new("1234-5679")];
+        let mut article =
+            crate::metadata::empty_resource("First paper", ResourceKind::JournalArticle).unwrap();
+        link_journal(&state, journal.clone(), &mut article)
+            .await
+            .unwrap();
+        let journal_id = article.parent_id.unwrap();
+        let saved = state
+            .execute(Command::CreateResource(CreateResource { new: article }))
+            .await
+            .unwrap();
+        assert!(matches!(saved, Outcome::CreateResource(r) if r.parent_id == Some(journal_id)));
+        let stored = state
+            .execute(Command::GetResource(GetResource { id: journal_id }))
+            .await
+            .unwrap();
+        assert!(
+            matches!(stored, Outcome::GetResource(r) if r.kind == ResourceKind::Journal && r.issns == journal.issns)
+        );
+
+        let mut next =
+            crate::metadata::empty_resource("Second paper", ResourceKind::JournalArticle).unwrap();
+        journal.title = NonEmptyStr::try_new("journal of tests").unwrap();
+        link_journal(&state, journal, &mut next).await.unwrap();
+        assert_eq!(next.parent_id, Some(journal_id));
+        let existing_article = Resource::try_new(
+            ResourceId::generate(),
+            crate::metadata::empty_resource("Local title", ResourceKind::JournalArticle).unwrap(),
+        )
+        .unwrap();
+        let merged = crate::metadata::fill_gaps(&existing_article, next);
+        assert_eq!(merged.title.as_str(), "Local title");
+        assert_eq!(merged.parent_id, Some(journal_id));
+        let all = state
+            .execute(Command::ListResources(ListResources))
+            .await
+            .unwrap();
+        assert!(
+            matches!(all, Outcome::ListResources(rows) if rows.iter().filter(|r| r.kind == ResourceKind::Journal).count() == 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn doi_journal_matching_rejects_ambiguous_title_and_preserves_existing_parent() {
+        use oeuvre_core::ResourceKind;
+        let state = AppState::builder(MemoryStore::new())
+            .surface(Surface::Test)
+            .build();
+        let journal =
+            crate::metadata::empty_resource("Shared Journal", ResourceKind::Journal).unwrap();
+        for _ in 0..2 {
+            state
+                .execute(Command::CreateResource(CreateResource {
+                    new: journal.clone(),
+                }))
+                .await
+                .unwrap();
+        }
+        let mut article =
+            crate::metadata::empty_resource("Paper", ResourceKind::JournalArticle).unwrap();
+        assert!(
+            link_journal(&state, journal.clone(), &mut article)
+                .await
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        assert!(article.parent_id.is_none());
+        let existing = state
+            .execute(Command::ListResources(ListResources))
+            .await
+            .unwrap();
+        let id = match existing {
+            Outcome::ListResources(rows) => rows[0].id,
+            _ => unreachable!(),
+        };
+        article.parent_id = Some(id);
+        link_journal(&state, journal, &mut article).await.unwrap();
+        assert_eq!(article.parent_id, Some(id));
+    }
+
+    #[tokio::test]
+    async fn doi_journal_reuses_unique_title_and_enriches_missing_issn() {
+        use oeuvre_core::{Identifier, ResourceKind};
+        let state = AppState::builder(MemoryStore::new())
+            .surface(Surface::Test)
+            .build();
+        let journal =
+            crate::metadata::empty_resource("Known Journal", ResourceKind::Journal).unwrap();
+        let stored = state
+            .execute(Command::CreateResource(CreateResource {
+                new: journal.clone(),
+            }))
+            .await
+            .unwrap();
+        let id = match stored {
+            Outcome::CreateResource(r) => r.id,
+            _ => unreachable!(),
+        };
+        let mut article =
+            crate::metadata::empty_resource("Paper", ResourceKind::JournalArticle).unwrap();
+        link_journal(&state, journal.clone(), &mut article)
+            .await
+            .unwrap();
+        assert_eq!(article.parent_id, Some(id));
+        let mut with_issn = journal;
+        with_issn.issns = vec![Identifier::new("1234-5679")];
+        with_issn.short_title = Some(NonEmptyStr::try_new("K. J.").unwrap());
+        let mut next =
+            crate::metadata::empty_resource("Second", ResourceKind::JournalArticle).unwrap();
+        link_journal(&state, with_issn.clone(), &mut next)
+            .await
+            .unwrap();
+        assert_eq!(next.parent_id, Some(id));
+        let stored = state
+            .execute(Command::GetResource(GetResource { id }))
+            .await
+            .unwrap();
+        assert!(
+            matches!(stored, Outcome::GetResource(r) if r.issns == with_issn.issns && r.short_title == with_issn.short_title)
+        );
+    }
 
     #[tokio::test]
     async fn worker_lists_grid_roots_and_children_with_metadata() {
