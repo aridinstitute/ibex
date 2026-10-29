@@ -8,9 +8,13 @@ The file is created on the first settings save.
 ## Theme colors
 
 ```toml
-[theme]
+[theme.light]
 accent = "#0064FF"
 secondary = "#D9DDE5"
+
+[theme.dark]
+accent = "#0A84FF"
+secondary = "#262C35"
 ```
 
 - `accent` colors buttons, links, focus borders, selection tints, and the
@@ -23,9 +27,13 @@ secondary = "#D9DDE5"
 
 Click the toolbar's color dot to edit the accent, or open the command palette
 with **⌘K** and choose **Set accent color…** or **Set secondary color…**.
-The editor starts with the current color. Press **Enter** or click **Save** to
+The editor shows the active light/dark appearance and starts with its current
+color. Changes affect only that appearance. Press **Enter** or click **Save** to
 apply and persist it; **Escape** goes back without applying. A save error leaves
 the previous theme active and allows retrying.
 
 The sun/moon button switches light/dark mode without clearing custom colors.
+Legacy `[theme]` accent/secondary values are read as light-mode preferences only;
+dark mode starts with its own defaults. The next settings save writes the split
+`[theme.light]` and `[theme.dark]` tables.
 Manual TOML changes are read when the app next starts.

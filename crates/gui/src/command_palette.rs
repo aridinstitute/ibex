@@ -684,8 +684,20 @@ impl Render for CommandPalette {
         let unavailable = !self.ready || self.saving || self.targets.is_empty();
         let heading = match self.screen {
             Screen::Commands => "Commands",
-            Screen::Color(ThemeColorTarget::Accent) => "Commands / Set accent color",
-            Screen::Color(ThemeColorTarget::Secondary) => "Commands / Set secondary color",
+            Screen::Color(ThemeColorTarget::Accent) => {
+                if cx.theme().is_dark() {
+                    "Commands / Set dark accent color"
+                } else {
+                    "Commands / Set light accent color"
+                }
+            }
+            Screen::Color(ThemeColorTarget::Secondary) => {
+                if cx.theme().is_dark() {
+                    "Commands / Set dark secondary color"
+                } else {
+                    "Commands / Set light secondary color"
+                }
+            }
             Screen::Tags => "Commands / Edit tags",
             Screen::Collections => "Commands / Edit collections",
             Screen::Identifier => {
@@ -736,7 +748,8 @@ impl Render for CommandPalette {
                             .text_base()
                             .text_color(cx.theme().muted_foreground)
                             .child(if matches!(self.screen, Screen::Color(_)) {
-                                "Enter a hex color; changes are saved to config.toml".to_owned()
+                                "Edits affect only this appearance and are saved to config.toml"
+                                    .to_owned()
                             } else {
                                 self.title.clone()
                             }),

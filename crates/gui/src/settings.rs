@@ -4,18 +4,47 @@
 
 use std::{collections::BTreeMap, fs, io, path::Path};
 
+use gpui_kit::component::ThemeMode;
 use serde::{Deserialize, Serialize};
 
 /// Name of the settings file inside the app data directory.
 const CONFIG_FILE: &str = "config.toml";
 
-/// Colors are stored as hex strings so config.toml remains easy to edit.
+/// Each appearance owns its colors; legacy shared colors migrate to light only.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "StoredThemeSettings")]
 pub struct ThemeSettings {
+    pub light: ThemeColors,
+    pub dark: ThemeColors,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThemeColors {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secondary: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct StoredThemeSettings {
+    light: ThemeColors,
+    dark: ThemeColors,
+    accent: Option<String>,
+    secondary: Option<String>,
+}
+
+impl From<StoredThemeSettings> for ThemeSettings {
+    fn from(stored: StoredThemeSettings) -> Self {
+        Self {
+            light: ThemeColors {
+                accent: stored.light.accent.or(stored.accent),
+                secondary: stored.light.secondary.or(stored.secondary),
+            },
+            dark: stored.dark,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,10 +64,15 @@ pub fn parse_hex_color(value: &str) -> Result<u32, &'static str> {
 }
 
 impl ThemeSettings {
-    pub fn color(&self, target: ThemeColorTarget) -> Option<u32> {
+    pub fn color(&self, mode: ThemeMode, target: ThemeColorTarget) -> Option<u32> {
+        let colors = if mode.is_dark() {
+            &self.dark
+        } else {
+            &self.light
+        };
         let value = match target {
-            ThemeColorTarget::Accent => &self.accent,
-            ThemeColorTarget::Secondary => &self.secondary,
+            ThemeColorTarget::Accent => &colors.accent,
+            ThemeColorTarget::Secondary => &colors.secondary,
         };
         value
             .as_deref()
@@ -65,15 +99,21 @@ impl Settings {
     /// Validate and persist before publishing a new color to the running UI.
     pub fn set_theme_color(
         &mut self,
+        mode: ThemeMode,
         target: ThemeColorTarget,
         hex: &str,
         dir: &Path,
     ) -> anyhow::Result<()> {
         let color = parse_hex_color(hex).map_err(anyhow::Error::msg)?;
         let mut updated = self.clone();
+        let colors = if mode.is_dark() {
+            &mut updated.theme.dark
+        } else {
+            &mut updated.theme.light
+        };
         let slot = match target {
-            ThemeColorTarget::Accent => &mut updated.theme.accent,
-            ThemeColorTarget::Secondary => &mut updated.theme.secondary,
+            ThemeColorTarget::Accent => &mut colors.accent,
+            ThemeColorTarget::Secondary => &mut colors.secondary,
         };
         *slot = Some(format!("#{color:06X}"));
         updated.save(dir)?;
@@ -197,20 +237,35 @@ mod tests {
             ..Settings::default()
         };
         settings
-            .set_theme_color(ThemeColorTarget::Accent, " #ab12ef ", dir.path())
+            .set_theme_color(
+                ThemeMode::Light,
+                ThemeColorTarget::Accent,
+                " #ab12ef ",
+                dir.path(),
+            )
             .unwrap();
         settings
-            .set_theme_color(ThemeColorTarget::Secondary, "#102030", dir.path())
+            .set_theme_color(
+                ThemeMode::Light,
+                ThemeColorTarget::Secondary,
+                "#102030",
+                dir.path(),
+            )
             .unwrap();
-        assert_eq!(settings.theme.accent.as_deref(), Some("#AB12EF"));
-        assert_eq!(settings.theme.secondary.as_deref(), Some("#102030"));
+        assert_eq!(settings.theme.light.accent.as_deref(), Some("#AB12EF"));
+        assert_eq!(settings.theme.light.secondary.as_deref(), Some("#102030"));
         assert_eq!(Settings::load(dir.path()), settings);
         assert_eq!(settings.left_sidebar_width, Some(245.));
         let before = settings.clone();
         for invalid in ["red", "#fff", "#12345678", "#gg0000", "123456", "#你好"] {
             assert!(
                 settings
-                    .set_theme_color(ThemeColorTarget::Accent, invalid, dir.path())
+                    .set_theme_color(
+                        ThemeMode::Light,
+                        ThemeColorTarget::Accent,
+                        invalid,
+                        dir.path()
+                    )
                     .is_err()
             );
             assert_eq!(settings, before);
@@ -226,7 +281,12 @@ mod tests {
         let mut settings = Settings::default();
         assert!(
             settings
-                .set_theme_color(ThemeColorTarget::Accent, "#123456", &blocked)
+                .set_theme_color(
+                    ThemeMode::Light,
+                    ThemeColorTarget::Accent,
+                    "#123456",
+                    &blocked
+                )
                 .is_err()
         );
         assert_eq!(settings, Settings::default());
@@ -239,10 +299,80 @@ mod tests {
         )
         .unwrap();
         assert_eq!(settings.left_sidebar_width, Some(245.));
-        assert_eq!(settings.theme.color(ThemeColorTarget::Accent), None);
         assert_eq!(
-            settings.theme.color(ThemeColorTarget::Secondary),
+            settings
+                .theme
+                .color(ThemeMode::Light, ThemeColorTarget::Accent),
+            None
+        );
+        assert_eq!(
+            settings
+                .theme
+                .color(ThemeMode::Light, ThemeColorTarget::Secondary),
             Some(0x123456)
         );
+    }
+
+    #[test]
+    fn legacy_theme_colors_are_kept_for_light_but_not_dark() {
+        let settings: Settings =
+            toml::from_str("[theme]\naccent = \"#FF8800\"\nsecondary = \"#102030\"\n").unwrap();
+        let saved = toml::to_string(&settings).unwrap();
+        assert!(saved.contains("[theme.light]"));
+        assert!(saved.contains("[theme.dark]"));
+        assert_eq!(saved.matches("#FF8800").count(), 1);
+        assert_eq!(toml::from_str::<Settings>(&saved).unwrap(), settings);
+    }
+
+    #[test]
+    fn light_and_dark_colors_round_trip_and_update_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings: Settings = toml::from_str(
+            "[theme.light]\naccent = \"#FFFF00\"\nsecondary = \"#00FFFF\"\n[theme.dark]\naccent = \"#664400\"\nsecondary = \"#003344\"\n",
+        ).unwrap();
+        settings
+            .set_theme_color(
+                ThemeMode::Dark,
+                ThemeColorTarget::Accent,
+                "#556677",
+                dir.path(),
+            )
+            .unwrap();
+        assert_eq!(settings.theme.light.accent.as_deref(), Some("#FFFF00"));
+        assert_eq!(settings.theme.dark.accent.as_deref(), Some("#556677"));
+        assert_eq!(settings.theme.dark.secondary.as_deref(), Some("#003344"));
+        settings
+            .set_theme_color(
+                ThemeMode::Light,
+                ThemeColorTarget::Secondary,
+                "#112233",
+                dir.path(),
+            )
+            .unwrap();
+        assert_eq!(settings.theme.light.secondary.as_deref(), Some("#112233"));
+        assert_eq!(settings.theme.dark.secondary.as_deref(), Some("#003344"));
+        assert_eq!(Settings::load(dir.path()), settings);
+        assert_eq!(
+            settings
+                .theme
+                .color(ThemeMode::Light, ThemeColorTarget::Accent),
+            Some(0xffff00)
+        );
+        assert_eq!(
+            settings
+                .theme
+                .color(ThemeMode::Dark, ThemeColorTarget::Accent),
+            Some(0x556677)
+        );
+    }
+
+    #[test]
+    fn explicit_light_settings_take_precedence_over_legacy_shared_colors() {
+        let settings: Settings = toml::from_str(
+            "[theme]\naccent = \"#FF8800\"\nsecondary = \"#102030\"\n[theme.light]\naccent = \"#123456\"\n",
+        ).unwrap();
+        assert_eq!(settings.theme.light.accent.as_deref(), Some("#123456"));
+        assert_eq!(settings.theme.light.secondary.as_deref(), Some("#102030"));
+        assert_eq!(settings.theme.dark, ThemeColors::default());
     }
 }

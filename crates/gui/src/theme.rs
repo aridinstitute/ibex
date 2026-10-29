@@ -58,7 +58,7 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
 
 fn configured_palette(mode: ThemeMode, colors: ThemeColor, settings: &ThemeSettings) -> ThemeColor {
     let mut colors = palette(mode, colors);
-    let Some(value) = settings.color(ThemeColorTarget::Accent) else {
+    let Some(value) = settings.color(mode, ThemeColorTarget::Accent) else {
         return colors;
     };
     let accent: gpui_kit::Hsla = rgb(value).into();
@@ -179,9 +179,13 @@ mod tests {
     #[test]
     fn configured_accent_updates_both_modes_without_recoloring_surfaces() {
         for mode in [ThemeMode::Light, ThemeMode::Dark] {
-            let settings = crate::settings::ThemeSettings {
+            let custom = crate::settings::ThemeColors {
                 accent: Some("#FFFF00".into()),
                 secondary: Some("#102030".into()),
+            };
+            let settings = crate::settings::ThemeSettings {
+                light: custom.clone(),
+                dark: custom,
             };
             let colors = super::configured_palette(mode, neutral_base(), &settings);
             assert_eq!(colors.primary, Hsla::from(rgb(0xffff00)));
@@ -192,5 +196,17 @@ mod tests {
             assert_eq!(colors.background, neutral_base().background);
             assert_eq!(colors.accent, neutral_base().accent);
         }
+    }
+
+    #[test]
+    fn palette_uses_only_the_requested_appearance() {
+        let settings: crate::settings::ThemeSettings =
+            toml::from_str("[light]\naccent = \"#FFFF00\"\n[dark]\naccent = \"#445566\"\n")
+                .unwrap();
+        let light = super::configured_palette(ThemeMode::Light, neutral_base(), &settings);
+        let dark = super::configured_palette(ThemeMode::Dark, neutral_base(), &settings);
+        assert_eq!(light.primary, Hsla::from(rgb(0xffff00)));
+        assert_eq!(dark.primary, Hsla::from(rgb(0x445566)));
+        assert_ne!(light.primary, dark.primary);
     }
 }

@@ -2974,7 +2974,14 @@ impl LibraryApp {
         let grouped = self.table.read(cx).delegate().grouped;
         let preferences = &self.table.read(cx).delegate().settings.theme;
         let secondary = preferences
-            .color(ThemeColorTarget::Secondary)
+            .color(
+                if cx.theme().is_dark() {
+                    ThemeMode::Dark
+                } else {
+                    ThemeMode::Light
+                },
+                ThemeColorTarget::Secondary,
+            )
             .map(rgb)
             .unwrap_or_else(|| {
                 workspace_gradient_stops(cx.theme().is_dark(), cx.theme().primary, None).1
@@ -3006,12 +3013,21 @@ impl LibraryApp {
             |app, palette, request: &SetThemeColor, window, cx| {
                 let started = std::time::Instant::now();
                 let mut settings = app.table.read(cx).delegate().settings.clone();
-                let result =
-                    settings.set_theme_color(request.target, &request.hex, &app.settings_dir);
+                let result = settings.set_theme_color(
+                    if cx.theme().is_dark() {
+                        ThemeMode::Dark
+                    } else {
+                        ThemeMode::Light
+                    },
+                    request.target,
+                    &request.hex,
+                    &app.settings_dir,
+                );
                 eprintln!(
                     "{}",
                     serde_json::json!({
                         "level": "INFO", "command": "set_theme_color", "surface": "gui",
+                        "mode": if cx.theme().is_dark() { "dark" } else { "light" },
                         "target": format!("{:?}", request.target), "color": request.hex,
                         "duration_us": started.elapsed().as_micros() as u64,
                         "status": if result.is_ok() { "ok" } else { "error" },
@@ -5712,7 +5728,14 @@ impl Render for LibraryApp {
             .map(|inputs| inputs.title.clone());
         let danger = cx.theme().danger;
         let settings = &delegate.settings;
-        let secondary = settings.theme.color(ThemeColorTarget::Secondary);
+        let secondary = settings.theme.color(
+            if cx.theme().is_dark() {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            },
+            ThemeColorTarget::Secondary,
+        );
         let (left_target, right_target) = sidebar_target_widths(
             window.viewport_size().width,
             self.left_panel_open.then_some(settings.left_sidebar_width),
@@ -6775,10 +6798,9 @@ mod palette_persistence_tests {
     }
 
     #[gpui_kit::test]
-    fn toolbar_and_palette_save_theme_colors_and_keep_them_when_toggling(
-        cx: &mut gpui_kit::TestAppContext,
-    ) {
+    fn toolbar_and_palette_edit_only_the_active_mode(cx: &mut gpui_kit::TestAppContext) {
         use gpui_kit::component::ActiveTheme as _;
+        use gpui_kit::component::ThemeMode;
         use gpui_kit::test::TestWindowExt as _;
         use gpui_kit::{Hsla, rgb};
         let dir = tempfile::tempdir().unwrap();
@@ -6801,6 +6823,11 @@ mod palette_persistence_tests {
             .unwrap();
         let (handle, app) = cx.update(|cx| {
             gpui_kit::init(cx);
+            crate::theme::apply(
+                ThemeMode::Light,
+                &crate::settings::ThemeSettings::default(),
+                cx,
+            );
             cx.bind_keys([KeyBinding::new(
                 "cmd-k",
                 OpenCommandPalette,
@@ -6833,7 +6860,7 @@ mod palette_persistence_tests {
         .unwrap();
         cx.run_until_parked();
         assert_eq!(
-            Settings::load(dir.path()).theme.accent.as_deref(),
+            Settings::load(dir.path()).theme.light.accent.as_deref(),
             Some("#FF8800")
         );
         cx.update_window(handle, |_, window, cx| {
@@ -6844,7 +6871,7 @@ mod palette_persistence_tests {
         .unwrap();
         cx.run_until_parked();
         cx.update_window(handle, |_, window, cx| {
-            assert_eq!(cx.theme().primary, Hsla::from(rgb(0xff8800)));
+            assert_eq!(cx.theme().primary, Hsla::from(rgb(0x0a84ff)));
             window.press("cmd-k", cx);
         })
         .unwrap();
@@ -6867,8 +6894,20 @@ mod palette_persistence_tests {
         .unwrap();
         cx.run_until_parked();
         let saved = Settings::load(dir.path());
-        assert_eq!(saved.theme.secondary.as_deref(), Some("#102030"));
-        assert_eq!(saved.theme.accent.as_deref(), Some("#FF8800"));
+        assert_eq!(saved.theme.dark.secondary.as_deref(), Some("#102030"));
+        assert_eq!(saved.theme.light.accent.as_deref(), Some("#FF8800"));
+        assert_eq!(saved.theme.light.secondary, None);
+        assert_eq!(saved.theme.dark.accent, None);
+        cx.update_window(handle, |_, window, cx| {
+            window.click("toggle-theme", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, _, cx| {
+            assert!(!cx.theme().is_dark());
+            assert_eq!(cx.theme().primary, Hsla::from(rgb(0xff8800)));
+        })
+        .unwrap();
         app.read_with(cx, |app, cx| {
             assert_eq!(app.table.read(cx).delegate().settings, saved);
         });
