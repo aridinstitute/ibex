@@ -17,10 +17,10 @@ accent = "#0A84FF"
 secondary = "#262C35"
 ```
 
-- `accent` colors buttons, links, focus borders, selection tints, and tints the
-  background gradient's top-right starting corner; the wash itself stays neutral.
-- `secondary` sets the background gradient's bottom-left end corner exactly:
-  **accent-tinted → secondary**.
+- `accent` colors buttons, links, focus borders, selection tints, and a soft
+  glow in the window's top-right corner that fades out before the middle.
+- `secondary` sets the background gradient's bottom-left end corner exactly; the
+  wash runs from a neutral top-right to it: **neutral → secondary**.
 - Colors use `#RRGGBB`, case-insensitive, without transparency.
 - Omit `accent` to use system blue; omit `secondary` to use the neutral
   endpoint. Invalid hex values fall back to those defaults without
