@@ -84,41 +84,7 @@ fn run() -> Result<()> {
         .run(move |cx| {
             gpui_kit::init(cx);
             crate::theme::apply(cx.window_appearance().into(), &settings.theme, cx);
-            // `LibraryApp` is an ancestor of every control in the window, so these
-            // fire whether the table, toolbar, or sidebar holds focus. Letter keys
-            // skip `Input` so typing is undisturbed. Double-Esc to clear filters
-            // is a keystroke observer (works while Input owns single Esc).
-            // ⌘↩ save is handled on LibraryApp via the Input `Enter` action that
-            // single-line fields propagate after their own binding.
-            // E = inline row edit; Enter = sidebar form; N = new draft row.
-            // Letter keys skip Input so typing in cells/filters is undisturbed.
-            cx.bind_keys([
-                KeyBinding::new("cmd-k", OpenCommandPalette, Some("LibraryApp")),
-                KeyBinding::new("cmd-shift-i", ImportBiblatexFile, Some("LibraryApp")),
-                KeyBinding::new("]", ToggleDetailPanel, Some("LibraryApp && !Input")),
-                KeyBinding::new("[", ToggleLeftPanel, Some("LibraryApp && !Input")),
-                KeyBinding::new("space", CycleColumnSort, Some("LibraryApp && !Input")),
-                KeyBinding::new("e", BeginInlineEdit, Some("LibraryApp && !Input")),
-                KeyBinding::new("enter", ToggleEditMode, Some("LibraryApp && !Input")),
-                KeyBinding::new("n", BeginNewRow, Some("LibraryApp && !Input")),
-                KeyBinding::new("f", FocusColumnFilter, Some("LibraryApp && !Input")),
-                KeyBinding::new(
-                    "/",
-                    FocusSearch,
-                    Some("LibraryApp && !Input && !InlineEdit"),
-                ),
-                // Tab must beat Input's IndentInline/OutdentInline (same depth as
-                // `Input`, later registration wins) and DataTable's column select
-                // (`InlineEdit > Combobox` is deeper than `DataTable`). Without
-                // these, Tab no-ops on single-line fields and Shift+Tab loops the
-                // table onto Added/Edited — leaving the edit row.
-                KeyBinding::new("tab", InlineNextField, Some("InlineEdit > Input")),
-                KeyBinding::new("shift-tab", InlinePrevField, Some("InlineEdit > Input")),
-                KeyBinding::new("tab", InlineNextField, Some("InlineEdit > Combobox")),
-                KeyBinding::new("shift-tab", InlinePrevField, Some("InlineEdit > Combobox")),
-                KeyBinding::new("tab", InlineNextField, Some("InlineEdit > DataTable")),
-                KeyBinding::new("shift-tab", InlinePrevField, Some("InlineEdit > DataTable")),
-            ]);
+            bind_library_keys(cx);
             if let Err(err) = gpui_kit::open_window(
                 // The window draws its own title bar (the toolbar inside
                 // LibraryApp), so the native one is transparent with only the
@@ -198,6 +164,70 @@ fn setup_state(args: &Args) -> Result<AppState> {
     })?;
     std::mem::forget(rt);
     Ok(state)
+}
+
+fn bind_library_keys(cx: &mut App) {
+    // Shared with keyboard interaction tests so they exercise production bindings.
+    // `LibraryApp` is an ancestor of every control in the window, so these
+    // fire whether the table, toolbar, or sidebar holds focus. Letter keys
+    // skip `Input` so typing is undisturbed. Double-Esc to clear filters
+    // is a keystroke observer (works while Input owns single Esc).
+    // ⌘↩ save is handled on LibraryApp via the Input `Enter` action that
+    // single-line fields propagate after their own binding.
+    // E = inline row edit; Enter = sidebar form; N = new draft row.
+    // Letter keys skip Input so typing in cells/filters is undisturbed.
+    cx.bind_keys([
+        KeyBinding::new("cmd-k", OpenCommandPalette, Some("LibraryApp")),
+        KeyBinding::new("cmd-shift-i", ImportBiblatexFile, Some("LibraryApp")),
+        KeyBinding::new("]", ToggleDetailPanel, Some("LibraryApp && !Input")),
+        KeyBinding::new("[", ToggleLeftPanel, Some("LibraryApp && !Input")),
+        // GPUI dispatches actions before Link's keyboard click handling.
+        // Keep activation keys local to browser links without disabling table actions.
+        KeyBinding::new(
+            "space",
+            CycleColumnSort,
+            Some("LibraryApp && !Input && !BrowserLink"),
+        ),
+        KeyBinding::new("e", BeginInlineEdit, Some("LibraryApp && !Input")),
+        KeyBinding::new(
+            "enter",
+            ToggleEditMode,
+            Some("LibraryApp && !Input && !BrowserLink"),
+        ),
+        KeyBinding::new("n", BeginNewRow, Some("LibraryApp && !Input")),
+        KeyBinding::new(
+            "/",
+            FocusSearch,
+            Some("LibraryApp && !Input && !InlineEdit"),
+        ),
+        // Tab must beat Input's IndentInline/OutdentInline (same depth as
+        // `Input`, later registration wins) and DataTable's column select
+        // (`InlineEdit > Combobox` is deeper than `DataTable`). Without
+        // these, Tab no-ops on single-line fields and Shift+Tab loops the
+        // table onto Added/Edited — leaving the edit row.
+        KeyBinding::new("tab", InlineNextField, Some("InlineEdit > Input")),
+        KeyBinding::new("shift-tab", InlinePrevField, Some("InlineEdit > Input")),
+        KeyBinding::new("tab", InlineNextField, Some("InlineEdit > Combobox")),
+        KeyBinding::new("shift-tab", InlinePrevField, Some("InlineEdit > Combobox")),
+        KeyBinding::new("tab", InlineNextField, Some("InlineEdit > DataTable")),
+        KeyBinding::new("shift-tab", InlinePrevField, Some("InlineEdit > DataTable")),
+    ]);
+    bind_favorite_keys(cx);
+}
+
+fn bind_favorite_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new(
+            "f",
+            crate::library::ToggleFavorite,
+            Some("LibraryApp && !Input && !InlineEdit"),
+        ),
+        KeyBinding::new(
+            "shift-f",
+            FocusColumnFilter,
+            Some("LibraryApp && !Input && !InlineEdit"),
+        ),
+    ]);
 }
 
 fn default_data_dir() -> PathBuf {

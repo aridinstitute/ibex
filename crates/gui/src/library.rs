@@ -1738,6 +1738,7 @@ gpui_kit::actions!([
     BeginInlineEdit,
     BeginNewRow,
     FocusColumnFilter,
+    ToggleFavorite,
     FocusSearch,
     InlineNextField,
     InlinePrevField,
@@ -1895,6 +1896,8 @@ pub struct LibraryApp {
     /// Ids with a detail fetch in flight, so selection and prefetch share
     /// one request per id instead of stacking duplicates.
     detail_inflight: HashSet<ResourceId>,
+    /// Ignore repeated keyboard/button requests until this id's write completes.
+    favorite_pending: HashSet<ResourceId>,
     /// The edit form while one is open: loading while the raw record is
     /// fetched, ready once the inputs exist. One form at a time, owned by
     /// the row it was opened on.
@@ -2708,6 +2711,7 @@ impl LibraryApp {
             detail: None,
             detail_cache: DetailCache::new(),
             detail_inflight: HashSet::new(),
+            favorite_pending: HashSet::new(),
             edit: None,
             detail_gens: HashMap::new(),
             last_escape_at: None,
@@ -3350,10 +3354,15 @@ impl LibraryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut expanded = HashSet::new();
-        expand_all_parents(&forest, &mut expanded);
+        let mut previous_parents = HashSet::new();
+        expand_all_parents(&self.collection_forest, &mut previous_parents);
+        let mut parents = HashSet::new();
+        expand_all_parents(&forest, &mut parents);
+        // New branches open by default; known branches keep the user's choice.
+        self.expanded_collections.retain(|id| parents.contains(id));
+        self.expanded_collections
+            .extend(parents.difference(&previous_parents).copied());
         self.collection_forest = forest;
-        self.expanded_collections = expanded;
         self.sync_collection_picker(window, cx);
     }
 
@@ -3787,23 +3796,17 @@ impl LibraryApp {
         cx.notify();
     }
 
-    /// Flip the selected resource's favorite flag from the detail panel.
+    /// Toggle by stored identity even when the detail panel is still loading.
     fn toggle_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_inline(cx) {
+            return;
+        }
         let Some(id) = self.selected else {
             return;
         };
-        let Some(current) = self
-            .detail
-            .as_ref()
-            .and_then(|(loaded, fetch)| (*loaded == id).then_some(fetch))
-            .and_then(|fetch| match fetch {
-                DetailFetch::Loaded(detail) => Some(detail.favorite),
-                _ => None,
-            })
-        else {
+        if !self.favorite_pending.insert(id) {
             return;
-        };
-        let next = !current;
+        }
         let worker = self.table.read(cx).delegate().worker().clone();
         // Bump the generation so an in-flight pre-toggle detail cannot
         // overwrite the starred state after the toggle lands.
@@ -3812,15 +3815,27 @@ impl LibraryApp {
         let fetch_epoch = *epoch;
         self.detail_cache.invalidate(&id);
         cx.spawn_in(window, async move |app, window| {
-            let reply = worker.set_resource_favorite(id, next).await;
+            let reply = async {
+                let current = worker.resource(id).await?;
+                worker.set_resource_favorite(id, !current.favorite).await
+            }
+            .await;
             _ = app.update_in(window, |app, window, cx| {
+                app.favorite_pending.remove(&id);
+                // A generation guards read freshness, not persisted writes:
+                // concurrent metadata reads may still precede this write.
+                // Only an obsolete error should leave newer detail untouched.
+                if reply.is_err() && *app.detail_gens.get(&id).unwrap_or(&0) != fetch_epoch {
+                    cx.notify();
+                    return;
+                }
+                app.detail_inflight.remove(&id);
+                // Reads started at any generation during the write may contain
+                // the old favorite. Reject their replies and cached results.
+                *app.detail_gens.entry(id).or_insert(0) += 1;
+                app.detail_cache.invalidate(&id);
                 match reply {
                     Ok(resource) => {
-                        // Refetch detail so names/container stay resolved.
-                        app.detail_inflight.remove(&id);
-                        if *app.detail_gens.get(&id).unwrap_or(&0) != fetch_epoch {
-                            return;
-                        }
                         // Optimistically patch favorite on a cached/loaded
                         // detail if present, then refetch for consistency.
                         if let Some((_, DetailFetch::Loaded(detail))) = app.detail.as_mut() {
@@ -3828,7 +3843,9 @@ impl LibraryApp {
                                 detail.favorite = resource.favorite;
                             }
                         }
-                        app.fetch_detail(id, window, cx);
+                        if app.selected == Some(id) {
+                            app.fetch_detail(id, window, cx);
+                        }
                         app.refresh_counts(window, cx);
                         // Favorites view drops unstarred rows immediately.
                         let filtering_favorites =
@@ -4997,10 +5014,11 @@ impl LibraryApp {
         count: Option<u64>,
         selected: bool,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> impl IntoElement + use<> {
         let hover = cx.theme().accent;
         h_flex()
             .id(("sidebar-entry", index))
+            .test_support()
             .w_full()
             .min_w_0()
             .gap_2()
@@ -5072,7 +5090,7 @@ impl LibraryApp {
         } else {
             visible_collection_rows(&self.collection_forest, &self.expanded_collections)
         };
-        let kinds = ResourceKind::ALL
+        let kinds = SIDEBAR_KIND_ORDER
             .into_iter()
             .enumerate()
             .filter(|(_, kind)| {
@@ -5230,6 +5248,7 @@ impl LibraryApp {
                     let app = cx.weak_entity();
                     h_flex()
                         .id(("collection-row", index))
+                        .test_support()
                         .w_full()
                         .items_center()
                         .gap_0p5()
@@ -5350,6 +5369,7 @@ impl LibraryApp {
                                         .icon(chevron)
                                         .on_click(
                                             cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
                                                 this.toggle_collection_expanded(id, cx)
                                             }),
                                         ),
@@ -5431,6 +5451,10 @@ impl LibraryApp {
                             Button::new("toggle-favorite")
                                 .ghost()
                                 .icon(star)
+                                .disabled(
+                                    self.selected
+                                        .is_some_and(|id| self.favorite_pending.contains(&id)),
+                                )
                                 .tooltip(if favorited == Some(true) {
                                     "Remove from favorites"
                                 } else {
@@ -5731,6 +5755,32 @@ fn sidebar_kind_label(kind: ResourceKind) -> String {
     }
 }
 
+// Sidebar reading order groups containers with their contents without changing
+// the core enum order used by serialization, editors, and other surfaces.
+const SIDEBAR_KIND_ORDER: [ResourceKind; 21] = [
+    ResourceKind::Book,
+    ResourceKind::BookSection,
+    ResourceKind::Journal,
+    ResourceKind::Issue,
+    ResourceKind::JournalArticle,
+    ResourceKind::ConferencePaper,
+    ResourceKind::Preprint,
+    ResourceKind::Thesis,
+    ResourceKind::Report,
+    ResourceKind::Manuscript,
+    ResourceKind::MagazineArticle,
+    ResourceKind::NewspaperArticle,
+    ResourceKind::DictionaryEntry,
+    ResourceKind::EncyclopediaArticle,
+    ResourceKind::Webpage,
+    ResourceKind::Blog,
+    ResourceKind::BlogPost,
+    ResourceKind::Podcast,
+    ResourceKind::PodcastEpisode,
+    ResourceKind::Dataset,
+    ResourceKind::ComputerProgram,
+];
+
 const LIGHT_GRADIENT_END: u32 = 0xd9dde5;
 const DARK_GRADIENT_END: u32 = 0x262c35;
 // CSS angles rotate clockwise from up: 225° points toward the bottom-left.
@@ -5958,6 +6008,9 @@ impl Render for LibraryApp {
             }))
             .on_action(cx.listener(|this, _: &FocusColumnFilter, window, cx| {
                 this.focus_selected_column_filter(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFavorite, window, cx| {
+                this.toggle_favorite(window, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.focus_search(window, cx);
@@ -8633,5 +8686,571 @@ mod cached_grid_interaction_tests {
             assert!(app.read(cx).collapsed_sections.is_empty());
         })
         .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sidebar_navigation_tests {
+    use super::{DbWorker, LibraryApp, LibraryDelegate, Settings, TableState};
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Bounds, Entity, TestAppContext, WindowBounds,
+        WindowOptions, px, size,
+    };
+    use oeuvre_core::{ResourceGridPage, ResourceKind};
+
+    fn open_sidebar(
+        cx: &mut TestAppContext,
+    ) -> (AnyWindowHandle, Entity<LibraryApp>, tempfile::TempDir) {
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Default::default(),
+                        size: size(px(1100.), px(1100.)),
+                    })),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    let table = cx.new(|cx| {
+                        TableState::new(
+                            LibraryDelegate::new(
+                                worker,
+                                ResourceGridPage {
+                                    rows: Vec::new(),
+                                    next_offset: None,
+                                },
+                                Settings::default(),
+                            ),
+                            window,
+                            cx,
+                        )
+                    });
+                    cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+                },
+            )
+            .unwrap()
+        });
+        cx.run_until_parked();
+        (handle.into(), app, dir)
+    }
+
+    #[gpui_kit::test]
+    fn sidebar_kinds_group_containers_with_contents(cx: &mut TestAppContext) {
+        let (handle, app, _dir) = open_sidebar(cx);
+        app.update(cx, |app, cx| {
+            app.counts = None;
+            cx.notify();
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            // A literal reading order, independent of the core enum's declaration order.
+            let expected = [
+                ResourceKind::Book,
+                ResourceKind::BookSection,
+                ResourceKind::Journal,
+                ResourceKind::Issue,
+                ResourceKind::JournalArticle,
+                ResourceKind::ConferencePaper,
+                ResourceKind::Preprint,
+                ResourceKind::Thesis,
+                ResourceKind::Report,
+                ResourceKind::Manuscript,
+                ResourceKind::MagazineArticle,
+                ResourceKind::NewspaperArticle,
+                ResourceKind::DictionaryEntry,
+                ResourceKind::EncyclopediaArticle,
+                ResourceKind::Webpage,
+                ResourceKind::Blog,
+                ResourceKind::BlogPost,
+                ResourceKind::Podcast,
+                ResourceKind::PodcastEpisode,
+                ResourceKind::Dataset,
+                ResourceKind::ComputerProgram,
+            ];
+            let mut previous_y = px(0.);
+            for (index, kind) in expected.into_iter().enumerate() {
+                let id = ("sidebar-entry", index + 2);
+                let y = window.find(id).bounds().top();
+                assert!(y > previous_y);
+                previous_y = y;
+                window.click(id, cx);
+                assert_eq!(
+                    app.read(cx).table.read(cx).delegate().filter.kind,
+                    Some(kind)
+                );
+            }
+        })
+        .unwrap();
+    }
+
+    fn collection(
+        name: &str,
+        children: Vec<oeuvre_core::CollectionTreeNode>,
+    ) -> oeuvre_core::CollectionTreeNode {
+        oeuvre_core::CollectionTreeNode {
+            collection: oeuvre_core::Collection::try_new(
+                oeuvre_core::CollectionId::generate(),
+                oeuvre_core::NonEmptyStr::try_new(name).unwrap(),
+            ),
+            children,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn collection_disclosure_does_not_select_and_refresh_keeps_collapsed_branches(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, app, _dir) = open_sidebar(cx);
+        let child = collection("Child", vec![]);
+        let parent = collection("Parent", vec![child]);
+        let parent_id = parent.collection.id;
+        let other = collection("Other", vec![]);
+        let other_id = other.collection.id;
+        let forest = vec![parent, other];
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.set_collection_forest(forest.clone(), window, cx);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(window.try_find(("collection-row", 2_usize)).is_some());
+            // Select the other root, then disclose an unrelated parent.
+            window.click(("collection-row", 2_usize), cx);
+            assert_eq!(
+                app.read(cx).table.read(cx).delegate().filter.collection,
+                Some(other_id)
+            );
+            let generation = app.read(cx).table.read(cx).delegate().listing_gen;
+            window.click(format!("toggle-collection-{parent_id}"), cx);
+            assert!(!app.read(cx).expanded_collections.contains(&parent_id));
+            assert_eq!(
+                app.read(cx).table.read(cx).delegate().filter.collection,
+                Some(other_id)
+            );
+            assert_eq!(
+                app.read(cx).table.read(cx).delegate().listing_gen,
+                generation
+            );
+            assert!(window.try_find(("collection-row", 2_usize)).is_none());
+            // A metadata/count refresh must not undo the user's disclosure choice.
+            app.update(cx, |app, cx| {
+                app.set_collection_forest(forest.clone(), window, cx);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(!app.read(cx).expanded_collections.contains(&parent_id));
+            assert!(window.try_find(("collection-row", 2_usize)).is_none());
+            // The row body selects but does not expand.
+            window.click(("collection-row", 0_usize), cx);
+            assert_eq!(
+                app.read(cx).table.read(cx).delegate().filter.collection,
+                Some(parent_id)
+            );
+            assert!(!app.read(cx).expanded_collections.contains(&parent_id));
+            window.click(format!("toggle-collection-{parent_id}"), cx);
+            assert!(app.read(cx).expanded_collections.contains(&parent_id));
+            assert!(window.try_find(("collection-row", 2_usize)).is_some());
+            assert_eq!(
+                app.read(cx).table.read(cx).delegate().filter.collection,
+                Some(parent_id)
+            );
+            window.click(format!("toggle-collection-{parent_id}"), cx);
+            assert!(!app.read(cx).expanded_collections.contains(&parent_id));
+            assert_eq!(
+                app.read(cx).table.read(cx).delegate().filter.collection,
+                Some(parent_id)
+            );
+            let new_branch = collection("New branch", vec![collection("New child", vec![])]);
+            let new_id = new_branch.collection.id;
+            app.update(cx, |app, cx| {
+                let mut refreshed = forest.clone();
+                refreshed.push(new_branch);
+                app.set_collection_forest(refreshed, window, cx);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(!app.read(cx).expanded_collections.contains(&parent_id));
+            assert!(app.read(cx).expanded_collections.contains(&new_id));
+            assert!(
+                window
+                    .try_find(format!("toggle-collection-{new_id}"))
+                    .is_some()
+            );
+            app.update(cx, |app, cx| {
+                app.set_collection_forest(forest.clone(), window, cx);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert!(!app.read(cx).expanded_collections.contains(&new_id));
+            assert!(
+                window
+                    .try_find(format!("toggle-collection-{new_id}"))
+                    .is_none()
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn sidebar_kind_counts_hide_empty_kinds_but_keep_the_selected_kind(cx: &mut TestAppContext) {
+        let (handle, app, _dir) = open_sidebar(cx);
+        app.update(cx, |app, cx| {
+            app.counts = Some(oeuvre_core::ResourceCounts {
+                all_items: 5,
+                by_kind: [(ResourceKind::Book, 3), (ResourceKind::JournalArticle, 2)].into(),
+                ..Default::default()
+            });
+            app.table.update(cx, |table, _| {
+                table.delegate_mut().filter.kind = Some(ResourceKind::Podcast);
+            });
+            cx.notify();
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(("sidebar-entry", 2_usize)).is_some()); // Book
+            assert!(window.try_find(("sidebar-entry", 6_usize)).is_some()); // Article
+            assert!(window.try_find(("sidebar-entry", 19_usize)).is_some()); // Selected empty Podcast
+            assert!(window.try_find(("sidebar-entry", 4_usize)).is_none()); // Empty Journal
+            assert!(window.try_find(("sidebar-entry", 20_usize)).is_none()); // Empty Episode
+            assert!(
+                window.find(("sidebar-entry", 2_usize)).bounds().top()
+                    < window.find(("sidebar-entry", 6_usize)).bounds().top()
+            );
+            window.click(("sidebar-entry", 6_usize), cx);
+            assert_eq!(
+                app.read(cx).table.read(cx).delegate().filter.kind,
+                Some(ResourceKind::JournalArticle)
+            );
+            assert!(window.try_find(("sidebar-entry", 19_usize)).is_none());
+            window.click("toggle-section-kinds", cx);
+            assert!(window.try_find(("sidebar-entry", 6_usize)).is_none());
+            assert_eq!(
+                app.read(cx).table.read(cx).delegate().filter.kind,
+                Some(ResourceKind::JournalArticle)
+            );
+            window.click("toggle-section-kinds", cx);
+            assert!(window.try_find(("sidebar-entry", 6_usize)).is_some());
+            assert_eq!(
+                app.read(cx).counts.as_ref().unwrap().by_kind[&ResourceKind::Book],
+                3
+            );
+        })
+        .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod favorite_shortcut_tests {
+    use super::{DbWorker, DetailFetch, LibraryApp, LibraryDelegate, Settings, TableState};
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, TestAppContext};
+    use oeuvre_core::{ResourceGridParent, ResourceQuery};
+
+    fn fixture(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui_kit::AnyWindowHandle,
+        gpui_kit::Entity<LibraryApp>,
+        DbWorker,
+        tempfile::TempDir,
+    ) {
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let store = oeuvre_app::testing::MemoryStore::new();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            oeuvre_app::seed::seed_demo_library(&store, 20)
+                .await
+                .unwrap();
+        });
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(store)
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let first = worker
+            .list_grid_page_blocking(
+                ResourceGridParent::Roots,
+                ResourceQuery::newest_first(),
+                0,
+                50,
+            )
+            .unwrap();
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::bind_favorite_keys(cx);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let table = cx.new(|cx| {
+                    TableState::new(
+                        LibraryDelegate::new(worker.clone(), first, Settings::default()),
+                        window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        (handle.into(), app, worker, dir)
+    }
+
+    fn settle(cx: &mut TestAppContext, worker: &DbWorker) {
+        // Each fence lets the foreground completion enqueue its next worker hop.
+        for _ in 0..6 {
+            cx.run_until_parked();
+            worker.list_page_blocking(None, 1).unwrap();
+        }
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn favorite_key_toggles_while_detail_loads_and_keeps_target(cx: &mut TestAppContext) {
+        let (handle, app, worker, _dir) = fixture(cx);
+        let (target, other) = app.read_with(cx, |app, cx| {
+            let rows = &app.table.read(cx).delegate().rows;
+            (rows[0].id, rows[1].id)
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let initial = rt.block_on(worker.resource(target)).unwrap().favorite;
+        let other_initial = rt.block_on(worker.resource(other)).unwrap().favorite;
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.selected = Some(target);
+                app.detail = Some((target, DetailFetch::Loading));
+                app.focus_table(window, cx);
+            });
+            window.render_frame(cx);
+            window.press("f", cx);
+            window.press("f", cx);
+            // Completion must never follow a newer selection.
+            app.update(cx, |app, _| {
+                app.selected = Some(other);
+                app.detail = Some((other, DetailFetch::Loading));
+            });
+        })
+        .unwrap();
+        settle(cx, &worker);
+        assert_eq!(
+            rt.block_on(worker.resource(target)).unwrap().favorite,
+            !initial
+        );
+        assert_eq!(
+            rt.block_on(worker.resource(other)).unwrap().favorite,
+            other_initial
+        );
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.detail.as_ref().map(|(id, _)| *id), Some(other));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn favorite_write_reconciles_after_detail_generation_advances(cx: &mut TestAppContext) {
+        let (handle, app, worker, _dir) = fixture(cx);
+        let target = app.read_with(cx, |app, cx| app.table.read(cx).delegate().rows[0].id);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(worker.set_resource_favorite(target, true))
+            .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.select_sidebar_nav(super::SidebarNav::Favorites, window, cx);
+                app.refresh_counts(window, cx);
+            });
+        })
+        .unwrap();
+        settle(cx, &worker);
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                let row = app
+                    .table
+                    .read(cx)
+                    .delegate()
+                    .rows
+                    .iter()
+                    .position(|row| row.id == target)
+                    .unwrap();
+                app.table
+                    .update(cx, |table, cx| table.set_selected_row(row, cx));
+                app.select_row(row, window, cx);
+                app.focus_table(window, cx);
+            });
+        })
+        .unwrap();
+        settle(cx, &worker);
+        let favorites_before = app.read_with(cx, |app, _| app.counts.as_ref().unwrap().favorites);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("f", cx);
+            app.update(cx, |app, cx| {
+                assert!(app.favorite_pending.contains(&target));
+                // A concurrent metadata/identifier completion invalidates detail
+                // while the favorite action is still between worker hops.
+                *app.detail_gens.entry(target).or_default() += 1;
+                app.detail_cache.invalidate(&target);
+                app.fetch_detail(target, window, cx);
+            });
+        })
+        .unwrap();
+        settle(cx, &worker);
+        assert!(!rt.block_on(worker.resource(target)).unwrap().favorite);
+        app.read_with(cx, |app, cx| {
+            assert!(!app.favorite_pending.contains(&target));
+            let Some((id, DetailFetch::Loaded(detail))) = &app.detail else {
+                panic!("successful favorite write must refresh detail");
+            };
+            assert_eq!(*id, target);
+            assert!(!detail.favorite, "detail must reflect the persisted write");
+            assert_eq!(app.counts.as_ref().unwrap().favorites, favorites_before - 1);
+            assert!(
+                !app.table
+                    .read(cx)
+                    .delegate()
+                    .rows
+                    .iter()
+                    .any(|row| row.id == target),
+                "the Favorites listing must drop the unstarred resource"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn favorite_button_and_key_share_pending_state_and_filter_moves_to_shift_f(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, app, worker, _dir) = fixture(cx);
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.table
+                    .update(cx, |table, cx| table.set_selected_row(0, cx));
+                app.select_row(0, window, cx);
+                app.focus_table(window, cx);
+            });
+        })
+        .unwrap();
+        settle(cx, &worker);
+        let target = app.read_with(cx, |app, _| app.selected.unwrap());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let initial = rt.block_on(worker.resource(target)).unwrap().favorite;
+        let favorites_before = app.read_with(cx, |app, _| app.counts.as_ref().unwrap().favorites);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("toggle-favorite", cx);
+            assert_eq!(window.find("toggle-favorite").disabled(), Some(true));
+            app.update(cx, |app, cx| app.focus_table(window, cx));
+            window.press("f", cx);
+        })
+        .unwrap();
+        settle(cx, &worker);
+        assert_eq!(
+            rt.block_on(worker.resource(target)).unwrap().favorite,
+            !initial
+        );
+        app.read_with(cx, |app, _| {
+            let Some((_, DetailFetch::Loaded(detail))) = &app.detail else {
+                panic!("detail should reload");
+            };
+            assert_eq!(detail.favorite, !initial);
+            assert_eq!(
+                app.counts.as_ref().unwrap().favorites,
+                if initial {
+                    favorites_before - 1
+                } else {
+                    favorites_before + 1
+                }
+            );
+        });
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| app.focus_table(window, cx));
+            window.render_frame(cx);
+            window.press("f", cx);
+        })
+        .unwrap();
+        settle(cx, &worker);
+        assert_eq!(
+            rt.block_on(worker.resource(target)).unwrap().favorite,
+            initial
+        );
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.table
+                    .update(cx, |table, cx| table.set_selected_col(super::COL_TITLE, cx));
+                app.focus_table(window, cx);
+            });
+            window.render_frame(cx);
+            window.press("shift-f", cx);
+            let input = app
+                .read(cx)
+                .table
+                .read(cx)
+                .delegate()
+                .filter_inputs
+                .as_ref()
+                .unwrap()
+                .title
+                .entity_id();
+            assert_eq!(
+                window
+                    .within("toolbar-search")
+                    .find(("input", input))
+                    .focused(),
+                Some(true)
+            );
+            window.input("fF", cx);
+            assert_eq!(
+                window
+                    .within("toolbar-search")
+                    .find(("input", input))
+                    .value(),
+                Some("fF")
+            );
+        })
+        .unwrap();
+        settle(cx, &worker);
+        assert_eq!(
+            rt.block_on(worker.resource(target)).unwrap().favorite,
+            initial
+        );
+    }
+
+    #[gpui_kit::test]
+    fn favorite_key_ignores_empty_selection_and_new_draft(cx: &mut TestAppContext) {
+        let (handle, app, worker, _dir) = fixture(cx);
+        let target = app.read_with(cx, |app, cx| app.table.read(cx).delegate().rows[0].id);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let initial = rt.block_on(worker.resource(target)).unwrap().favorite;
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| app.focus_table(window, cx));
+            window.render_frame(cx);
+            window.press("f", cx);
+            assert!(app.read(cx).selected.is_none());
+            window.dispatch_action(Box::new(super::BeginNewRow), cx);
+        })
+        .unwrap();
+        settle(cx, &worker);
+        app.read_with(cx, |app, cx| assert!(app.has_inline(cx)));
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("f", cx);
+            window.press("shift-f", cx);
+            app.read_with(cx, |app, cx| {
+                assert!(app.has_inline(cx));
+                assert!(app.selected.is_none());
+                assert!(!app.table.read(cx).delegate().filters_visible);
+            });
+        })
+        .unwrap();
+        settle(cx, &worker);
+        assert_eq!(
+            rt.block_on(worker.resource(target)).unwrap().favorite,
+            initial
+        );
     }
 }
