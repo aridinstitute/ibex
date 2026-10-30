@@ -184,6 +184,12 @@ impl CommandPalette {
             .update(cx, |state, cx| state.set_value(keywords, window, cx));
     }
 
+    /// Jump straight to adding a new resource by ISBN or DOI.
+    pub fn open_identifier(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.identifier_target = None;
+        self.navigate(Screen::Identifier, window, cx);
+    }
+
     fn classification_name(&self, id: CollectionId) -> String {
         self.library_collections
             .iter()

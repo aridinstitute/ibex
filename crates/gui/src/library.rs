@@ -22,7 +22,7 @@ use gpui_kit::base::{Transition as MotionTransition, transition};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{Enter, Input, InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::resizable::resize_handle;
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
 use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, TableState};
@@ -6870,18 +6870,53 @@ impl Render for LibraryApp {
                                     .items_center()
                                     .justify_end()
                                     .child(
-                                        Button::new("import-biblatex")
+                                        Button::new("add-resource")
                                             .ghost()
-                                            .label(match self.import_state {
-                                                ImportState::Idle => "Import BibLaTeX…",
+                                            .icon(Icon::new(IconName::Plus).with_size(px(12.)))
+                                            .loading(self.import_state != ImportState::Idle)
+                                            .disabled(self.import_state != ImportState::Idle)
+                                            .tooltip(match self.import_state {
+                                                ImportState::Idle => "Add resource",
                                                 ImportState::Choosing => "Choosing file…",
                                                 ImportState::Importing => "Importing…",
                                             })
-                                            .disabled(self.import_state != ImportState::Idle)
-                                            .tooltip("Import a UTF-8 .bib file (⌘⇧I)")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.import_biblatex(window, cx)
-                                            })),
+                                            .dropdown_menu_with_anchor(Anchor::TopRight, {
+                                                let app = cx.entity().downgrade();
+                                                move |menu, window, _cx| {
+                                                    let Some(app) = app.upgrade() else {
+                                                        return menu;
+                                                    };
+                                                    menu.item(
+                                                        PopupMenuItem::new("Add by ISBN or DOI…")
+                                                            .on_click(window.listener_for(
+                                                            &app,
+                                                            |this, _, window, cx| {
+                                                                if let Some(palette) =
+                                                                    this.open_palette(window, cx)
+                                                                {
+                                                                    palette.update(
+                                                                        cx,
+                                                                        |palette, cx| {
+                                                                            palette.open_identifier(
+                                                                                window, cx,
+                                                                            )
+                                                                        },
+                                                                    );
+                                                                }
+                                                            },
+                                                        )),
+                                                    )
+                                                    .item(
+                                                        PopupMenuItem::new("Import file…")
+                                                            .on_click(window.listener_for(
+                                                                &app,
+                                                                |this, _, window, cx| {
+                                                                    this.import_biblatex(window, cx)
+                                                                },
+                                                            )),
+                                                    )
+                                                }
+                                            }),
                                     )
                                     .child(
                                         h_flex()
@@ -7801,6 +7836,79 @@ mod palette_persistence_tests {
             assert_eq!(count(glow), 1, "One accent glow spans toolbar and body");
         })
         .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn add_menu_opens_identifier_entry(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::test::TestWindowExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, _) = open_theme_fixture(cx, &dir);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("add-resource", cx);
+            assert!(window.try_find("popup-menu").is_some());
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.has_active_dialog(cx));
+            assert!(window.try_find("palette-identifier").is_some());
+            assert!(window.try_find("popup-menu").is_none());
+            window.input("9780306406157", cx);
+            assert!(window.try_find("palette-identifier").is_some());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn add_menu_dismissal_and_busy_state(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::component::ThemeMode;
+        use gpui_kit::test::TestWindowExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, app) = open_theme_fixture(cx, &dir);
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            cx.update_window(handle, |_, window, cx| {
+                crate::theme::apply(mode, &crate::settings::ThemeSettings::default(), cx);
+                window.render_frame(cx);
+                window.click("add-resource", cx);
+                assert!(window.try_find("popup-menu").is_some());
+                window.press("escape", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                assert!(window.try_find("popup-menu").is_none());
+                assert!(!window.has_active_dialog(cx));
+                window.click("add-resource", cx);
+                assert!(window.try_find("popup-menu").is_some());
+                window.click("library-grid-viewport", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                assert!(window.try_find("popup-menu").is_none());
+                for state in [super::ImportState::Choosing, super::ImportState::Importing] {
+                    app.update(cx, |app, cx| {
+                        app.import_state = state;
+                        cx.notify();
+                    });
+                    window.render_frame(cx);
+                    window.click("add-resource", cx);
+                    assert!(window.try_find("popup-menu").is_none());
+                }
+                app.update(cx, |app, cx| {
+                    app.import_state = super::ImportState::Idle;
+                    cx.notify();
+                });
+            })
+            .unwrap();
+        }
+        assert!(!cx.did_prompt_for_paths());
     }
 
     fn open_theme_fixture(
@@ -8788,7 +8896,10 @@ mod biblatex_gui_tests {
             window.render_frame(cx);
             app.update(cx, |app, cx| app.focus_table(window, cx));
             window.press("n", cx);
-            window.click("import-biblatex", cx);
+            window.click("add-resource", cx);
+            window.press("down", cx);
+            window.press("down", cx);
+            window.press("enter", cx);
         })
         .unwrap();
         assert!(cx.did_prompt_for_paths());
