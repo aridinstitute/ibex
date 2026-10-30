@@ -787,6 +787,21 @@ impl Store for MemoryStore {
         Ok(collection.clone())
     }
 
+    async fn set_collection_classification(
+        &self,
+        id: CollectionId,
+        keywords: Vec<String>,
+        jev_enabled: bool,
+    ) -> Result<Collection, StoreError> {
+        let mut collections = self.collections.lock().expect("MemoryStore lock");
+        let collection = collections
+            .get_mut(&id)
+            .ok_or_else(|| StoreError::not_found(format!("collection {id}")))?;
+        collection.keywords = keywords;
+        collection.jev_enabled = jev_enabled;
+        Ok(collection.clone())
+    }
+
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {
         let collections: Vec<Collection> = self
             .collections
@@ -1534,6 +1549,15 @@ impl Store for StubStore {
         _name: NonEmptyStr,
     ) -> Result<Collection, StoreError> {
         Err(unsupported("rename_collection"))
+    }
+
+    async fn set_collection_classification(
+        &self,
+        _id: CollectionId,
+        _keywords: Vec<String>,
+        _jev_enabled: bool,
+    ) -> Result<Collection, StoreError> {
+        Err(unsupported("set_collection_classification"))
     }
 
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {

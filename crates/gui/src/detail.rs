@@ -257,13 +257,13 @@ fn field_value_element(label: &str, lines: &[String], cx: &App) -> AnyElement {
 /// grid gives way when the window is too narrow to hold both — and scrollable
 /// when the field list outgrows the window.
 /// The loaded resource's identity, actions and metadata share one scroll area.
-/// `tags_value` is the value cell of the trailing "Tags" field: read-only
-/// `#hashtags` built by the caller. Absent when there are no tags or the
-/// panel is not showing a loaded resource.
+/// `extra_rows` are caller-built trailing fields (tags, collections,
+/// suggestions) appended after the metadata, in order. Ignored unless the
+/// panel is showing a loaded resource.
 pub fn render_panel(
     view: DetailView<'_>,
     actions: Option<AnyElement>,
-    tags_value: Option<AnyElement>,
+    extra_rows: Vec<(SharedString, AnyElement)>,
     cx: &App,
 ) -> Div {
     let muted = cx.theme().muted_foreground;
@@ -344,9 +344,11 @@ pub fn render_panel(
                             let value = field_value_element(&label, &lines, cx);
                             DescriptionItem::new(label).value(value)
                         }))
-                        .when_some(tags_value, |list, value| {
-                            list.child(DescriptionItem::new("Tags").value(value))
-                        }),
+                        .children(
+                            extra_rows
+                                .into_iter()
+                                .map(|(label, value)| DescriptionItem::new(label).value(value)),
+                        ),
                 )
                 .into_any_element()
         }
@@ -497,7 +499,7 @@ mod tests {
                 .child(super::render_panel(
                     super::DetailView::Fields(&self.0),
                     None,
-                    None,
+                    Vec::new(),
                     cx,
                 ))
         }
@@ -718,6 +720,7 @@ mod tests {
             series_number: None,
             favorite: false,
             tags: vec![],
+            collections: vec![],
             date_added: UtcMillis::from_unix_ms(1_609_459_200_000),
             date_edited: UtcMillis::from_unix_ms(1_609_459_200_000),
         }

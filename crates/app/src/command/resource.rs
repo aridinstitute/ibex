@@ -689,6 +689,17 @@ impl Handler for GetResourceDetail {
             tags.push(tag);
         }
 
+        // Membership refs are unset when a collection is deleted, but a
+        // stale id must not make the whole detail unreadable.
+        let mut collections = Vec::with_capacity(resource.collection_ids.len());
+        for collection_id in &resource.collection_ids {
+            match state.store().get_collection(*collection_id).await {
+                Ok(collection) => collections.push(collection),
+                Err(e) if e.is_not_found() => {}
+                Err(e) => return Err(CommandError::Store(e)),
+            }
+        }
+
         Ok(FetchedDetail(ResourceDetail {
             subtitle: resource.subtitle,
             title_addon: resource.title_addon,
@@ -735,6 +746,7 @@ impl Handler for GetResourceDetail {
             series_number: resource.series_number,
             favorite: resource.favorite,
             tags,
+            collections,
             date_added: resource.date_added,
             date_edited: resource.date_edited,
         }))

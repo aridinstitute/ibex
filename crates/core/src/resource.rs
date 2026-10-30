@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::{
-    CollectionId, Identifier, Name, NonEmptyStr, Pages, PersonId, SeriesId, Tag, TagId,
+    Collection, CollectionId, Identifier, Name, NonEmptyStr, Pages, PersonId, SeriesId, Tag, TagId,
     deserialize_identifiers, deserialize_pages_opt,
 };
 
@@ -627,6 +627,8 @@ pub struct ResourceDetail {
     pub favorite: bool,
     /// Tags on this resource, bibliography order of `tag_ids`.
     pub tags: Vec<Tag>,
+    /// Collections this resource belongs to, in `collection_ids` order.
+    pub collections: Vec<Collection>,
     /// Record-keeping stamps, always present on a stored record.
     pub date_added: UtcMillis,
     pub date_edited: UtcMillis,

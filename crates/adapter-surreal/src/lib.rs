@@ -68,6 +68,31 @@ struct TagDoc {
 struct CollectionDoc {
     #[surreal(wrap)]
     name: NonEmptyStr,
+    /// Classification keyword rules; legacy rows omit the field.
+    #[surreal(default)]
+    keywords: Option<Vec<String>>,
+    /// Jev opt-in; legacy rows omit the field.
+    #[surreal(default)]
+    jev_enabled: Option<bool>,
+}
+
+impl CollectionDoc {
+    fn from_collection(c: &Collection) -> Self {
+        Self {
+            name: c.name.clone(),
+            keywords: Some(c.keywords.clone()),
+            jev_enabled: Some(c.jev_enabled),
+        }
+    }
+
+    fn into_collection(self, id: CollectionId) -> Collection {
+        Collection {
+            id,
+            name: self.name,
+            keywords: self.keywords.unwrap_or_default(),
+            jev_enabled: self.jev_enabled.unwrap_or(false),
+        }
+    }
 }
 
 #[derive(Debug, SurrealValue)]
@@ -949,6 +974,45 @@ impl SurrealStore {
             .map_err(|e| StoreError::new(format!("invalid collection id in store: {e}")))
     }
 
+    /// Run a field-scoped `UPDATE ONLY $collection SET ...` statement.
+    ///
+    /// SET touches only the named fields, so concurrent writes to different
+    /// fields compose, and UPDATE never creates a row, so a missing or
+    /// deleted collection stays not-found. Concurrent writes to one row can
+    /// hit an optimistic write conflict; the SET values are absolute, so
+    /// re-running the statement is safe.
+    async fn write_collection<'a>(
+        &'a self,
+        id: CollectionId,
+        statement: impl Fn() -> surrealdb::method::Query<'a, Db>,
+    ) -> Result<Collection, StoreError> {
+        const ATTEMPTS: usize = 8;
+        let is_conflict = |e: &surrealdb::Error| {
+            e.query_details() == Some(&surrealdb::types::QueryError::TransactionConflict)
+        };
+        let mut attempt = 1;
+        let updated: Option<CollectionDoc> = loop {
+            let result = match statement()
+                .bind(("collection", Self::collection_key(id)))
+                .await
+            {
+                Ok(mut response) => response.take(0),
+                Err(e) => Err(e),
+            };
+            match result {
+                Err(e) if attempt < ATTEMPTS && is_conflict(&e) => {
+                    attempt += 1;
+                    tokio::task::yield_now().await;
+                }
+                other => break other.map_err(map_err)?,
+            }
+        };
+        match updated {
+            Some(doc) => Ok(doc.into_collection(id)),
+            None => Err(StoreError::not_found(format!("collection {id}"))),
+        }
+    }
+
     async fn load_collection_graph(
         &self,
     ) -> Result<(Vec<Collection>, Vec<(CollectionId, CollectionId)>), StoreError> {
@@ -1751,9 +1815,7 @@ impl Store for SurrealStore {
         let created: Option<CollectionDoc> = self
             .db
             .create(Self::collection_key(id))
-            .content(CollectionDoc {
-                name: collection.name.clone(),
-            })
+            .content(CollectionDoc::from_collection(&collection))
             .await
             .map_err(map_err)?;
         if created.is_none() {
@@ -1779,7 +1841,7 @@ impl Store for SurrealStore {
             .await
             .map_err(map_err)?;
         match row {
-            Some(doc) => Ok(Collection { id, name: doc.name }),
+            Some(doc) => Ok(doc.into_collection(id)),
             None => Err(StoreError::not_found(format!("collection {id}"))),
         }
     }
@@ -1789,17 +1851,29 @@ impl Store for SurrealStore {
         id: CollectionId,
         name: NonEmptyStr,
     ) -> Result<Collection, StoreError> {
-        let _ = self.get_collection(id).await?;
-        let updated: Option<CollectionDoc> = self
-            .db
-            .update(Self::collection_key(id))
-            .content(CollectionDoc { name: name.clone() })
-            .await
-            .map_err(map_err)?;
-        match updated {
-            Some(doc) => Ok(Collection { id, name: doc.name }),
-            None => Err(StoreError::not_found(format!("collection {id}"))),
-        }
+        self.write_collection(id, || {
+            self.db
+                .query("UPDATE ONLY $collection SET name = $name")
+                .bind(("name", name.as_str().to_owned()))
+        })
+        .await
+    }
+
+    async fn set_collection_classification(
+        &self,
+        id: CollectionId,
+        keywords: Vec<String>,
+        jev_enabled: bool,
+    ) -> Result<Collection, StoreError> {
+        self.write_collection(id, || {
+            self.db
+                .query(
+                    "UPDATE ONLY $collection SET keywords = $keywords, jev_enabled = $jev_enabled",
+                )
+                .bind(("keywords", keywords.clone()))
+                .bind(("jev_enabled", jev_enabled))
+        })
+        .await
     }
 
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {
@@ -2487,6 +2561,146 @@ mod tests {
             store.get_resource(legacy).await.unwrap().metadata,
             ResourceMetadata::default()
         );
+    }
+
+    #[tokio::test]
+    async fn collection_classification_round_trips_and_survives_rename() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let created = store
+            .create_collection(NonEmptyStr::try_new("Methods").unwrap(), None)
+            .await
+            .unwrap();
+        assert!(created.keywords.is_empty());
+        assert!(!created.jev_enabled);
+
+        let keywords = vec!["research methods".to_string(), "provenance".to_string()];
+        let set = store
+            .set_collection_classification(created.id, keywords.clone(), true)
+            .await
+            .unwrap();
+        assert_eq!(set.keywords, keywords);
+        assert!(set.jev_enabled);
+        assert_eq!(store.get_collection(created.id).await.unwrap(), set);
+
+        let renamed = store
+            .rename_collection(created.id, NonEmptyStr::try_new("Method").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(renamed.keywords, keywords);
+        assert!(renamed.jev_enabled);
+
+        let forest = store.list_collection_forest().await.unwrap();
+        assert_eq!(forest[0].collection, renamed);
+
+        let missing = store
+            .set_collection_classification(CollectionId::generate(), vec![], false)
+            .await
+            .unwrap_err();
+        assert!(missing.is_not_found());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_rename_and_classification_compose() {
+        let store = std::sync::Arc::new(SurrealStore::open_memory().await.unwrap());
+        let keywords = vec!["provenance".to_string()];
+        for i in 0..40 {
+            let created = store
+                .create_collection(NonEmptyStr::try_new("Before").unwrap(), None)
+                .await
+                .unwrap();
+            let name = NonEmptyStr::try_new(format!("After {i}")).unwrap();
+            let (renamed, classified) = tokio::join!(
+                store.rename_collection(created.id, name.clone()),
+                store.set_collection_classification(created.id, keywords.clone(), true),
+            );
+            renamed.unwrap();
+            classified.unwrap();
+            let loaded = store.get_collection(created.id).await.unwrap();
+            assert_eq!(loaded.name, name, "iteration {i}");
+            assert_eq!(loaded.keywords, keywords, "iteration {i}");
+            assert!(loaded.jev_enabled, "iteration {i}");
+        }
+    }
+
+    #[tokio::test]
+    async fn collection_writes_touch_only_their_own_fields() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let created = store
+            .create_collection(NonEmptyStr::try_new("Methods").unwrap(), None)
+            .await
+            .unwrap();
+        store
+            .db
+            .query("UPDATE $id SET color = 'teal'")
+            .bind(("id", SurrealStore::collection_key(created.id)))
+            .await
+            .unwrap();
+
+        let keywords = vec!["provenance".to_string()];
+        store
+            .set_collection_classification(created.id, keywords.clone(), true)
+            .await
+            .unwrap();
+        let renamed = store
+            .rename_collection(created.id, NonEmptyStr::try_new("Method").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(renamed.name.as_str(), "Method");
+        assert_eq!(renamed.keywords, keywords);
+        assert!(renamed.jev_enabled);
+
+        let mut response = store
+            .db
+            .query("SELECT VALUE color FROM ONLY $id")
+            .bind(("id", SurrealStore::collection_key(created.id)))
+            .await
+            .unwrap();
+        let color: Option<String> = response.take(0).unwrap();
+        assert_eq!(color.as_deref(), Some("teal"));
+    }
+
+    #[tokio::test]
+    async fn collection_writes_never_resurrect_missing_rows() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let never = CollectionId::generate();
+        let deleted = store
+            .create_collection(NonEmptyStr::try_new("Gone").unwrap(), None)
+            .await
+            .unwrap()
+            .id;
+        store.delete_collection(deleted).await.unwrap();
+
+        for id in [never, deleted] {
+            let renamed = store
+                .rename_collection(id, NonEmptyStr::try_new("Back").unwrap())
+                .await
+                .unwrap_err();
+            assert!(renamed.is_not_found());
+            let classified = store
+                .set_collection_classification(id, vec!["x".into()], true)
+                .await
+                .unwrap_err();
+            assert!(classified.is_not_found());
+            assert!(store.get_collection(id).await.unwrap_err().is_not_found());
+        }
+        assert!(store.list_collection_forest().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_collection_rows_default_classification() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let id = CollectionId::generate();
+        store
+            .db
+            .query("CREATE type::record('collection', $id) SET name = $name")
+            .bind(("id", id.to_string()))
+            .bind(("name", "Legacy"))
+            .await
+            .unwrap();
+        let loaded = store.get_collection(id).await.unwrap();
+        assert_eq!(loaded.name.as_str(), "Legacy");
+        assert!(loaded.keywords.is_empty());
+        assert!(!loaded.jev_enabled);
     }
 
     #[tokio::test]

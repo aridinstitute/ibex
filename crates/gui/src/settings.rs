@@ -2,7 +2,7 @@
 //! The file appears on the first save; until then every setting lives at its
 //! built-in default.
 
-use std::{collections::BTreeMap, fs, io, path::Path};
+use std::{collections::BTreeMap, fs, io, io::Write as _, path::Path};
 
 use gpui_kit::component::ThemeMode;
 use serde::{Deserialize, Serialize};
@@ -93,9 +93,64 @@ pub struct Settings {
     pub right_sidebar_width: Option<f64>,
     #[serde(default)]
     pub theme: ThemeSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openrouter_api_key: Option<ApiKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev_model: Option<String>,
+}
+
+/// A secret that never prints through `Debug`, so settings can be logged
+/// or asserted on without leaking it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ApiKey(String);
+
+impl ApiKey {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ApiKey(<redacted>)")
+    }
 }
 
 impl Settings {
+    /// Store the OpenRouter key; blank input removes it.
+    pub fn set_openrouter_api_key(&mut self, key: &str, dir: &Path) -> anyhow::Result<()> {
+        let key = key.trim();
+        if key.chars().any(char::is_whitespace) {
+            anyhow::bail!("API keys cannot contain spaces");
+        }
+        let mut updated = self.clone();
+        updated.openrouter_api_key = (!key.is_empty()).then(|| ApiKey(key.to_owned()));
+        updated.save(dir)?;
+        *self = updated;
+        Ok(())
+    }
+
+    /// Store the Jev model id; blank input restores the default.
+    pub fn set_jev_model(&mut self, model: &str, dir: &Path) -> anyhow::Result<()> {
+        let model = model.trim();
+        if model.chars().any(char::is_whitespace) {
+            anyhow::bail!("Model ids cannot contain spaces");
+        }
+        let mut updated = self.clone();
+        updated.jev_model =
+            (!model.is_empty() && model != crate::jev::DEFAULT_JEV_MODEL).then(|| model.to_owned());
+        updated.save(dir)?;
+        *self = updated;
+        Ok(())
+    }
+
+    pub fn jev_model(&self) -> &str {
+        self.jev_model
+            .as_deref()
+            .unwrap_or(crate::jev::DEFAULT_JEV_MODEL)
+    }
+
     /// Validate and persist before publishing a new color to the running UI.
     pub fn set_theme_color(
         &mut self,
@@ -149,7 +204,25 @@ impl Settings {
     pub fn save(&self, dir: &Path) -> anyhow::Result<()> {
         fs::create_dir_all(dir)?;
         let staged = dir.join(format!("{CONFIG_FILE}.tmp"));
-        fs::write(&staged, toml::to_string(self)?)?;
+        let contents = toml::to_string(self)?;
+        // Never write a secret into a stale, potentially permissive staging
+        // file (or follow a stale symlink). Exclusive creation also fails
+        // safely if another writer creates the path after its removal.
+        match fs::remove_file(&staged) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&staged)?;
+        file.write_all(contents.as_bytes())?;
+        drop(file);
         fs::rename(&staged, dir.join(CONFIG_FILE))?;
         Ok(())
     }
@@ -158,6 +231,59 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_config_is_private_on_creation_and_after_permissive_rewrites() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(CONFIG_FILE);
+        let staged = dir.path().join(format!("{CONFIG_FILE}.tmp"));
+        let mut settings = Settings::default();
+        for existing in [None, Some(&config), Some(&staged)] {
+            if let Some(path) = existing {
+                fs::write(path, "old settings").unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            settings
+                .set_openrouter_api_key("test-only-not-a-real-key", dir.path())
+                .unwrap();
+            assert_eq!(
+                fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(Settings::load(dir.path()), settings);
+            assert!(!staged.exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_staging_file_is_private_even_when_rename_fails() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for stale_staged in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let staged = dir.path().join(format!("{CONFIG_FILE}.tmp"));
+            fs::create_dir(dir.path().join(CONFIG_FILE)).unwrap();
+            if stale_staged {
+                fs::write(&staged, "old settings").unwrap();
+                fs::set_permissions(&staged, fs::Permissions::from_mode(0o644)).unwrap();
+            }
+            let mut settings = Settings::default();
+            assert!(
+                settings
+                    .set_openrouter_api_key("test-only-not-a-real-key", dir.path())
+                    .is_err()
+            );
+            assert_eq!(
+                fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(settings, Settings::default());
+        }
+    }
 
     #[test]
     fn load_returns_defaults_when_config_is_missing() {
@@ -290,6 +416,44 @@ mod tests {
                 .is_err()
         );
         assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn jev_settings_round_trip_and_blank_input_clears_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings {
+            left_sidebar_width: Some(245.),
+            ..Settings::default()
+        };
+        assert_eq!(settings.jev_model(), crate::jev::DEFAULT_JEV_MODEL);
+        settings
+            .set_openrouter_api_key(" sk-or-v1-abc ", dir.path())
+            .unwrap();
+        settings
+            .set_jev_model("typesafe/jev-2", dir.path())
+            .unwrap();
+        let loaded = Settings::load(dir.path());
+        assert_eq!(loaded, settings);
+        assert_eq!(
+            loaded.openrouter_api_key.as_ref().map(ApiKey::expose),
+            Some("sk-or-v1-abc")
+        );
+        assert_eq!(loaded.jev_model(), "typesafe/jev-2");
+        assert_eq!(loaded.left_sidebar_width, Some(245.));
+        assert!(!format!("{loaded:?}").contains("sk-or-v1-abc"));
+        assert!(settings.set_openrouter_api_key("a b", dir.path()).is_err());
+        assert!(settings.set_jev_model("a b", dir.path()).is_err());
+        assert_eq!(Settings::load(dir.path()), loaded);
+
+        settings.set_openrouter_api_key("  ", dir.path()).unwrap();
+        settings.set_jev_model("", dir.path()).unwrap();
+        let saved = fs::read_to_string(dir.path().join(CONFIG_FILE)).unwrap();
+        assert!(!saved.contains("openrouter_api_key"));
+        assert!(!saved.contains("jev_model"));
+        assert_eq!(
+            Settings::load(dir.path()).jev_model(),
+            crate::jev::DEFAULT_JEV_MODEL
+        );
     }
 
     #[test]

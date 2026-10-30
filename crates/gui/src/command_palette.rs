@@ -11,7 +11,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use oeuvre_core::{Collection, CollectionId, Resource, ResourceId, Tag, TagId};
+use oeuvre_core::{Collection, CollectionId, Resource, ResourceId, Tag, TagId, parse_keywords};
 
 #[derive(Clone, Debug)]
 pub struct SetThemeColor {
@@ -47,6 +47,27 @@ impl PaletteRequest {
     }
 }
 
+/// Replace one collection's classification rules; keywords are pre-parsed.
+#[derive(Clone, Debug)]
+pub struct CollectionClassificationRequest {
+    pub id: CollectionId,
+    pub keywords: Vec<String>,
+    pub jev_enabled: bool,
+}
+
+/// Jev configuration entered in the palette; blank values clear the setting.
+#[derive(Clone, Debug)]
+pub enum JevSettingRequest {
+    ApiKey(String),
+    Model(String),
+}
+
+/// Run Jev on the palette's single target.
+pub struct ClassifyWithJevRequest;
+
+/// Show the window listing every collection's classification rules.
+pub struct OpenClassificationRules;
+
 /// Library-wide view preference; independent of resource membership edits.
 pub struct ToggleResourceGrouping;
 
@@ -62,6 +83,13 @@ enum Screen {
     Collections,
     Identifier,
     Color(ThemeColorTarget),
+    /// Choose which collection's classification rules to edit.
+    ClassifyPick,
+    /// Keyword rules in the input; one checkable "Include in auto-classify" row.
+    Classification(CollectionId),
+    /// Masked input for the OpenRouter key.
+    ApiKey,
+    JevModel,
 }
 
 pub struct CommandPalette {
@@ -91,16 +119,99 @@ pub struct CommandPalette {
     identifier_target: Option<ResourceId>,
     suggested_identifier: Option<String>,
     colors: [String; 2],
+    /// Every library collection, independent of the targets' snapshot.
+    library_collections: Vec<Collection>,
+    /// Draft Jev opt-in on the classification screen.
+    classify_jev: bool,
+    has_openrouter_key: bool,
+    /// Custom Jev model, empty when the default is in use.
+    jev_model: String,
 }
 
 impl EventEmitter<PaletteRequest> for CommandPalette {}
+impl EventEmitter<CollectionClassificationRequest> for CommandPalette {}
 impl EventEmitter<ToggleResourceGrouping> for CommandPalette {}
 impl EventEmitter<IdentifierRequest> for CommandPalette {}
 impl EventEmitter<SetThemeColor> for CommandPalette {}
+impl EventEmitter<JevSettingRequest> for CommandPalette {}
+impl EventEmitter<ClassifyWithJevRequest> for CommandPalette {}
+impl EventEmitter<OpenClassificationRules> for CommandPalette {}
 
 impl CommandPalette {
     pub fn set_colors(&mut self, accent: String, secondary: String) {
         self.colors = [accent, secondary];
+    }
+
+    pub fn set_jev_settings(&mut self, has_key: bool, custom_model: Option<String>) {
+        self.has_openrouter_key = has_key;
+        self.jev_model = custom_model.unwrap_or_default();
+    }
+
+    fn apply_jev_setting(&mut self, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
+        let value = self.state.read(cx).value().trim().to_owned();
+        let request = match self.screen {
+            Screen::ApiKey => JevSettingRequest::ApiKey(value),
+            Screen::JevModel => JevSettingRequest::Model(value),
+            _ => return,
+        };
+        self.saving = true;
+        self.error = None;
+        cx.emit(request);
+        cx.notify();
+    }
+
+    pub fn set_library_collections(&mut self, collections: Vec<Collection>) {
+        self.library_collections = collections;
+    }
+
+    /// Jump straight to one collection's classification rules.
+    pub fn open_classification(
+        &mut self,
+        id: CollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(collection) = self.library_collections.iter().find(|c| c.id == id) else {
+            return;
+        };
+        let keywords = collection.keywords.join(", ");
+        self.classify_jev = collection.jev_enabled;
+        self.navigate(Screen::Classification(id), window, cx);
+        self.state
+            .update(cx, |state, cx| state.set_value(keywords, window, cx));
+    }
+
+    fn classification_name(&self, id: CollectionId) -> String {
+        self.library_collections
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.name.as_str().to_owned())
+            .unwrap_or_default()
+    }
+
+    fn apply_classification(&mut self, cx: &mut Context<Self>) {
+        let Screen::Classification(id) = self.screen else {
+            return;
+        };
+        if self.saving {
+            return;
+        }
+        match parse_keywords(self.state.read(cx).value().as_ref()) {
+            Ok(keywords) => {
+                self.saving = true;
+                self.error = None;
+                cx.emit(CollectionClassificationRequest {
+                    id,
+                    keywords,
+                    jev_enabled: self.classify_jev,
+                });
+            }
+            Err(error) => self.error = Some(error),
+        }
+        cx.notify();
     }
 
     pub fn open_color(
@@ -195,6 +306,10 @@ impl CommandPalette {
             identifier_target: None,
             suggested_identifier: None,
             colors: [String::new(), String::new()],
+            library_collections: Vec::new(),
+            classify_jev: false,
+            has_openrouter_key: false,
+            jev_model: String::new(),
         }
     }
 
@@ -295,6 +410,7 @@ impl CommandPalette {
         self.error = None;
         self.state.update(cx, |state, cx| {
             state.set_value("", window, cx);
+            state.set_masked(screen == Screen::ApiKey, window, cx);
             state.set_placeholder(
                 match screen {
                     Screen::Commands => "Type a command…",
@@ -302,6 +418,10 @@ impl CommandPalette {
                     Screen::Collections => "Search collections…",
                     Screen::Identifier => "Enter ISBN or DOI…",
                     Screen::Color(_) => "Enter #RRGGBB…",
+                    Screen::ClassifyPick => "Search collections…",
+                    Screen::Classification(_) => "Keywords, comma-separated…",
+                    Screen::ApiKey => "Paste an OpenRouter API key…",
+                    Screen::JevModel => crate::jev::DEFAULT_JEV_MODEL,
                 },
                 window,
                 cx,
@@ -316,9 +436,12 @@ impl CommandPalette {
     fn option_disabled(&self, row: usize) -> bool {
         self.saving
             || self.submitted
-            || match row {
-                2 | 3 | 5 | 6 if self.screen == Screen::Commands => false,
-                4 if self.screen == Screen::Commands => !self.ready || self.targets.len() != 1,
+            || match (self.screen, row) {
+                (Screen::Commands, 2 | 3 | 5 | 6 | 8 | 9 | 11) => false,
+                (Screen::Commands, 10) => !self.ready || self.targets.len() != 1,
+                (Screen::Commands, 4) => !self.ready || self.targets.len() != 1,
+                (Screen::Commands, 7) => self.library_collections.is_empty(),
+                (Screen::ClassifyPick | Screen::Classification(_), _) => false,
                 _ => !self.ready || self.targets.is_empty(),
             }
     }
@@ -334,6 +457,11 @@ impl CommandPalette {
                 (4, "Update metadata by ISBN or DOI…".into(), false),
                 (5, "Set accent color…".into(), false),
                 (6, "Set secondary color…".into(), false),
+                (7, "Edit collection classification…".into(), false),
+                (8, "Set OpenRouter API key…".into(), self.has_openrouter_key),
+                (9, "Set classification model…".into(), false),
+                (10, "Auto-classify".into(), false),
+                (11, "Open classification rules…".into(), false),
             ],
             Screen::Tags => self
                 .tags
@@ -368,7 +496,23 @@ impl CommandPalette {
                     )
                 })
                 .collect(),
-            Screen::Identifier | Screen::Color(_) => vec![],
+            Screen::ClassifyPick => self
+                .library_collections
+                .iter()
+                .enumerate()
+                .map(|(row, collection)| {
+                    (
+                        row,
+                        SharedString::from(collection.name.as_str().to_owned()),
+                        false,
+                    )
+                })
+                .collect(),
+            // The input holds keywords here, so the row is never filtered.
+            Screen::Classification(_) => {
+                return vec![(0, "Include in auto-classify".into(), self.classify_jev)];
+            }
+            Screen::Identifier | Screen::Color(_) | Screen::ApiKey | Screen::JevModel => vec![],
         };
         options
             .into_iter()
@@ -411,7 +555,7 @@ impl CommandPalette {
         }
     }
 
-    fn confirm(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.option_disabled(row) {
             return;
         }
@@ -437,8 +581,24 @@ impl CommandPalette {
                 2 => cx.emit(ToggleResourceGrouping),
                 5 => self.open_color(ThemeColorTarget::Accent, window, cx),
                 6 => self.open_color(ThemeColorTarget::Secondary, window, cx),
+                7 => self.navigate(Screen::ClassifyPick, window, cx),
+                8 => self.navigate(Screen::ApiKey, window, cx),
+                9 => {
+                    self.navigate(Screen::JevModel, window, cx);
+                    let model = self.jev_model.clone();
+                    self.state
+                        .update(cx, |state, cx| state.set_value(model, window, cx));
+                }
+                10 => cx.emit(ClassifyWithJevRequest),
+                11 => cx.emit(OpenClassificationRules),
                 _ => {}
             },
+            Screen::ClassifyPick => {
+                if let Some(id) = self.library_collections.get(row).map(|c| c.id) {
+                    self.open_classification(id, window, cx);
+                }
+            }
+            Screen::Classification(_) => self.classify_jev = !self.classify_jev,
             Screen::Tags => {
                 if let Some(tag) = self.tags.get(row)
                     && !self.mixed_tags.remove(&tag.id)
@@ -457,6 +617,7 @@ impl CommandPalette {
             }
             Screen::Identifier => self.apply_identifier(cx),
             Screen::Color(_) => self.apply_color(cx),
+            Screen::ApiKey | Screen::JevModel => self.apply_jev_setting(cx),
         }
         cx.notify();
     }
@@ -464,7 +625,8 @@ impl CommandPalette {
     fn change_count(&self) -> usize {
         match self.screen {
             Screen::Commands => 0,
-            Screen::Identifier | Screen::Color(_) => 0,
+            Screen::Identifier | Screen::Color(_) | Screen::ApiKey | Screen::JevModel => 0,
+            Screen::ClassifyPick | Screen::Classification(_) => 0,
             Screen::Tags => {
                 self.selected_tags
                     .symmetric_difference(&self.existing_tags)
@@ -530,7 +692,13 @@ impl CommandPalette {
                     .copied()
                     .collect(),
             ),
-            Screen::Commands | Screen::Identifier | Screen::Color(_) => return,
+            Screen::Commands
+            | Screen::Identifier
+            | Screen::Color(_)
+            | Screen::ClassifyPick
+            | Screen::Classification(_)
+            | Screen::ApiKey
+            | Screen::JevModel => return,
         };
         let request = if self.targets.len() > 1 {
             match request {
@@ -626,7 +794,8 @@ impl CommandPalette {
                 .get(row)
                 .is_some_and(|collection| self.mixed_collections.contains(&collection.id)),
             Screen::Commands => false,
-            Screen::Identifier | Screen::Color(_) => false,
+            Screen::Identifier | Screen::Color(_) | Screen::ApiKey | Screen::JevModel => false,
+            Screen::ClassifyPick | Screen::Classification(_) => false,
         };
         h_flex()
             .id(("palette-row", row))
@@ -700,6 +869,11 @@ impl Render for CommandPalette {
             }
             Screen::Tags => "Commands / Edit tags",
             Screen::Collections => "Commands / Edit collections",
+            Screen::ClassifyPick | Screen::Classification(_) => {
+                "Commands / Edit collection classification"
+            }
+            Screen::ApiKey => "Commands / Set OpenRouter API key",
+            Screen::JevModel => "Commands / Set classification model",
             Screen::Identifier => {
                 if self.identifier_target.is_some() {
                     "Commands / Update metadata"
@@ -722,6 +896,10 @@ impl Render for CommandPalette {
             .on_action(cx.listener(|this, _: &PaletteApply, _, cx| {
                 if matches!(this.screen, Screen::Color(_)) {
                     this.apply_color(cx)
+                } else if matches!(this.screen, Screen::Classification(_)) {
+                    this.apply_classification(cx)
+                } else if matches!(this.screen, Screen::ApiKey | Screen::JevModel) {
+                    this.apply_jev_setting(cx)
                 } else if this.screen == Screen::Identifier {
                     this.apply_identifier(cx)
                 } else {
@@ -731,6 +909,10 @@ impl Render for CommandPalette {
             .on_action(cx.listener(|this, _: &PaletteConfirm, window, cx| {
                 if matches!(this.screen, Screen::Color(_)) {
                     this.apply_color(cx)
+                } else if matches!(this.screen, Screen::Classification(_)) {
+                    this.apply_classification(cx)
+                } else if matches!(this.screen, Screen::ApiKey | Screen::JevModel) {
+                    this.apply_jev_setting(cx)
                 } else if this.screen == Screen::Identifier {
                     this.apply_identifier(cx);
                 } else if let Some(row) = this.highlighted {
@@ -747,11 +929,29 @@ impl Render for CommandPalette {
                         div()
                             .text_base()
                             .text_color(cx.theme().muted_foreground)
-                            .child(if matches!(self.screen, Screen::Color(_)) {
-                                "Edits affect only this appearance and are saved to config.toml"
-                                    .to_owned()
-                            } else {
-                                self.title.clone()
+                            .child(match self.screen {
+                                Screen::Color(_) => {
+                                    "Edits affect only this appearance and are saved to config.toml"
+                                        .to_owned()
+                                }
+                                Screen::ClassifyPick => {
+                                    "Keyword rules suggest collections in the detail panel".to_owned()
+                                }
+                                Screen::Classification(id) => format!(
+                                    "{}: matching titles, abstracts, and keywords are suggested, never added automatically",
+                                    self.classification_name(id)
+                                ),
+                                Screen::ApiKey if self.has_openrouter_key => {
+                                    "A key is saved in config.toml; enter a new one, or save empty to remove it".to_owned()
+                                }
+                                Screen::ApiKey => {
+                                    "Used only for auto-classify; saved in config.toml".to_owned()
+                                }
+                                Screen::JevModel => format!(
+                                    "OpenRouter model used to auto-classify; leave empty for {}",
+                                    crate::jev::DEFAULT_JEV_MODEL
+                                ),
+                                _ => self.title.clone(),
                             }),
                     ),
             )
@@ -777,6 +977,10 @@ impl Render for CommandPalette {
                         Screen::Collections => "palette-collections",
                         Screen::Identifier => "palette-identifier",
                         Screen::Color(_) => "palette-color",
+                        Screen::ClassifyPick => "palette-classify-pick",
+                        Screen::Classification(_) => "palette-classification",
+                        Screen::ApiKey => "palette-api-key",
+                        Screen::JevModel => "palette-jev-model",
                     })
                     .test_support()
                     .role(Role::ListBox)
@@ -798,6 +1002,14 @@ impl Render for CommandPalette {
                                     } else {
                                         "Enter a valid ISBN or DOI, then press Enter."
                                     }
+                                } else if self.screen == Screen::ApiKey {
+                                    "Paste the key, then press Enter to save."
+                                } else if self.screen == Screen::JevModel {
+                                    "Enter an OpenRouter model id, then press Enter to save."
+                                } else if self.screen == Screen::ClassifyPick
+                                    && self.library_collections.is_empty()
+                                {
+                                    "No collections yet"
                                 } else {
                                     "No matching options"
                                 }),
@@ -852,8 +1064,16 @@ impl Render for CommandPalette {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(if self.screen == Screen::Identifier {
                                     "↵ Look up"
-                                } else if matches!(self.screen, Screen::Color(_)) {
+                                } else if matches!(
+                                    self.screen,
+                                    Screen::Color(_)
+                                        | Screen::Classification(_)
+                                        | Screen::ApiKey
+                                        | Screen::JevModel
+                                ) {
                                     "↵ Save · Esc Back"
+                                } else if self.screen == Screen::ClassifyPick {
+                                    "↵ Choose · Esc Back"
                                 } else if self.submitted {
                                     "⌘↵ Retry · Esc Cancel"
                                 } else {
@@ -866,7 +1086,13 @@ impl Render for CommandPalette {
                                 .text_base()
                                 .label(if self.saving {
                                     "Saving…".to_owned()
-                                } else if matches!(self.screen, Screen::Color(_)) {
+                                } else if matches!(
+                                    self.screen,
+                                    Screen::Color(_)
+                                        | Screen::Classification(_)
+                                        | Screen::ApiKey
+                                        | Screen::JevModel
+                                ) {
                                     "Save".to_owned()
                                 } else if self.screen == Screen::Identifier {
                                     "Look up".to_owned()
@@ -876,7 +1102,16 @@ impl Render for CommandPalette {
                                     format!("Apply ({})", self.change_count())
                                 })
                                 .disabled(
-                                    if self.screen == Screen::Identifier
+                                    if matches!(
+                                        self.screen,
+                                        Screen::Classification(_)
+                                            | Screen::ApiKey
+                                            | Screen::JevModel
+                                    ) {
+                                        self.saving
+                                    } else if self.screen == Screen::ClassifyPick {
+                                        true
+                                    } else if self.screen == Screen::Identifier
                                         || matches!(self.screen, Screen::Color(_))
                                     {
                                         self.saving || self.state.read(cx).value().trim().is_empty()
@@ -887,6 +1122,13 @@ impl Render for CommandPalette {
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     if matches!(this.screen, Screen::Color(_)) {
                                         this.apply_color(cx)
+                                    } else if matches!(this.screen, Screen::Classification(_)) {
+                                        this.apply_classification(cx)
+                                    } else if matches!(
+                                        this.screen,
+                                        Screen::ApiKey | Screen::JevModel
+                                    ) {
+                                        this.apply_jev_setting(cx)
                                     } else if this.screen == Screen::Identifier {
                                         this.apply_identifier(cx)
                                     } else {
@@ -1155,6 +1397,173 @@ mod tests {
             assert_eq!(requests[0].target, target);
             assert_eq!(requests[0].hex, "#AB12EF");
         }
+    }
+
+    #[gpui_kit::test]
+    fn jev_commands_mask_the_key_prefill_the_model_and_need_one_target(cx: &mut TestAppContext) {
+        use super::{ClassifyWithJevRequest, JevSettingRequest};
+        let f = open(cx, false, false);
+        let requests = Rc::new(RefCell::new(Vec::<JevSettingRequest>::new()));
+        let sink = requests.clone();
+        cx.update_window(f.window, |_, window, cx| {
+            f.palette.update(cx, |palette, cx| {
+                palette.set_jev_settings(true, Some("typesafe/jev-2".into()));
+                cx.subscribe(&f.palette, move |_, _, request: &JevSettingRequest, _| {
+                    sink.borrow_mut().push(request.clone());
+                })
+                .detach();
+            });
+            assert!(f.palette.read(cx).option_disabled(10), "no target");
+            // Rows past the list's max height are scrolled out of view.
+            f.palette
+                .update(cx, |palette, cx| palette.confirm(8, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.window, |_, window, cx| {
+            assert_eq!(f.palette.read(cx).screen, Screen::ApiKey);
+            let state = f.palette.read(cx).state.clone();
+            assert!(state.read(cx).presentation().is_masked());
+            window.input("sk-or-v1-secret", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(matches!(
+            requests.borrow().as_slice(),
+            [JevSettingRequest::ApiKey(key)] if key == "sk-or-v1-secret"
+        ));
+
+        let f = open(cx, true, true);
+        let classify = Rc::new(std::cell::Cell::new(0));
+        let count = classify.clone();
+        cx.update_window(f.window, |_, window, cx| {
+            f.palette.update(cx, |palette, cx| {
+                palette.set_jev_settings(false, Some("typesafe/jev-2".into()));
+                cx.subscribe(&f.palette, move |_, _, _: &ClassifyWithJevRequest, _| {
+                    count.set(count.get() + 1);
+                })
+                .detach();
+            });
+            f.palette
+                .update(cx, |palette, cx| palette.confirm(9, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.window, |_, window, cx| {
+            let palette = f.palette.read(cx);
+            assert_eq!(palette.screen, Screen::JevModel);
+            assert!(!palette.state.read(cx).presentation().is_masked());
+            assert_eq!(palette.state.read(cx).value().as_ref(), "typesafe/jev-2");
+            window.press("escape", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.window, |_, window, cx| {
+            assert_eq!(f.palette.read(cx).screen, Screen::Commands);
+            assert!(!f.palette.read(cx).option_disabled(10));
+            f.palette
+                .update(cx, |palette, cx| palette.confirm(10, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(classify.get(), 1);
+
+        let f = open(cx, false, false);
+        let opened = Rc::new(std::cell::Cell::new(0));
+        let count = opened.clone();
+        cx.update_window(f.window, |_, window, cx| {
+            f.palette.update(cx, |_, cx| {
+                cx.subscribe(
+                    &f.palette,
+                    move |_, _, _: &super::OpenClassificationRules, _| {
+                        count.set(count.get() + 1);
+                    },
+                )
+                .detach();
+            });
+            assert!(!f.palette.read(cx).option_disabled(11), "needs no target");
+            f.palette
+                .update(cx, |palette, cx| palette.confirm(11, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(opened.get(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn classification_screen_edits_rules_and_emits_parsed_request(cx: &mut TestAppContext) {
+        use super::CollectionClassificationRequest;
+        let f = open(cx, false, false);
+        let mut methods = Collection::try_new(
+            CollectionId::generate(),
+            NonEmptyStr::try_new("Methods").unwrap(),
+        );
+        methods.keywords = vec!["provenance".into()];
+        let other = Collection::try_new(
+            CollectionId::generate(),
+            NonEmptyStr::try_new("Other").unwrap(),
+        );
+        let requests = Rc::new(RefCell::new(Vec::<CollectionClassificationRequest>::new()));
+        let sink = requests.clone();
+        cx.update_window(f.window, |_, window, cx| {
+            assert!(f.palette.read(cx).option_disabled(7), "no collections yet");
+            f.palette.update(cx, |palette, cx| {
+                palette.set_library_collections(vec![other.clone(), methods.clone()]);
+                cx.subscribe(
+                    &f.palette,
+                    move |_, _, request: &CollectionClassificationRequest, _| {
+                        sink.borrow_mut().push(request.clone());
+                    },
+                )
+                .detach();
+            });
+            window.render_frame(cx);
+            assert!(!f.palette.read(cx).option_disabled(7));
+            window.click(("palette-row", 7usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.window, |_, window, cx| {
+            assert_eq!(f.palette.read(cx).screen, Screen::ClassifyPick);
+            window.render_frame(cx);
+            window.click(("palette-row", 1usize), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.window, |_, window, cx| {
+            let palette = f.palette.read(cx);
+            assert_eq!(palette.screen, Screen::Classification(methods.id));
+            assert_eq!(palette.state.read(cx).value().as_ref(), "provenance");
+            assert!(!palette.classify_jev);
+            window.render_frame(cx);
+            window.click(("palette-row", 0usize), cx);
+            assert!(f.palette.read(cx).classify_jev);
+            let state = f.palette.read(cx).state.clone();
+            state.update(cx, |state, cx| state.set_value("a,,b", window, cx));
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(requests.borrow().is_empty());
+        assert!(
+            f.palette
+                .read_with(cx, |palette, _| palette.error.is_some())
+        );
+        cx.update_window(f.window, |_, window, cx| {
+            let state = f.palette.read(cx).state.clone();
+            state.update(cx, |state, cx| {
+                state.set_value(" Provenance, research methods, provenance ", window, cx)
+            });
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let requests = requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].id, methods.id);
+        assert_eq!(requests[0].keywords, vec!["Provenance", "research methods"]);
+        assert!(requests[0].jev_enabled);
     }
 
     #[gpui_kit::test]
