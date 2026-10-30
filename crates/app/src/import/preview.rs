@@ -14,7 +14,7 @@ use crate::{AppState, CommandError};
 use super::link::{
     ContainerDecision, ImportEntityIndex, plan_parent_for_entry, resolve_explicit_container,
 };
-use super::save::{PersonLookupCache, seed_identity_index, seed_index_from_store};
+use super::save::{IdentityIndex, PersonLookupCache, seed_index_from_resources};
 
 /// Inspect `draft` against the library without persisting.
 pub async fn preview_draft(
@@ -26,9 +26,13 @@ pub async fn preview_draft(
         .clone()
         .unwrap_or_else(|| source_fingerprint(draft.provenance.format, ""));
 
-    let identity = seed_identity_index(state).await?;
+    let library_resources = state.store().list_resources_for_import().await?;
+    let mut identity = IdentityIndex::default();
+    for resource in &library_resources {
+        identity.remember_resource(resource);
+    }
     let mut index = ImportEntityIndex::default();
-    seed_index_from_store(state, &mut index).await?;
+    seed_index_from_resources(&mut index, &library_resources);
     let person_cache = PersonLookupCache::load(state).await?;
 
     let mut series_seen = std::collections::HashMap::<String, bool>::new();

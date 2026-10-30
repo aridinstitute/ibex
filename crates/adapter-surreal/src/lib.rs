@@ -2245,7 +2245,7 @@ impl Store for SurrealStore {
         id: ResourceId,
         tag_ids: &[TagId],
         collection_ids: &[CollectionId],
-    ) -> Result<Resource, StoreError> {
+    ) -> Result<(), StoreError> {
         // array::union keeps existing order and drops duplicates, so a retry
         // never doubles a membership. A missing row yields empty → not-found.
         let tags: Vec<RecordId> = tag_ids.iter().copied().map(Self::tag_key).collect();
@@ -2270,7 +2270,7 @@ impl Store for SurrealStore {
         if updated.is_none() {
             return Err(StoreError::not_found(format!("resource {id}")));
         }
-        self.get_resource(id).await
+        Ok(())
     }
 
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError> {

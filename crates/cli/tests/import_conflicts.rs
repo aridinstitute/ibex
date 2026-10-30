@@ -30,6 +30,11 @@ fn import_duplicate_policy_is_explicit_and_default_skips() {
         "{}",
         String::from_utf8_lossy(&skipped.stderr)
     );
+    assert_eq!(
+        String::from_utf8(skipped.stdout).unwrap(),
+        "imported 0, reused 0, skipped 1, conflicted 0, failed 0, not attempted 0, warnings 0\n\
+         skipped\tother\tskipped by review choice [import.entry_skipped]\n"
+    );
     let rows = run(&["resource", "list"]);
     assert_eq!(String::from_utf8(rows.stdout).unwrap().lines().count(), 1);
     let duplicate = run(&[

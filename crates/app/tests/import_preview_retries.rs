@@ -383,13 +383,18 @@ async fn partial_report_agrees_with_persisted_records_after_failure() {
 
 #[tokio::test]
 async fn preview_lists_matches_and_conflicts_without_writing() {
-    let state = app();
+    let store = MemoryStore::new();
+    let state = AppState::builder(store.clone())
+        .surface(Surface::Test)
+        .sink(MemorySink::new())
+        .build();
     import(
         &state,
         "@book{seed, title={Notes}, author={Ada, Lovelace}, doi={10.1000/notes}}",
     )
     .await;
     let before = resource_count(&state).await;
+    store.reset_query_counts();
 
     let Outcome::PreviewBiblatex(preview) = state
         .execute(Command::PreviewBiblatex(PreviewBiblatex {
@@ -401,6 +406,8 @@ async fn preview_lists_matches_and_conflicts_without_writing() {
     else {
         panic!("preview");
     };
+    assert_eq!(store.list_resources_for_import_count(), 1);
+    assert_eq!(store.list_persons_count(), 1);
     assert!(preview.needs_review());
     assert!(matches!(
         preview.entries[0].proposal,

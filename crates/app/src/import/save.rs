@@ -561,24 +561,7 @@ async fn revalidate_reuse(state: &AppState, resource_id: ResourceId) -> Result<(
     }
 }
 
-pub(crate) async fn seed_identity_index(state: &AppState) -> Result<IdentityIndex, CommandError> {
-    let mut identity = IdentityIndex::default();
-    for resource in state.store().list_resources_for_import().await? {
-        identity.remember_resource(&resource);
-    }
-    Ok(identity)
-}
-
-pub(crate) async fn seed_index_from_store(
-    state: &AppState,
-    index: &mut ImportEntityIndex,
-) -> Result<(), CommandError> {
-    let resources = state.store().list_resources_for_import().await?;
-    seed_index_from_resources(index, &resources);
-    Ok(())
-}
-
-fn seed_index_from_resources(index: &mut ImportEntityIndex, resources: &[Resource]) {
+pub(crate) fn seed_index_from_resources(index: &mut ImportEntityIndex, resources: &[Resource]) {
     let rows: Vec<_> = resources
         .iter()
         .map(|r| oeuvre_core::ResourceSummary {

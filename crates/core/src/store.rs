@@ -246,7 +246,7 @@ pub trait Store: Send + Sync + 'static {
         id: ResourceId,
         tag_ids: &[TagId],
         collection_ids: &[CollectionId],
-    ) -> Result<Resource, StoreError> {
+    ) -> Result<(), StoreError> {
         let _ = (id, tag_ids, collection_ids);
         Err(StoreError::new(
             "add_resource_labels not supported by this store",
