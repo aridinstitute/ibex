@@ -1,3 +1,5 @@
+mod common;
+
 use std::process::Command;
 
 use ibex_adapter_surreal::SurrealStore;
@@ -56,7 +58,7 @@ fn list_and_tree_preserve_every_row_and_order_across_page_boundaries() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("library");
     let run = |args: &[&str]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_ibex"))
+        let output = common::ibex()
             .arg("--data")
             .arg(&data)
             .args(args)

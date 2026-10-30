@@ -193,10 +193,11 @@ impl DbWorker {
             .name("ibex-db".into())
             // SurrealDB update evaluation plus this worker's request future can
             // exceed the OS default stack in debug builds (even for one record).
-            .stack_size(8 * 1024 * 1024)
+            .stack_size(crate::RUNTIME_STACK_BYTES)
             .spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
+                    .thread_stack_size(crate::RUNTIME_STACK_BYTES)
                     .build()
                     .expect("db worker runtime");
                 rt.block_on(async move {

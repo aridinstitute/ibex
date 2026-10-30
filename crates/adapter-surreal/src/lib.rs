@@ -541,8 +541,26 @@ impl SurrealStore {
         let next_offset = has_more.then(|| offset.saturating_add(u64::from(limit)));
         Ok((rows, next_offset))
     }
+
+    /// Shut the datastore down and release its directory lock before
+    /// returning, so the same path can be reopened at once.
+    pub async fn close(self) -> Result<(), StoreError> {
+        self.db.shutdown().await.map_err(map_err)
+    }
+
+    /// Open (creating if missing) the persistent library at `path`.
+    ///
+    /// SurrealKV admits one owning process per directory; a library another
+    /// process holds fails with [`StoreError::is_in_use`]. Opening a
+    /// directory written by an older SurrealDB release converts it in place,
+    /// irreversibly, so callers must only pass paths they own.
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
-        let db = Surreal::new::<SurrealKv>(path).await.map_err(map_err)?;
+        std::fs::create_dir_all(path).map_err(|e| {
+            StoreError::new(format!("create library directory {}: {e}", path.display()))
+        })?;
+        let db = Surreal::new::<SurrealKv>(path)
+            .await
+            .map_err(|e| open_error(path, e))?;
         db.use_ns(NS).use_db(DB).await.map_err(map_err)?;
         let store = Self { db };
         store.ensure_schema().await?;
@@ -1591,6 +1609,23 @@ fn record_key(record: &RecordId) -> String {
 
 fn map_err(err: surrealdb::Error) -> StoreError {
     StoreError::new(err.to_string())
+}
+
+/// The SDK reports a held SurrealKV directory only as text (an internal
+/// datastore error wrapping SurrealKV's `LOCK` file message), so the lock is
+/// recognised by that message.
+fn open_error(path: &Path, err: surrealdb::Error) -> StoreError {
+    if err
+        .to_string()
+        .contains("already locked by another process")
+    {
+        return StoreError::in_use(format!(
+            "The Ibex library at {} is in use by another Ibex process. \
+             Close the other Ibex app or CLI and try again.",
+            path.display()
+        ));
+    }
+    StoreError::new(format!("open library at {}: {err}", path.display()))
 }
 
 #[async_trait::async_trait]
@@ -3074,7 +3109,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "surrealdb 3.3.4's Mem engine drops ORDER BY when the row source is not a plain table scan and orders nondeterministically on the record id alone; known upstream regression, passes on the file engine the GUI runs on"]
     async fn creator_filter_yields_each_resource_once() {
         let store = SurrealStore::open_memory().await.unwrap();
         let ada = store
@@ -4153,7 +4187,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "surrealdb 3.3.4's Mem engine drops ORDER BY when the row source is not a plain table scan and orders nondeterministically on the record id alone; known upstream regression, passes on the file engine the GUI runs on"]
     async fn sorted_descending_reverses_keys_and_moves_no_data_rows_first() {
         let store = SurrealStore::open_memory().await.unwrap();
         let hopper = store
@@ -4411,7 +4444,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "surrealdb 3.3.4's Mem engine drops ORDER BY when the row source is not a plain table scan and orders nondeterministically on the record id alone; known upstream regression, passes on the file engine the GUI runs on"]
     async fn creator_filter_matches_only_that_persons_works() {
         let store = SurrealStore::open_memory().await.unwrap();
         let ada = store
@@ -4467,7 +4499,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "surrealdb 3.3.4's Mem engine drops ORDER BY when the row source is not a plain table scan and orders nondeterministically on the record id alone; known upstream regression, passes on the file engine the GUI runs on"]
     async fn creator_filter_keeps_sort_order_within_matches() {
         let store = SurrealStore::open_memory().await.unwrap();
         let ada = store
@@ -4512,7 +4543,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "surrealdb 3.3.4's Mem engine drops ORDER BY when the row source is not a plain table scan and orders nondeterministically on the record id alone; known upstream regression, passes on the file engine the GUI runs on"]
     async fn creator_filter_composes_with_primary_creator_sort() {
         let store = SurrealStore::open_memory().await.unwrap();
         let ada = store
@@ -4827,14 +4857,15 @@ mod tests {
 
         drop(store);
 
-        // 3.x releases the SurrealKv directory lock on the engine's own task
-        // once the last handle drops, so the reopen races an in-flight
-        // shutdown. Retry briefly until the lock is free, mirroring how
-        // upstream's own integration tests reopen a dropped datastore.
+        // Dropping the last handle releases the SurrealKv directory lock on
+        // the engine's own task, so the reopen races an in-flight shutdown
+        // (`SurrealStore::close` avoids that). Retry briefly until the lock is
+        // free, mirroring how upstream's own integration tests reopen a
+        // dropped datastore.
         let reopened = loop {
             match SurrealStore::open(dir.path()).await {
                 Ok(store) => break store,
-                Err(err) if err.message.contains("already locked") => {
+                Err(err) if err.is_in_use() => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("reopen failed without a lock race: {err}"),
@@ -5384,13 +5415,13 @@ mod tests {
 
         drop(store);
 
-        // 3.x releases the SurrealKv directory lock on the engine's own task
-        // once the last handle drops, so the reopen races an in-flight
-        // shutdown (same retry as the person CRUD disk round trip).
+        // Dropping the last handle releases the SurrealKv directory lock on
+        // the engine's own task, so the reopen races an in-flight shutdown
+        // (same retry as the person CRUD disk round trip).
         let reopened = loop {
             match SurrealStore::open(dir.path()).await {
                 Ok(store) => break store,
-                Err(err) if err.message.contains("already locked") => {
+                Err(err) if err.is_in_use() => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("reopen failed without a lock race: {err}"),
@@ -5456,7 +5487,7 @@ mod tests {
         let reopened = loop {
             match SurrealStore::open(dir.path()).await {
                 Ok(store) => break store,
-                Err(err) if err.message.contains("already locked") => {
+                Err(err) if err.is_in_use() => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("reopen failed without a lock race: {err}"),

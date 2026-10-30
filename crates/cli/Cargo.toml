@@ -18,7 +18,6 @@ ibex-core = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }
-dirs = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

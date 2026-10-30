@@ -19,9 +19,10 @@ mod theme_editor;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use ibex_adapter_surreal::SurrealStore;
+use ibex_app::paths::{AppPaths, CONFIG_DIR_ENV, Paths};
 use ibex_app::{AppState, Surface};
 use ibex_core::{ResourceGridParent, ResourceQuery};
 
@@ -42,13 +43,29 @@ use crate::settings::Settings;
 #[derive(Debug, Parser)]
 #[command(name = "ibex-gui", version, about = "Ibex library GUI")]
 struct Args {
-    /// Library data directory (SurrealKV path).
+    /// Library database directory (SurrealKV). Defaults to the platform
+    /// data directory; backups then go to a sibling `<dir>-backups`.
     #[arg(long, global = true, env = "IBEX_DATA")]
     data: Option<PathBuf>,
 
-    /// Use an in-memory store seeded with a demo library (overrides --data).
+    /// Use a throwaway in-memory library seeded with demo data; nothing is
+    /// written to disk (overrides --data).
     #[arg(long, global = true)]
     memory: bool,
+}
+
+/// SurrealDB's embedded engine recommends 10 MiB worker stacks; the 2 MiB
+/// default overflows in debug builds.
+pub(crate) const RUNTIME_STACK_BYTES: usize = 10 * 1024 * 1024;
+
+/// Paths for this launch, from the same resolver the CLI uses, so both
+/// clients share one library and one config file.
+fn resolve_paths(
+    args: &Args,
+    bases: &AppPaths,
+    config_dir_override: Option<PathBuf>,
+) -> Result<Paths> {
+    Ok(bases.resolve(args.data.clone(), config_dir_override)?)
 }
 
 fn main() -> ExitCode {
@@ -63,24 +80,41 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let args = Args::parse();
-    let state = setup_state(&args)?;
-    let worker = DbWorker::spawn(state);
+    let started = (|| {
+        let paths = resolve_paths(
+            &args,
+            &AppPaths::system(),
+            std::env::var_os(CONFIG_DIR_ENV).map(PathBuf::from),
+        )?;
+        let state = setup_state(&args, &paths)?;
+        let worker = DbWorker::spawn(state);
+        // Fetch the first page before the window opens so the grid renders
+        // full immediately; scrolling drives every later page.
+        let first = worker
+            .list_grid_page_blocking(
+                ResourceGridParent::Roots,
+                ResourceQuery::newest_first(),
+                0,
+                PAGE_SIZE,
+            )
+            .map_err(|e| anyhow!("load first page: {e}"))?;
+        Ok::<_, anyhow::Error>((paths, worker, first))
+    })();
+    let (paths, worker, first) = match started {
+        Ok(started) => started,
+        Err(err) => {
+            // Never fall back to an empty or in-memory library: the user
+            // must see that their library did not open, and why.
+            eprintln!("error: {err:#}");
+            show_startup_error(format!("{err:#}"));
+            return Err(err);
+        }
+    };
 
-    // Settings are app-level, so they live in the default app data
-    // directory even when the library itself opens from --data elsewhere.
-    let settings_dir = default_data_dir();
+    // Settings share the config file with the CLI, which never moves
+    // with --data.
+    let settings_dir = paths.config_dir().to_path_buf();
     let settings = Settings::load(&settings_dir);
-
-    // Fetch the first page before the window opens so the grid renders full
-    // immediately; scrolling drives every later page.
-    let first = worker
-        .list_grid_page_blocking(
-            ResourceGridParent::Roots,
-            ResourceQuery::newest_first(),
-            0,
-            PAGE_SIZE,
-        )
-        .map_err(|e| anyhow::anyhow!("load first page: {e}"))?;
 
     gpui_kit::application()
         .with_assets(AppAssets)
@@ -133,12 +167,61 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn setup_state(args: &Args) -> Result<AppState> {
+/// Show why the library could not open in a window of its own; closing it
+/// exits with a failure status.
+fn show_startup_error(message: String) {
+    gpui_kit::application()
+        .with_assets(AppAssets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            cx.on_window_closed(|_, _| std::process::exit(1)).detach();
+            let opened = gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds {
+                        origin: Default::default(),
+                        size: size(px(560.), px(220.)),
+                    })),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Ibex could not open the library".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                cx,
+                move |_, cx| cx.new(|_| StartupError { message }),
+            );
+            if let Err(err) = opened {
+                eprintln!("error: failed to open window: {err}");
+                std::process::exit(1);
+            }
+        });
+}
+
+struct StartupError {
+    message: String,
+}
+
+impl Render for StartupError {
+    fn render(&mut self, _: &mut Window, _: &mut gpui_kit::Context<Self>) -> impl IntoElement {
+        div()
+            .id("startup-error")
+            .size_full()
+            .p_6()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().text_lg().child("Ibex could not open the library"))
+            .child(div().child(self.message.clone()))
+    }
+}
+
+fn setup_state(args: &Args, paths: &Paths) -> Result<AppState> {
     // The runtime is deliberately leaked: Surreal keeps engine tasks on it,
     // and it has to outlive the window. The DbWorker thread runs requests on
     // its own runtime, not this one.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .thread_stack_size(RUNTIME_STACK_BYTES)
         .build()
         .context("start runtime")?;
     let state = rt.block_on(async {
@@ -154,12 +237,11 @@ fn setup_state(args: &Args) -> Result<AppState> {
             );
         }
 
-        let data = args.data.clone().unwrap_or_else(default_data_dir);
-        std::fs::create_dir_all(&data)
-            .with_context(|| format!("create data directory {}", data.display()))?;
-        let store = SurrealStore::open(&data)
+        // The adapter's message names the path and, for a library another
+        // process holds, what to do about it.
+        let store = SurrealStore::open(&paths.database)
             .await
-            .with_context(|| format!("open library at {}", data.display()))?;
+            .map_err(|err| anyhow!(err.message))?;
         Ok(AppState::builder(store).surface(Surface::Gui).build())
     })?;
     std::mem::forget(rt);
@@ -231,8 +313,32 @@ fn bind_favorite_keys(cx: &mut App) {
     ]);
 }
 
-fn default_data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("ibex")
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use clap::Parser as _;
+    use ibex_app::paths::AppPaths;
+
+    use super::{Args, resolve_paths};
+
+    #[test]
+    fn gui_config_follows_the_shared_resolver_and_ignores_data() {
+        let bases = AppPaths::new(
+            Some(PathBuf::from("/home/ada")),
+            Some(PathBuf::from("/home/ada/data")),
+        );
+        let with_data = Args::try_parse_from(["ibex-gui", "--data", "/srv/thesis"]).unwrap();
+        let default = Args::try_parse_from(["ibex-gui"]).unwrap();
+        let gui = resolve_paths(&with_data, &bases, None).unwrap();
+        // The CLI resolves through the same `AppPaths::resolve`.
+        let shared = bases.resolve(None, None).unwrap();
+        assert_eq!(gui.config_file, shared.config_file);
+        assert_eq!(
+            gui.config_file,
+            PathBuf::from("/home/ada/.ibex/config.toml")
+        );
+        assert_eq!(gui.database, PathBuf::from("/srv/thesis"));
+        assert_eq!(resolve_paths(&default, &bases, None).unwrap(), shared);
+    }
 }

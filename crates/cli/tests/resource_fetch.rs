@@ -1,10 +1,10 @@
-use std::process::Command;
+mod common;
 
 #[test]
 fn fetch_validates_identifier_and_update_target_before_network() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ibex"))
+        common::ibex()
             .arg("--data")
             .arg(dir.path())
             .args(args)

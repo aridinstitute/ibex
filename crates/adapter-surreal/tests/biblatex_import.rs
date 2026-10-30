@@ -182,7 +182,7 @@ async fn import_persists_people_roles_order_and_survives_reopen() {
         loop {
             match SurrealStore::open(&path).await {
                 Ok(store) => break store,
-                Err(err) if err.message.contains("already locked") => {
+                Err(err) if err.is_in_use() => {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("reopen failed: {err}"),

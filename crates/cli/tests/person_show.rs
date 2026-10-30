@@ -1,10 +1,10 @@
-use std::process::Command;
+mod common;
 
 #[test]
 fn show_prints_the_person_and_get_is_not_a_command() {
     let dir = tempfile::tempdir().expect("temporary library");
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ibex"))
+        common::ibex()
             .arg("--data")
             .arg(dir.path())
             .args(args)

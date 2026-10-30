@@ -9,9 +9,11 @@ mod tag;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand};
 use ibex_adapter_surreal::SurrealStore;
+use ibex_app::config::ConfigFile;
+use ibex_app::paths::{AppPaths, Paths};
 use ibex_app::{AppState, CommandError, ErrorKind, Surface};
 
 use crate::collection::CollectionCmd;
@@ -24,11 +26,13 @@ use crate::tag::TagCmd;
 #[derive(Debug, Parser)]
 #[command(name = "ibex", version, about = "Ibex citation manager")]
 struct Cli {
-    /// Library data directory (SurrealKV path).
+    /// Library database directory (SurrealKV). Defaults to the platform
+    /// data directory; backups then go to a sibling `<dir>-backups`.
     #[arg(long, global = true, env = "IBEX_DATA")]
     data: Option<PathBuf>,
 
-    /// Use an in-memory store seeded with a demo library (overrides --data).
+    /// Use a throwaway in-memory library seeded with demo data; nothing is
+    /// written to disk (overrides --data).
     #[arg(long, global = true)]
     memory: bool,
 
@@ -53,9 +57,23 @@ enum Commands {
     Tag(TagCmd),
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    match run().await {
+/// SurrealDB's embedded engine recommends 10 MiB worker stacks; the 2 MiB
+/// default overflows in debug builds.
+const RUNTIME_STACK_BYTES: usize = 10 * 1024 * 1024;
+
+fn main() -> ExitCode {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(RUNTIME_STACK_BYTES)
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("error: start runtime: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    match runtime.block_on(run()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             if let Some(cmd) = err.downcast_ref::<CommandError>() {
@@ -70,26 +88,28 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    let paths = AppPaths::resolve_from_env(cli.data.clone())?;
+    let config = ConfigFile::new(&paths.config_file);
     if matches!(cli.command, Commands::Config(_)) {
         let Commands::Config(cmd) = cli.command else {
             unreachable!()
         };
-        return config::run(cmd);
+        return config::run(cmd, &config);
     }
-    let state = open_state(&cli).await?;
+    let state = open_state(&cli, &paths).await?;
 
     match cli.command {
         Commands::Config(_) => unreachable!("handled before opening the library"),
         Commands::Collection(cmd) => collection::run(&state, cmd).await?,
         Commands::Import(args) => import::run(&state, args).await?,
         Commands::Person(cmd) => person::run(&state, cmd).await?,
-        Commands::Resource(cmd) => resource::run(&state, cmd).await?,
+        Commands::Resource(cmd) => resource::run(&state, cmd, &config).await?,
         Commands::Tag(cmd) => tag::run(&state, cmd).await?,
     }
     Ok(())
 }
 
-async fn open_state(cli: &Cli) -> Result<AppState> {
+async fn open_state(cli: &Cli, paths: &Paths) -> Result<AppState> {
     if cli.memory {
         let store = SurrealStore::open_memory()
             .await
@@ -100,20 +120,12 @@ async fn open_state(cli: &Cli) -> Result<AppState> {
         return Ok(AppState::builder(store).surface(Surface::Cli).build());
     }
 
-    let data = cli.data.clone().unwrap_or_else(default_data_dir);
-    std::fs::create_dir_all(&data)
-        .with_context(|| format!("create data directory {}", data.display()))?;
-
-    let store = SurrealStore::open(&data)
+    // The adapter's message already names the path and, for a library
+    // another process holds, what to do about it.
+    let store = SurrealStore::open(&paths.database)
         .await
-        .with_context(|| format!("open library at {}", data.display()))?;
+        .map_err(|err| anyhow!(err.message))?;
     Ok(AppState::builder(store).surface(Surface::Cli).build())
-}
-
-fn default_data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("ibex")
 }
 
 fn exit_for(kind: ErrorKind) -> ExitCode {

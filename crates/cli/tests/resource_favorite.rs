@@ -1,4 +1,4 @@
-use std::process::Command;
+mod common;
 
 #[test]
 fn update_favorite_without_changing_metadata() {
@@ -10,7 +10,7 @@ fn update_favorite_without_changing_metadata() {
     )
     .unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ibex"))
+        common::ibex()
             .arg("--data")
             .arg(dir.path())
             .args(args)

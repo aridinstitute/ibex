@@ -21,9 +21,12 @@ ulid = { workspace = true }
 biblatex = { workspace = true }
 time = { workspace = true }
 reqwest = { workspace = true }
+dirs = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true }
 
 [[bench]]

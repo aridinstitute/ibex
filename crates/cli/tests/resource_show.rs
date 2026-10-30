@@ -1,4 +1,4 @@
-use std::process::Command;
+mod common;
 
 #[test]
 fn show_prints_full_resource_detail_and_rejects_missing_id() {
@@ -10,7 +10,7 @@ fn show_prints_full_resource_detail_and_rejects_missing_id() {
     )
     .expect("bibliography");
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ibex"))
+        common::ibex()
             .arg("--data")
             .arg(dir.path())
             .args(args)

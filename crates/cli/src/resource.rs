@@ -273,7 +273,11 @@ impl UpdateArgs {
 /// Rows per query-page fetch while walking a filtered listing.
 const QUERY_PAGE: u32 = 500;
 
-pub async fn run(state: &AppState, cmd: ResourceCmd) -> Result<()> {
+pub async fn run(
+    state: &AppState,
+    cmd: ResourceCmd,
+    config: &ibex_app::config::ConfigFile,
+) -> Result<()> {
     match cmd.action {
         ResourceAction::List(args) => list(state, args).await,
         ResourceAction::Show { id } => show(state, &id).await,
@@ -282,15 +286,23 @@ pub async fn run(state: &AppState, cmd: ResourceCmd) -> Result<()> {
             fetch(state, &identifier, update.as_deref()).await
         }
         ResourceAction::Update(args) => update(state, args).await,
-        ResourceAction::Classify { id, engine, apply } => classify(state, &id, engine, apply).await,
+        ResourceAction::Classify { id, engine, apply } => {
+            classify(state, config, &id, engine, apply).await
+        }
     }
 }
 
-async fn classify(state: &AppState, id: &str, engine: ClassifyEngine, apply: bool) -> Result<()> {
+async fn classify(
+    state: &AppState,
+    config: &ibex_app::config::ConfigFile,
+    id: &str,
+    engine: ClassifyEngine,
+    apply: bool,
+) -> Result<()> {
     let id = ResourceId::parse(id).context("invalid resource id")?;
     let mut suggestions: Vec<(ibex_core::Collection, Option<f32>)> = Vec::new();
     if engine != ClassifyEngine::Keywords {
-        let config = crate::config::load()?;
+        let config = config.load()?;
         let key = config.get("openrouter_api_key").and_then(toml::Value::as_str)
             .filter(|key| !key.trim().is_empty())
             .context("Set an OpenRouter API key with `ibex config set openrouter-api-key` before Jev classification")?;

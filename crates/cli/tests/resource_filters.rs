@@ -1,4 +1,4 @@
-use std::process::Command;
+mod common;
 
 #[test]
 fn list_filters_by_kind_favorite_tag_collection_and_search() {
@@ -10,7 +10,7 @@ fn list_filters_by_kind_favorite_tag_collection_and_search() {
     )
     .unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ibex"))
+        common::ibex()
             .arg("--data")
             .arg(dir.path())
             .args(args)

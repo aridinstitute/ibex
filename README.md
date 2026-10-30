@@ -14,12 +14,39 @@ CLI and MCP for automation.
 | `ibex-cli`             | `crates/cli`             | `ibex` command-line interface               |
 | `ibex-gui`             | `crates/gui`             | `ibex-gui` desktop library (GPUI + gpui-kit) |
 
-Try either shell against a seeded in-memory library with `--memory`:
+Try either shell against a throwaway, demo-seeded in-memory library with
+`--memory` (nothing is written to disk):
 
 ```sh
 cargo run -p ibex-cli -- --memory resource list
 cargo run -p ibex-gui -- --memory
 ```
+
+## Where Ibex keeps data
+
+Without `--memory`, both clients open the same persistent library (SurrealKV
+on SurrealDB 4.0) and read the same config file:
+
+| What     | Default                                                                 | Override                         |
+|----------|-------------------------------------------------------------------------|----------------------------------|
+| Library  | macOS `~/Library/Application Support/Ibex/database`; Linux `$XDG_DATA_HOME/ibex/database` (usually `~/.local/share/ibex/database`); Windows `%APPDATA%\Ibex\database` | `--data <dir>` or `IBEX_DATA`    |
+| Backups  | `backups` beside the default library (e.g. `.../Ibex/backups`)         | with `--data <dir>`: `<dir>-backups` |
+| Config   | `~/.ibex/config.toml` on every platform                                 | `IBEX_CONFIG_DIR=<dir>`          |
+
+- The config location never follows `--data`. The file is written atomically
+  with private permissions (`0600`, directory `0700`), and each client keeps
+  the other's keys when it saves.
+- The library directory is created on first open. Only one Ibex process can
+  hold a library at a time; a second GUI or CLI on the same library fails with
+  "The Ibex library at <path> is in use by another Ibex process".
+- Ibex never opens or migrates data from older installs (such as an Oeuvre
+  directory) on its own.
+
+> **Upgrading an existing 3.x database:** opening a database written by
+> SurrealDB 3.x with Ibex (SurrealDB 4.0) converts it to the 4.0 on-disk format
+> in place. The conversion is irreversible and 3.x can no longer open it. Only
+> point `--data` at such a directory after taking a verified export with your
+> 3.x tooling and an offline copy of the directory.
 
 ## Importing bibliographies
 

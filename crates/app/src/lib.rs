@@ -5,10 +5,12 @@
 mod app;
 pub mod classification;
 pub mod command;
+pub mod config;
 mod event;
 pub mod import;
 pub mod jev;
 pub mod metadata;
+pub mod paths;
 pub mod seed;
 #[cfg(feature = "testing")]
 pub mod testing;

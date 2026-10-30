@@ -30,7 +30,7 @@ tracing = "0.1"
 ulid = { version = "3", features = ["serde"] }
 time = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-surrealdb = { version = "3.3.4", default-features = false, features = ["kv-mem", "kv-surrealkv"] }
+surrealdb = { version = "=4.0.0-beta.1", default-features = false, features = ["kv-mem", "kv-surrealkv"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 tempfile = "3"
 clap = { version = "4", features = ["derive", "env"] }
@@ -41,3 +41,56 @@ anyhow = "1"
 biblatex = "0.12"
 unicode-normalization = "0.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+
+# SurrealDB 4.0's engine is ~25x slower unoptimized (a demo-library seed
+# takes minutes instead of seconds), so dev and test builds optimize it.
+[profile.dev.package.surrealdb]
+opt-level = 3
+[profile.dev.package.surrealdb-catalog]
+opt-level = 3
+[profile.dev.package.surrealdb-cnf]
+opt-level = 3
+[profile.dev.package.surrealdb-collections]
+opt-level = 3
+[profile.dev.package.surrealdb-common]
+opt-level = 3
+[profile.dev.package.surrealdb-core]
+opt-level = 3
+[profile.dev.package.surrealdb-datastore]
+opt-level = 3
+[profile.dev.package.surrealdb-engine-api]
+opt-level = 3
+[profile.dev.package.surrealdb-engine-local]
+opt-level = 3
+[profile.dev.package.surrealdb-expr]
+opt-level = 3
+[profile.dev.package.surrealdb-iam]
+opt-level = 3
+[profile.dev.package.surrealdb-idx]
+opt-level = 3
+[profile.dev.package.surrealdb-kvs]
+opt-level = 3
+[profile.dev.package.surrealdb-kvs-any]
+opt-level = 3
+[profile.dev.package.surrealdb-kvs-mem]
+opt-level = 3
+[profile.dev.package.surrealdb-kvs-surrealkv]
+opt-level = 3
+[profile.dev.package.surrealdb-observe]
+opt-level = 3
+[profile.dev.package.surrealdb-parse-common]
+opt-level = 3
+[profile.dev.package.surrealdb-parser-next]
+opt-level = 3
+[profile.dev.package.surrealdb-rpc]
+opt-level = 3
+[profile.dev.package.surrealdb-runtime]
+opt-level = 3
+[profile.dev.package.surrealdb-strand]
+opt-level = 3
+[profile.dev.package.surrealdb-types]
+opt-level = 3
+[profile.dev.package.surrealkv]
+opt-level = 3
+[profile.dev.package.surrealmx]
+opt-level = 3

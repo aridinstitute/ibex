@@ -162,7 +162,7 @@ async fn dates_pages_names_and_provenance_round_trip_through_real_adapter() {
         loop {
             match SurrealStore::open(&path).await {
                 Ok(store) => break store,
-                Err(err) if err.message.contains("already locked") => {
+                Err(err) if err.is_in_use() => {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("reopen failed: {err}"),

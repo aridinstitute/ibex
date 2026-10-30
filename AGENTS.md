@@ -15,6 +15,16 @@ Ibex is a citation manager built for speed and agentic research (CLI + MCP). It 
 
 See `README.md` and `docs/` for product context.
 
+## Data, config, and tests
+
+- Paths come from `ibex_app::paths` (library, backups, `~/.ibex/config.toml`);
+  the shared config is read and written through `ibex_app::config`. Do not add
+  other path or config logic to the clients.
+- Tests must never touch the real home: pass `--data` and `IBEX_CONFIG_DIR`
+  temp dirs (CLI tests use `tests/common::ibex()`), or `--memory`.
+- Never point Ibex at an existing 3.x database: SurrealDB 4.0 upgrades it in
+  place, irreversibly.
+
 ## Git: branches
 
 Use a type prefix, then a short kebab-case slug:

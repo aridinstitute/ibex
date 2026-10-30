@@ -1,5 +1,6 @@
+mod common;
+
 use std::io::{Read, Write};
-use std::process::Command;
 
 #[test]
 fn jev_rejects_insecure_non_loopback_endpoint_as_invalid_input() {
@@ -9,7 +10,7 @@ fn jev_rejects_insecure_non_loopback_endpoint_as_invalid_input() {
         "openrouter_api_key = 'sk-secret'\n",
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_ibex"))
+    let output = common::ibex()
         .arg("--data")
         .arg(dir.path().join("library"))
         .env("IBEX_CONFIG_DIR", dir.path())
@@ -37,7 +38,7 @@ fn jev_rejects_insecure_non_loopback_endpoint_as_invalid_input() {
 fn jev_requires_key_and_combines_predictions_with_keywords() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str], endpoint: Option<&str>| {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ibex"));
+        let mut cmd = common::ibex();
         cmd.arg("--data")
             .arg(dir.path())
             .env("IBEX_CONFIG_DIR", dir.path())

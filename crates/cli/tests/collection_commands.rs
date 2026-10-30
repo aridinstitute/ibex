@@ -1,4 +1,4 @@
-use std::process::Command;
+mod common;
 
 #[test]
 fn list_and_show_imported_collection() {
@@ -6,7 +6,7 @@ fn list_and_show_imported_collection() {
     let bib = dir.path().join("refs.bib");
     std::fs::write(&bib, "@book{a, title={A Book}, author={Lovelace, Ada}}\n").unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ibex"))
+        common::ibex()
             .arg("--data")
             .arg(dir.path())
             .args(args)
@@ -54,7 +54,7 @@ fn list_and_show_imported_collection() {
 fn add_root_and_child_and_reject_unknown_parent() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ibex"))
+        common::ibex()
             .arg("--data")
             .arg(dir.path())
             .args(args)
@@ -99,7 +99,7 @@ fn add_root_and_child_and_reject_unknown_parent() {
 fn delete_collection_cascades_exclusive_children() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ibex"))
+        common::ibex()
             .arg("--data")
             .arg(dir.path())
             .args(args)
@@ -133,7 +133,7 @@ fn delete_collection_cascades_exclusive_children() {
 fn update_replaces_classification_and_edits_all_parent_links_atomically() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ibex"))
+        common::ibex()
             .arg("--data")
             .arg(dir.path())
             .args(args)

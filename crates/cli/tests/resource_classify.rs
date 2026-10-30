@@ -1,10 +1,10 @@
-use std::process::Command;
+mod common;
 
 #[test]
 fn keyword_classification_previews_then_applies_without_duplicates() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ibex"))
+        common::ibex()
             .arg("--data")
             .arg(dir.path())
             .args(args)

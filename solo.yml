@@ -3,7 +3,7 @@ name: ibex
 icon: null
 processes:
   Desktop:
-    command: cargo run -p ibex-gui -- --memory
+    command: cargo run -p ibex-gui
     working_dir: null
     auto_start: true
     auto_restart: false

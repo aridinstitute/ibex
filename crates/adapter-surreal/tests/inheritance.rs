@@ -131,7 +131,7 @@ async fn parent_publisher_and_title_propagate_through_reopen_list_and_detail() {
         loop {
             match SurrealStore::open(&path).await {
                 Ok(store) => break store,
-                Err(err) if err.message.contains("already locked") => {
+                Err(err) if err.is_in_use() => {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("reopen failed: {err}"),

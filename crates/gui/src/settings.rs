@@ -1,14 +1,35 @@
-//! Settings persisted as config.toml in the OS application data directory.
-//! The file appears on the first save; until then every setting lives at its
-//! built-in default.
+//! GUI settings, stored in the `config.toml` shared with the CLI (see
+//! `ibex_app::paths`). The file appears on the first save; until then every
+//! setting lives at its built-in default.
+//!
+//! Each save rewrites only the keys that save owns and keeps every other key
+//! as the CLI (or anything else) last wrote it.
 
-use std::{collections::BTreeMap, fs, io, io::Write as _, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
 use gpui_kit::component::ThemeMode;
+use ibex_app::config::{ConfigFile, Table};
 use serde::{Deserialize, Serialize};
 
-/// Name of the settings file inside the app data directory.
-const CONFIG_FILE: &str = "config.toml";
+/// Name of the settings file inside the config directory.
+#[cfg(test)]
+const CONFIG_FILE: &str = ibex_app::paths::CONFIG_FILE_NAME;
+
+/// Keys [`Settings::save`] owns: the GUI's own layout and theme. The
+/// classification keys are shared with the CLI and are written only by
+/// their setters, so a layout save never resurrects a stale key or model.
+const LAYOUT_KEYS: [&str; 4] = [
+    "column_widths",
+    "left_sidebar_width",
+    "right_sidebar_width",
+    "theme",
+];
+const OPENROUTER_API_KEY: &str = "openrouter_api_key";
+const JEV_MODEL: &str = "jev_model";
+
+fn config_file(dir: &Path) -> ConfigFile {
+    ConfigFile::new(dir.join(ibex_app::paths::CONFIG_FILE_NAME))
+}
 
 /// Each appearance owns its colors; legacy shared colors migrate to light only.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -126,7 +147,7 @@ impl Settings {
         }
         let mut updated = self.clone();
         updated.openrouter_api_key = (!key.is_empty()).then(|| ApiKey(key.to_owned()));
-        updated.save(dir)?;
+        updated.write_keys(dir, &[OPENROUTER_API_KEY])?;
         *self = updated;
         Ok(())
     }
@@ -140,7 +161,7 @@ impl Settings {
         let mut updated = self.clone();
         updated.jev_model =
             (!model.is_empty() && model != crate::jev::DEFAULT_JEV_MODEL).then(|| model.to_owned());
-        updated.save(dir)?;
+        updated.write_keys(dir, &[JEV_MODEL])?;
         *self = updated;
         Ok(())
     }
@@ -171,7 +192,7 @@ impl Settings {
             ThemeColorTarget::Secondary => &mut colors.secondary,
         };
         *slot = Some(format!("#{color:06X}"));
-        updated.save(dir)?;
+        updated.write_keys(dir, &["theme"])?;
         *self = updated;
         Ok(())
     }
@@ -179,58 +200,60 @@ impl Settings {
     /// an unreadable or malformed one is a warning, because preferences
     /// must never keep the GUI from opening.
     pub fn load(dir: &Path) -> Self {
-        let path = dir.join(CONFIG_FILE);
-        let raw = match fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Self::default(),
+        let config = config_file(dir);
+        let table = match config.load() {
+            Ok(table) => table,
             Err(err) => {
-                eprintln!("warning: ignoring {}: {err}", path.display());
+                eprintln!("warning: ignoring {err}");
                 return Self::default();
             }
         };
-        match toml::from_str(&raw) {
+        match Self::deserialize(toml::Value::Table(table)) {
             Ok(settings) => settings,
             Err(err) => {
-                eprintln!("warning: ignoring {}: {err}", path.display());
+                eprintln!("warning: ignoring {}: {err}", config.path().display());
                 Self::default()
             }
         }
     }
 
-    /// Write settings to config.toml in `dir`, creating the directory.
-    ///
-    /// The file is staged then renamed, so a crash mid-write cannot leave a
-    /// truncated config behind.
+    /// Write the GUI's layout and theme to config.toml in `dir`, creating
+    /// the directory. Other keys, including the CLI's, are kept.
     pub fn save(&self, dir: &Path) -> anyhow::Result<()> {
-        fs::create_dir_all(dir)?;
-        let staged = dir.join(format!("{CONFIG_FILE}.tmp"));
-        let contents = toml::to_string(self)?;
-        // Never write a secret into a stale, potentially permissive staging
-        // file (or follow a stale symlink). Exclusive creation also fails
-        // safely if another writer creates the path after its removal.
-        match fs::remove_file(&staged) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&staged)?;
-        file.write_all(contents.as_bytes())?;
-        drop(file);
-        fs::rename(&staged, dir.join(CONFIG_FILE))?;
+        self.write_keys(dir, &LAYOUT_KEYS)
+    }
+
+    /// Atomically replace `keys` in the shared config with this value's
+    /// (removing a key this value leaves unset) and keep every other key.
+    fn write_keys(&self, dir: &Path, keys: &[&str]) -> anyhow::Result<()> {
+        let mut fresh = Table::try_from(self)?;
+        config_file(dir).update(|table| {
+            for key in keys {
+                match fresh.remove(*key) {
+                    Some(value) => table.insert((*key).to_owned(), value),
+                    None => table.remove(*key),
+                };
+            }
+            Ok::<(), anyhow::Error>(())
+        })?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+
+    /// Every file in `dir` other than the config itself and its lock.
+    fn stray_files(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != CONFIG_FILE && name != ".config.toml.lock")
+            .collect()
+    }
 
     #[cfg(unix)]
     #[test]
@@ -239,11 +262,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join(CONFIG_FILE);
-        let staged = dir.path().join(format!("{CONFIG_FILE}.tmp"));
         let mut settings = Settings::default();
-        for existing in [None, Some(&config), Some(&staged)] {
+        for existing in [None, Some(&config)] {
             if let Some(path) = existing {
-                fs::write(path, "old settings").unwrap();
+                fs::write(path, "old = \"settings\"\n").unwrap();
                 fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
             }
             settings
@@ -254,35 +276,78 @@ mod tests {
                 0o600
             );
             assert_eq!(Settings::load(dir.path()), settings);
-            assert!(!staged.exists());
+            assert_eq!(stray_files(dir.path()), Vec::<String>::new());
         }
     }
 
-    #[cfg(unix)]
     #[test]
-    fn secret_staging_file_is_private_even_when_rename_fails() {
-        use std::os::unix::fs::PermissionsExt as _;
+    fn secret_is_not_left_on_disk_when_the_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(CONFIG_FILE)).unwrap();
+        let mut settings = Settings::default();
+        assert!(
+            settings
+                .set_openrouter_api_key("test-only-not-a-real-key", dir.path())
+                .is_err()
+        );
+        assert_eq!(stray_files(dir.path()), Vec::<String>::new());
+        assert_eq!(settings, Settings::default());
+    }
 
-        for stale_staged in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let staged = dir.path().join(format!("{CONFIG_FILE}.tmp"));
-            fs::create_dir(dir.path().join(CONFIG_FILE)).unwrap();
-            if stale_staged {
-                fs::write(&staged, "old settings").unwrap();
-                fs::set_permissions(&staged, fs::Permissions::from_mode(0o644)).unwrap();
-            }
-            let mut settings = Settings::default();
-            assert!(
-                settings
-                    .set_openrouter_api_key("test-only-not-a-real-key", dir.path())
-                    .is_err()
-            );
-            assert_eq!(
-                fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-            assert_eq!(settings, Settings::default());
+    #[test]
+    fn gui_saves_keep_cli_and_unknown_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE);
+        fs::write(
+            &path,
+            "jev_model = \"typesafe/jev-1\"\nopenrouter_api_key = \"sk-cli\"\nfuture_key = 7\n",
+        )
+        .unwrap();
+        let mut settings = Settings::load(dir.path());
+        settings.left_sidebar_width = Some(250.);
+        settings.save(dir.path()).unwrap();
+        settings
+            .set_theme_color(
+                ThemeMode::Dark,
+                ThemeColorTarget::Accent,
+                "#123456",
+                dir.path(),
+            )
+            .unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        for kept in [
+            "typesafe/jev-1",
+            "sk-cli",
+            "future_key = 7",
+            "250.0",
+            "#123456",
+        ] {
+            assert!(raw.contains(kept), "missing {kept}: {raw}");
         }
+    }
+
+    #[test]
+    fn a_layout_save_keeps_a_key_the_cli_set_after_the_gui_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings::load(dir.path());
+        // The CLI writes while the GUI holds its in-memory copy.
+        ConfigFile::new(dir.path().join(CONFIG_FILE))
+            .update(|table| {
+                table.insert(
+                    OPENROUTER_API_KEY.into(),
+                    toml::Value::String("sk-from-cli".into()),
+                );
+                Ok::<(), anyhow::Error>(())
+            })
+            .unwrap();
+        settings.save(dir.path()).unwrap();
+        assert_eq!(
+            Settings::load(dir.path())
+                .openrouter_api_key
+                .as_ref()
+                .map(ApiKey::expose),
+            Some("sk-from-cli")
+        );
     }
 
     #[test]
@@ -362,6 +427,7 @@ mod tests {
             left_sidebar_width: Some(245.),
             ..Settings::default()
         };
+        settings.save(dir.path()).unwrap();
         settings
             .set_theme_color(
                 ThemeMode::Light,
@@ -426,6 +492,7 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(settings.jev_model(), crate::jev::DEFAULT_JEV_MODEL);
+        settings.save(dir.path()).unwrap();
         settings
             .set_openrouter_api_key(" sk-or-v1-abc ", dir.path())
             .unwrap();
