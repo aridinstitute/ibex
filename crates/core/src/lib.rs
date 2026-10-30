@@ -24,12 +24,13 @@ pub use collection::{
 };
 pub use identifier::{Identifier, deserialize_identifiers};
 pub use import::{
-    ContainerPreview, CreatorPreview, DiagnosticSeverity, EntryChoice, EntryPreview, EntryProposal,
-    EntryProvenance, IMPORT_MAX_SOURCE_BYTES, IMPORT_PARSER_VERSION, ImportChoices, ImportConflict,
-    ImportDiagnostic, ImportDraft, ImportEntryDraft, ImportEntryOutcomeKind, ImportFormat,
-    ImportIssue, ImportPreview, ImportProgress, ImportReport, ImportTempId, ImportedEntry,
-    PersonCandidate, PersonChoice, PersonMatchPreview, SeriesPreview, SourceProvenance,
-    UnresolvedCreator, codes as import_codes, source_fingerprint,
+    AssignedTarget, ContainerPreview, CreatorPreview, DiagnosticSeverity, EntryChoice,
+    EntryPreview, EntryProposal, EntryProvenance, ExistingIdOrName, IMPORT_MAX_SOURCE_BYTES,
+    IMPORT_PARSER_VERSION, ImportAssignmentReport, ImportAssignments, ImportChoices,
+    ImportConflict, ImportDiagnostic, ImportDraft, ImportEntryDraft, ImportEntryOutcomeKind,
+    ImportFormat, ImportIssue, ImportPreview, ImportProgress, ImportReport, ImportTempId,
+    ImportedEntry, PersonCandidate, PersonChoice, PersonMatchPreview, SeriesPreview,
+    SourceProvenance, UnresolvedCreator, codes as import_codes, source_fingerprint,
 };
 pub use inheritance::{
     Effective, EffectiveValues, INHERITANCE_MAX_DEPTH, InheritableField, InheritanceError,
@@ -48,5 +49,8 @@ pub use resource::{
     format_recorded_date, primary_creator_sort_key, published_label_from, utc_year_from_millis,
 };
 pub use series::{NewSeries, Series, SeriesId};
-pub use store::{ImportedResourceWrite, Store, StoreError, StoreHealth};
+pub use store::{
+    CollectionUpdate, ImportedResourceWrite, Store, StoreError, StoreHealth,
+    collection_update_edges,
+};
 pub use tag::{Tag, TagId};

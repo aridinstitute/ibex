@@ -227,6 +227,9 @@ pub struct MemoryStore {
     /// When set, the Nth subsequent `create_imported_resource` fails (0-based).
     import_fail_at: Arc<Mutex<Option<usize>>>,
     import_create_count: Arc<Mutex<usize>>,
+    /// When set, the Nth subsequent `add_resource_labels` fails (0-based).
+    label_fail_at: Arc<Mutex<Option<usize>>>,
+    label_write_count: Arc<Mutex<usize>>,
     get_resource_calls: Arc<AtomicUsize>,
     find_persons_by_name_calls: Arc<AtomicUsize>,
     list_persons_calls: Arc<AtomicUsize>,
@@ -245,6 +248,8 @@ impl MemoryStore {
             created: Arc::new(Mutex::new(Vec::new())),
             import_fail_at: Arc::new(Mutex::new(None)),
             import_create_count: Arc::new(Mutex::new(0)),
+            label_fail_at: Arc::new(Mutex::new(None)),
+            label_write_count: Arc::new(Mutex::new(0)),
             get_resource_calls: Arc::new(AtomicUsize::new(0)),
             find_persons_by_name_calls: Arc::new(AtomicUsize::new(0)),
             list_persons_calls: Arc::new(AtomicUsize::new(0)),
@@ -284,10 +289,18 @@ impl MemoryStore {
         *self.import_create_count.lock().expect("MemoryStore lock") = 0;
     }
 
+    /// Fail the Nth `add_resource_labels` call (0-based) with a store error.
+    pub fn fail_add_resource_labels_at(&self, n: usize) {
+        *self.label_fail_at.lock().expect("MemoryStore lock") = Some(n);
+        *self.label_write_count.lock().expect("MemoryStore lock") = 0;
+    }
+
     /// Clear fault injection so subsequent imports persist normally.
     pub fn clear_import_fail(&self) {
         *self.import_fail_at.lock().expect("MemoryStore lock") = None;
         *self.import_create_count.lock().expect("MemoryStore lock") = 0;
+        *self.label_fail_at.lock().expect("MemoryStore lock") = None;
+        *self.label_write_count.lock().expect("MemoryStore lock") = 0;
     }
 
     /// Test helper: remove a resource and its creator edges (Task 06 stale preview).
@@ -801,6 +814,29 @@ impl Store for MemoryStore {
         collection.jev_enabled = jev_enabled;
         Ok(collection.clone())
     }
+    async fn update_collection(
+        &self,
+        update: oeuvre_core::CollectionUpdate,
+    ) -> Result<Collection, StoreError> {
+        let mut collections = self.collections.lock().expect("MemoryStore lock");
+        let mut edges = self.collection_child_of.lock().expect("MemoryStore lock");
+        let ids = collections.keys().copied().collect();
+        let next = oeuvre_core::collection_update_edges(&update, &ids, &edges)?;
+        let collection = collections
+            .get_mut(&update.id)
+            .expect("validated collection");
+        if let Some(name) = update.name {
+            collection.name = name;
+        }
+        if let Some(keywords) = update.keywords {
+            collection.keywords = keywords;
+        }
+        if let Some(jev_enabled) = update.jev_enabled {
+            collection.jev_enabled = jev_enabled;
+        }
+        *edges = next;
+        Ok(collection.clone())
+    }
 
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {
         let collections: Vec<Collection> = self
@@ -1162,6 +1198,40 @@ impl Store for MemoryStore {
                 .get_mut(&id)
                 .ok_or_else(|| StoreError::not_found(format!("resource {id}")))?;
             row.favorite = favorite;
+        }
+        self.get_resource(id).await
+    }
+
+    async fn add_resource_labels(
+        &self,
+        id: ResourceId,
+        tag_ids: &[TagId],
+        collection_ids: &[CollectionId],
+    ) -> Result<Resource, StoreError> {
+        {
+            let mut count = self.label_write_count.lock().expect("MemoryStore lock");
+            let fail_at = *self.label_fail_at.lock().expect("MemoryStore lock");
+            if fail_at == Some(*count) {
+                *count += 1;
+                return Err(StoreError::new("injected label persistence failure"));
+            }
+            *count += 1;
+        }
+        {
+            let mut resources = self.resources.lock().expect("MemoryStore lock");
+            let row = resources
+                .get_mut(&id)
+                .ok_or_else(|| StoreError::not_found(format!("resource {id}")))?;
+            for tag_id in tag_ids {
+                if !row.tag_ids.contains(tag_id) {
+                    row.tag_ids.push(*tag_id);
+                }
+            }
+            for collection_id in collection_ids {
+                if !row.collection_ids.contains(collection_id) {
+                    row.collection_ids.push(*collection_id);
+                }
+            }
         }
         self.get_resource(id).await
     }
@@ -1558,6 +1628,13 @@ impl Store for StubStore {
         _jev_enabled: bool,
     ) -> Result<Collection, StoreError> {
         Err(unsupported("set_collection_classification"))
+    }
+
+    async fn update_collection(
+        &self,
+        _update: oeuvre_core::CollectionUpdate,
+    ) -> Result<Collection, StoreError> {
+        Err(unsupported("update_collection"))
     }
 
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {

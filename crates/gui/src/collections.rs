@@ -1,8 +1,8 @@
-//! Data source for the edit form's collection Combobox: library collections
-//! not yet staged on the form.
+//! Data source for collection Comboboxes: library collections not yet
+//! staged, plus (for the import dialog) a "Create" row for a typed new name.
 
-use gpui_kit::component::IndexPath;
 use gpui_kit::component::searchable_list::{SearchableListDelegate, SearchableListItem};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, h_flex};
 use gpui_kit::*;
 
 use oeuvre_core::{Collection, CollectionId, CollectionTreeNode};
@@ -24,8 +24,13 @@ pub fn flatten_collections(forest: &[CollectionTreeNode]) -> Vec<Collection> {
     out
 }
 
+/// What a picked row stands for: a stored collection, or a new top-level one
+/// to create from the typed name.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CollectionChoice(pub CollectionId);
+pub enum CollectionChoice {
+    Existing(CollectionId),
+    Create(String),
+}
 
 #[derive(Clone)]
 pub struct CollectionOption {
@@ -44,33 +49,62 @@ impl SearchableListItem for CollectionOption {
         &self.value
     }
 
-    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        div().child(self.label.clone())
+    fn render(&self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        match &self.value {
+            CollectionChoice::Existing(_) => div().child(self.label.clone()).into_any_element(),
+            CollectionChoice::Create(_) => h_flex()
+                .gap_1()
+                .items_center()
+                .child(
+                    Icon::new(IconName::Plus)
+                        .xsmall()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(self.label.clone())
+                .into_any_element(),
+        }
     }
 }
 
 pub struct CollectionDelegate {
     options: Vec<CollectionOption>,
     matched: Vec<usize>,
+    /// `Some` when typed names may become new collections: the lowercased
+    /// names already staged, which must not be offered again.
+    creatable: Option<Vec<String>>,
+    create: Option<CollectionOption>,
 }
 
 impl CollectionDelegate {
+    /// Existing collections only (the edit form attaches, never creates).
     pub fn new(available: &[Collection]) -> Self {
         let options: Vec<CollectionOption> = available
             .iter()
             .map(|collection| CollectionOption {
                 label: collection.name.as_str().to_owned().into(),
-                value: CollectionChoice(collection.id),
+                value: CollectionChoice::Existing(collection.id),
             })
             .collect();
         Self {
             matched: (0..options.len()).collect(),
             options,
+            creatable: None,
+            create: None,
+        }
+    }
+
+    /// Existing collections plus a create row while the query names no
+    /// available or `blocked` (already staged, lowercased) collection.
+    pub fn creatable(available: &[Collection], blocked: &[String]) -> Self {
+        Self {
+            creatable: Some(blocked.to_vec()),
+            ..Self::new(available)
         }
     }
 
     fn filter(&mut self, query: &str) {
-        let needle = query.trim().to_lowercase();
+        let query = query.trim();
+        let needle = query.to_lowercase();
         self.matched = self
             .options
             .iter()
@@ -78,10 +112,24 @@ impl CollectionDelegate {
             .filter(|(_, option)| option.label.to_lowercase().contains(&needle))
             .map(|(ix, _)| ix)
             .collect();
+        self.create = self.creatable.as_ref().and_then(|blocked| {
+            let exact = self
+                .options
+                .iter()
+                .any(|option| option.label.to_lowercase() == needle)
+                || blocked.iter().any(|name| name == &needle);
+            (!query.is_empty() && !exact).then(|| CollectionOption {
+                label: format!("Create \u{201c}{query}\u{201d}").into(),
+                value: CollectionChoice::Create(query.to_owned()),
+            })
+        });
     }
 
     fn rows(&self) -> impl Iterator<Item = &CollectionOption> {
-        self.matched.iter().filter_map(|&ix| self.options.get(ix))
+        self.matched
+            .iter()
+            .filter_map(|&ix| self.options.get(ix))
+            .chain(self.create.iter())
     }
 }
 
@@ -99,7 +147,7 @@ impl SearchableListDelegate for CollectionDelegate {
     type Item = CollectionOption;
 
     fn items_count(&self, _: usize) -> usize {
-        self.matched.len()
+        self.matched.len() + usize::from(self.create.is_some())
     }
 
     fn item(&self, ix: IndexPath) -> Option<&CollectionOption> {
@@ -117,5 +165,58 @@ impl SearchableListDelegate for CollectionDelegate {
     fn perform_search(&mut self, query: &str, _: &mut Window, _: &mut App) -> Task<()> {
         self.filter(query);
         Task::ready(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // No `use super::*`: the glob would re-import gpui's `test` proc macro.
+    use super::{CollectionChoice, CollectionDelegate};
+    use gpui_kit::component::IndexPath;
+    use gpui_kit::component::searchable_list::{
+        SearchableListDelegate as _, SearchableListItem as _,
+    };
+    use oeuvre_core::{Collection, CollectionId, NonEmptyStr};
+
+    fn collection(name: &str) -> Collection {
+        Collection::try_new(
+            CollectionId::generate(),
+            NonEmptyStr::try_new(name).unwrap(),
+        )
+    }
+
+    fn titles(delegate: &CollectionDelegate) -> Vec<String> {
+        (0..delegate.items_count(0))
+            .map(|row| {
+                delegate
+                    .item(IndexPath::default().row(row))
+                    .unwrap()
+                    .title()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plain_delegate_never_offers_create() {
+        let mut delegate = CollectionDelegate::new(&[collection("Methods")]);
+        delegate.filter("Research");
+        assert!(titles(&delegate).is_empty());
+    }
+
+    #[test]
+    fn creatable_delegate_offers_create_unless_named_or_staged() {
+        let available = vec![collection("Methods")];
+        let mut delegate = CollectionDelegate::creatable(&available, &["staged".into()]);
+        delegate.filter(" Research ");
+        assert_eq!(titles(&delegate), ["Create \u{201c}Research\u{201d}"]);
+        assert_eq!(
+            delegate.item(IndexPath::default().row(0)).unwrap().value(),
+            &CollectionChoice::Create("Research".into())
+        );
+        delegate.filter("methods");
+        assert_eq!(titles(&delegate), ["Methods"]);
+        delegate.filter("Staged");
+        assert!(titles(&delegate).is_empty());
     }
 }

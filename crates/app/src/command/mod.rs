@@ -13,6 +13,7 @@ pub use biblatex_import::{
 pub use collection::{
     AddCollectionParent, CreateCollection, DeleteCollection, DeletedCollection,
     ListCollectionForest, RemoveCollectionParent, RenameCollection, SetCollectionClassification,
+    UpdateCollection,
 };
 pub use health::{Health, HealthReport};
 pub use oeuvre_core::{ImportChoices, ImportPreview, ImportReport};
@@ -54,6 +55,7 @@ pub enum Command {
     CreateCollection(CreateCollection),
     RenameCollection(RenameCollection),
     SetCollectionClassification(SetCollectionClassification),
+    UpdateCollection(UpdateCollection),
     ListCollectionForest(ListCollectionForest),
     AddCollectionParent(AddCollectionParent),
     RemoveCollectionParent(RemoveCollectionParent),
@@ -94,6 +96,7 @@ pub enum Outcome {
     CreateCollection(Collection),
     RenameCollection(Collection),
     SetCollectionClassification(Collection),
+    UpdateCollection(Collection),
     ListCollectionForest(Vec<CollectionTreeNode>),
     AddCollectionParent(()),
     RemoveCollectionParent(()),
@@ -161,6 +164,7 @@ impl Command {
             Command::CreateCollection(_) => CreateCollection::NAME,
             Command::RenameCollection(_) => RenameCollection::NAME,
             Command::SetCollectionClassification(_) => SetCollectionClassification::NAME,
+            Command::UpdateCollection(_) => UpdateCollection::NAME,
             Command::ListCollectionForest(_) => ListCollectionForest::NAME,
             Command::AddCollectionParent(_) => AddCollectionParent::NAME,
             Command::RemoveCollectionParent(_) => RemoveCollectionParent::NAME,
@@ -218,6 +222,7 @@ pub(crate) async fn dispatch(
         Command::CreateCollection(c) => drive(c, state, ev).await,
         Command::RenameCollection(c) => drive(c, state, ev).await,
         Command::SetCollectionClassification(c) => drive(c, state, ev).await,
+        Command::UpdateCollection(c) => drive(c, state, ev).await,
         Command::ListCollectionForest(c) => drive(c, state, ev).await,
         Command::AddCollectionParent(c) => drive(c, state, ev).await,
         Command::RemoveCollectionParent(c) => drive(c, state, ev).await,

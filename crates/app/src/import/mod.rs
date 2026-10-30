@@ -3,6 +3,7 @@
 //! Parsers produce [`oeuvre_core::ImportDraft`] values with no store access.
 //! [`preview_draft`] / [`save_draft`] own matching and persistence for every format.
 
+mod assign;
 mod biblatex;
 mod csl_json;
 mod link;

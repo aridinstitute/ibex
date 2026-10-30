@@ -150,6 +150,13 @@ impl Store for HangStore {
         std::future::pending().await
     }
 
+    async fn update_collection(
+        &self,
+        _update: oeuvre_core::CollectionUpdate,
+    ) -> Result<Collection, StoreError> {
+        std::future::pending().await
+    }
+
     async fn add_collection_parent(
         &self,
         _child: CollectionId,

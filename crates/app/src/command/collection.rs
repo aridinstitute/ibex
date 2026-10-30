@@ -1,5 +1,6 @@
 use oeuvre_core::{
-    Collection, CollectionId, CollectionTreeNode, NonEmptyStr, StoreError, normalize_keywords,
+    Collection, CollectionId, CollectionTreeNode, CollectionUpdate, NonEmptyStr, StoreError,
+    normalize_keywords,
 };
 
 use crate::event::{self, Event};
@@ -30,6 +31,40 @@ pub struct RemoveCollectionParent {
 pub struct RenameCollection {
     pub id: CollectionId,
     pub name: NonEmptyStr,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateCollection(pub CollectionUpdate);
+pub(crate) struct Updated(pub Collection);
+impl From<Updated> for Outcome {
+    fn from(Updated(collection): Updated) -> Self {
+        Outcome::UpdateCollection(collection)
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for UpdateCollection {
+    const NAME: &'static str = "update_collection";
+    type Output = Updated;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::COLLECTION_ID, self.0.id.to_string());
+    }
+
+    async fn run(mut self, state: &AppState, ev: &mut Event) -> Result<Updated, CommandError> {
+        if let Some(keywords) = &self.0.keywords {
+            self.0.keywords = Some(normalize_keywords(keywords).map_err(CommandError::Invalid)?);
+        }
+        let collection = state
+            .store()
+            .update_collection(self.0)
+            .await
+            .map_err(map_create)?;
+        ev.set(event::COLLECTION_NAME, collection.name.as_str().to_owned());
+        ev.set(event::COLLECTION_KEYWORD_COUNT, collection.keywords.len());
+        ev.set(event::COLLECTION_JEV_ENABLED, collection.jev_enabled);
+        Ok(Updated(collection))
+    }
 }
 
 /// Replace a collection's classification rules. `keywords` are validated

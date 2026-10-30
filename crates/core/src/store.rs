@@ -25,6 +25,61 @@ pub struct ImportedResourceWrite {
     pub resource: NewResource,
 }
 
+/// Atomic patch: omitted scalar fields keep their existing values; parent edits
+/// apply together, and any invalid edit leaves the row and every edge unchanged.
+#[derive(Debug, Clone)]
+pub struct CollectionUpdate {
+    pub id: CollectionId,
+    pub name: Option<NonEmptyStr>,
+    pub keywords: Option<Vec<String>>,
+    pub jev_enabled: Option<bool>,
+    pub add_parents: Vec<CollectionId>,
+    pub remove_parents: Vec<CollectionId>,
+}
+
+/// Validate and stage the complete parent graph before any write.
+pub fn collection_update_edges(
+    update: &CollectionUpdate,
+    ids: &std::collections::HashSet<CollectionId>,
+    edges: &[(CollectionId, CollectionId)],
+) -> Result<Vec<(CollectionId, CollectionId)>, StoreError> {
+    if !ids.contains(&update.id) {
+        return Err(StoreError::not_found(format!("collection {}", update.id)));
+    }
+    let mut next = edges.to_vec();
+    for parent in update
+        .remove_parents
+        .iter()
+        .chain(update.add_parents.iter())
+    {
+        if !ids.contains(parent) {
+            return Err(StoreError::not_found(format!("collection {parent}")));
+        }
+    }
+    for parent in &update.remove_parents {
+        let pos = next
+            .iter()
+            .position(|edge| *edge == (update.id, *parent))
+            .ok_or_else(|| {
+                StoreError::not_found(format!("collection parent edge {} -> {parent}", update.id))
+            })?;
+        next.remove(pos);
+    }
+    for parent in &update.add_parents {
+        if *parent == update.id
+            || crate::collection_descendant_closure(update.id, next.iter().copied())
+                .contains(parent)
+        {
+            return Err(StoreError::invalid("collection parent cycle"));
+        }
+        if next.contains(&(update.id, *parent)) {
+            return Err(StoreError::invalid("collection parent edge already exists"));
+        }
+        next.push((update.id, *parent));
+    }
+    Ok(next)
+}
+
 /// Storage backend. Grows one method per capability a command needs.
 #[async_trait::async_trait]
 pub trait Store: Send + Sync + 'static {
@@ -101,6 +156,11 @@ pub trait Store: Send + Sync + 'static {
         jev_enabled: bool,
     ) -> Result<Collection, StoreError>;
 
+    /// Apply a collection patch in one transaction, including all parent edges.
+    /// Missing collections/edges fail without writing; cycles and duplicate edges
+    /// are invalid. An omitted field is preserved.
+    async fn update_collection(&self, update: CollectionUpdate) -> Result<Collection, StoreError>;
+
     /// Sidebar forest: roots have no parents; children follow `child_of`.
     /// The same collection may appear under multiple parents.
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError>;
@@ -176,6 +236,22 @@ pub trait Store: Send + Sync + 'static {
         id: ResourceId,
         favorite: bool,
     ) -> Result<Resource, StoreError>;
+
+    /// Add tag and collection memberships to `id`, keeping existing ones and
+    /// never duplicating an id. Leaves every other field alone and does not
+    /// restamp `date_edited`. Callers validate the target ids first.
+    /// Missing resource → [`StoreError::not_found`].
+    async fn add_resource_labels(
+        &self,
+        id: ResourceId,
+        tag_ids: &[TagId],
+        collection_ids: &[CollectionId],
+    ) -> Result<Resource, StoreError> {
+        let _ = (id, tag_ids, collection_ids);
+        Err(StoreError::new(
+            "add_resource_labels not supported by this store",
+        ))
+    }
 
     /// Load resource row + reconstruct `creators` from edges ordered by `order`.
     /// Missing resource → [`StoreError::not_found`].

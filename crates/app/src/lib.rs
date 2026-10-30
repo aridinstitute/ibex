@@ -3,9 +3,12 @@
 //! Closed commands, one `AppState::execute` entry point, and exactly-once wide events.
 
 mod app;
+pub mod classification;
 pub mod command;
 mod event;
 pub mod import;
+pub mod jev;
+pub mod metadata;
 pub mod seed;
 #[cfg(feature = "testing")]
 pub mod testing;

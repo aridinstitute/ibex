@@ -7,7 +7,10 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::{CreatorRole, Name, NewResource, NonEmptyStr, PersonId, ResourceId, ResourceKind};
+use crate::{
+    CollectionId, CreatorRole, Name, NewResource, NonEmptyStr, PersonId, ResourceId, ResourceKind,
+    TagId,
+};
 
 /// Parser/schema version stamped on drafts from this crate revision.
 pub const IMPORT_PARSER_VERSION: u32 = 2;
@@ -297,6 +300,8 @@ pub struct ImportReport {
     #[serde(default)]
     pub not_attempted: Vec<ImportIssue>,
     pub warnings: Vec<ImportIssue>,
+    #[serde(default)]
+    pub assignments: ImportAssignmentReport,
 }
 
 /// Caller decisions applied at save time (revalidated; never reserved by preview).
@@ -308,6 +313,54 @@ pub struct ImportChoices {
     /// Person resolutions keyed by `"entry_key#creator_index"`.
     #[serde(default)]
     pub people: BTreeMap<String, PersonChoice>,
+    /// Collections and tags added to every imported or reused source entry.
+    #[serde(default)]
+    pub assignments: ImportAssignments,
+}
+
+/// Batch collection/tag targets for one import. Additive: existing
+/// memberships stay. Generated containers are never targets unless they are
+/// themselves source entries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImportAssignments {
+    #[serde(default)]
+    pub collections: Vec<ExistingIdOrName<CollectionId>>,
+    #[serde(default)]
+    pub tags: Vec<ExistingIdOrName<TagId>>,
+}
+
+impl ImportAssignments {
+    pub fn is_empty(&self) -> bool {
+        self.collections.is_empty() && self.tags.is_empty()
+    }
+}
+
+/// An existing object selected by id, or an exact name resolved at save time
+/// (created when absent).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ExistingIdOrName<Id> {
+    Existing { id: Id },
+    Name { name: NonEmptyStr },
+}
+
+/// One batch target applied by an import, as resolved at save time.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AssignedTarget<Id> {
+    pub id: Id,
+    pub name: String,
+    /// True when this import created the target.
+    pub created: bool,
+}
+
+/// Batch targets that a save resolved; empty when none were requested or no
+/// entry received them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImportAssignmentReport {
+    #[serde(default)]
+    pub collections: Vec<AssignedTarget<CollectionId>>,
+    #[serde(default)]
+    pub tags: Vec<AssignedTarget<TagId>>,
 }
 
 impl ImportChoices {

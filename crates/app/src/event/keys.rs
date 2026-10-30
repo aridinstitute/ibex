@@ -63,6 +63,9 @@ pub(crate) const IMPORT_ENTRY_KEY: Key = Key::new("import.entry_key");
 pub(crate) const IMPORT_IMPORTED_COUNT: Key = Key::new("import.imported_count");
 pub(crate) const IMPORT_SKIPPED_COUNT: Key = Key::new("import.skipped_count");
 pub(crate) const IMPORT_WARNING_COUNT: Key = Key::new("import.warning_count");
+pub(crate) const IMPORT_ASSIGNED_TAG_COUNT: Key = Key::new("import.assigned_tag_count");
+pub(crate) const IMPORT_ASSIGNED_COLLECTION_COUNT: Key =
+    Key::new("import.assigned_collection_count");
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,6 +120,8 @@ mod tests {
         IMPORT_IMPORTED_COUNT,
         IMPORT_SKIPPED_COUNT,
         IMPORT_WARNING_COUNT,
+        IMPORT_ASSIGNED_TAG_COUNT,
+        IMPORT_ASSIGNED_COLLECTION_COUNT,
     ];
 
     #[test]
