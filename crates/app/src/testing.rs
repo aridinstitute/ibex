@@ -1207,7 +1207,7 @@ impl Store for MemoryStore {
         id: ResourceId,
         tag_ids: &[TagId],
         collection_ids: &[CollectionId],
-    ) -> Result<Resource, StoreError> {
+    ) -> Result<(), StoreError> {
         {
             let mut count = self.label_write_count.lock().expect("MemoryStore lock");
             let fail_at = *self.label_fail_at.lock().expect("MemoryStore lock");
@@ -1233,7 +1233,7 @@ impl Store for MemoryStore {
                 }
             }
         }
-        self.get_resource(id).await
+        Ok(())
     }
 
     async fn get_resource(&self, id: ResourceId) -> Result<Resource, StoreError> {

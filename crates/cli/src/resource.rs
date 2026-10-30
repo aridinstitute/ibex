@@ -1,15 +1,17 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
+use std::io::Write;
+
 use oeuvre_app::command::{
-    CreateResource, GetResource, GetResourceDetail, ListResourceGridPage, ListResources,
+    CreateResource, GetResource, GetResourceDetail, ListResourceGridPage, ListResourcesPage,
     ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
 };
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
     BibliographicDate, CollectionId, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId,
-    PublishedRange, Resource, ResourceFilter, ResourceGridParent, ResourceGridRow, ResourceId,
-    ResourceKind, ResourceQuery, ResourceSort, ResourceSummary, SeriesId, SortDirection, TagId,
-    UtcMillis, format_published_label, format_recorded_date,
+    PublishedRange, Resource, ResourceFilter, ResourceGridPage, ResourceGridParent,
+    ResourceGridRow, ResourceId, ResourceKind, ResourceQuery, ResourceSort, ResourceSummary,
+    SeriesId, SortDirection, TagId, UtcMillis, format_published_label, format_recorded_date,
 };
 
 #[derive(Debug, Args)]
@@ -298,6 +300,7 @@ async fn classify(state: &AppState, id: &str, engine: ClassifyEngine, apply: boo
             .unwrap_or(oeuvre_app::jev::DEFAULT_JEV_MODEL);
         let endpoint = std::env::var("OEUVRE_JEV_URL")
             .unwrap_or_else(|_| oeuvre_app::jev::DECISIONS_URL.to_owned());
+        validate_jev_endpoint(&endpoint)?;
         let picks = oeuvre_app::classification::suggest_jev(state, id, key, model, &endpoint)
             .await
             .map_err(|message| anyhow!(message))?;
@@ -339,6 +342,38 @@ async fn classify(state: &AppState, id: &str, engine: ClassifyEngine, apply: boo
         } else {
             println!("{}  {}", collection.id, collection.name.as_str());
         }
+    }
+    Ok(())
+}
+
+fn validate_jev_endpoint(endpoint: &str) -> Result<()> {
+    // Keep the HTTP exception deliberately narrow: URL normalization must not
+    // turn userinfo, escaped hosts, or backslashes into a remote destination.
+    let safe = !endpoint
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+        && (endpoint.starts_with("https://")
+            || endpoint.strip_prefix("http://").is_some_and(|rest| {
+                let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+                if let Ok(address) = authority.parse::<std::net::SocketAddr>() {
+                    return address.ip().is_loopback();
+                }
+                let host = match authority.rsplit_once(':') {
+                    Some((host, port)) if port.parse::<u16>().is_ok() => host,
+                    _ => authority,
+                };
+                host.eq_ignore_ascii_case("localhost")
+                    || host == "[::1]"
+                    || host
+                        .parse::<std::net::Ipv4Addr>()
+                        .is_ok_and(|address| address.is_loopback())
+            }));
+    if !safe {
+        return Err(oeuvre_app::CommandError::Invalid(
+            "OEUVRE_JEV_URL must use HTTPS, or HTTP with a loopback host (127.0.0.1, ::1, localhost)"
+                .to_owned(),
+        )
+        .into());
     }
     Ok(())
 }
@@ -583,21 +618,37 @@ async fn list(state: &AppState, args: ListArgs) -> Result<()> {
     if args.tree {
         return list_tree(state, &args).await;
     }
-    let rows = match listing_query(&args)? {
-        // Unfiltered keeps the plain listing: the same rows through the
-        // command the library already had.
+    let mut out = std::io::BufWriter::new(std::io::stdout());
+    let mut printed = false;
+    match listing_query(&args)? {
+        // Unfiltered walks the newest-first id cursor, so each page costs
+        // the same no matter how deep into the library it starts.
         None => {
-            let Outcome::ListResources(rows) =
-                state.execute(Command::ListResources(ListResources)).await?
-            else {
-                bail!("unexpected outcome from list_resources");
-            };
-            rows
+            let mut before = None;
+            loop {
+                let Outcome::ListResourcesPage(page) = state
+                    .execute(Command::ListResourcesPage(ListResourcesPage {
+                        before,
+                        limit: QUERY_PAGE,
+                    }))
+                    .await?
+                else {
+                    bail!("unexpected outcome from list_resources_page");
+                };
+                for row in &page.rows {
+                    writeln!(out, "{}", format_summary_row(row))?;
+                    printed = true;
+                }
+                out.flush()?;
+                match page.next_before {
+                    Some(next) => before = Some(next),
+                    None => break,
+                }
+            }
         }
-        // The query seam pages by offset; the CLI lists every match, so
-        // walk the pages until the window ends.
+        // Filtered and sorted listings only page by offset; rows still
+        // print page by page instead of accumulating.
         Some(query) => {
-            let mut rows = Vec::new();
             let mut offset = 0u64;
             loop {
                 let Outcome::ListResourcesQueryPage(page) = state
@@ -610,24 +661,43 @@ async fn list(state: &AppState, args: ListArgs) -> Result<()> {
                 else {
                     bail!("unexpected outcome from list_resources_query_page");
                 };
-                rows.extend(page.rows);
+                for row in &page.rows {
+                    writeln!(out, "{}", format_summary_row(row))?;
+                    printed = true;
+                }
+                out.flush()?;
                 match page.next_offset {
                     Some(next) => offset = next,
                     None => break,
                 }
             }
-            rows
         }
-    };
-
-    if rows.is_empty() {
-        println!("(none)");
-        return Ok(());
     }
-    for row in &rows {
-        println!("{}", format_summary_row(row));
+    if !printed {
+        writeln!(out, "(none)")?;
     }
+    out.flush()?;
     Ok(())
+}
+
+async fn grid_page(
+    state: &AppState,
+    parent: ResourceGridParent,
+    query: &ResourceQuery,
+    offset: u64,
+) -> Result<ResourceGridPage> {
+    let Outcome::ResourceGridPage(page) = state
+        .execute(Command::ListResourceGridPage(ListResourceGridPage {
+            parent,
+            query: query.clone(),
+            offset,
+            limit: QUERY_PAGE,
+        }))
+        .await?
+    else {
+        bail!("unexpected outcome from list_resource_grid_page");
+    };
+    Ok(page)
 }
 
 async fn grid_rows(
@@ -638,17 +708,7 @@ async fn grid_rows(
     let mut rows = Vec::new();
     let mut offset = 0;
     loop {
-        let Outcome::ResourceGridPage(page) = state
-            .execute(Command::ListResourceGridPage(ListResourceGridPage {
-                parent,
-                query: query.clone(),
-                offset,
-                limit: QUERY_PAGE,
-            }))
-            .await?
-        else {
-            bail!("unexpected outcome from list_resource_grid_page");
-        };
+        let page = grid_page(state, parent, query, offset).await?;
         rows.extend(page.rows);
         match page.next_offset {
             Some(next) => offset = next,
@@ -658,29 +718,50 @@ async fn grid_rows(
     Ok(rows)
 }
 
+/// Roots stream one page at a time, each subtree printed before the next
+/// root. The grid seam lists one parent's children per call, so every row
+/// with children still costs its own query.
 async fn list_tree(state: &AppState, args: &ListArgs) -> Result<()> {
     let query = listing_query(args)?.unwrap_or_else(ResourceQuery::newest_first);
-    let roots = grid_rows(state, ResourceGridParent::Roots, &query).await?;
-    if roots.is_empty() {
-        println!("(none)");
-        return Ok(());
-    }
-    let mut stack: Vec<_> = roots.into_iter().rev().map(|row| (row, 0usize)).collect();
+    let mut out = std::io::BufWriter::new(std::io::stdout());
+    let mut printed = false;
     let mut seen = std::collections::HashSet::new();
-    while let Some((row, depth)) = stack.pop() {
-        if !seen.insert(row.summary.id) {
-            continue;
+    let mut offset = 0;
+    loop {
+        let page = grid_page(state, ResourceGridParent::Roots, &query, offset).await?;
+        for root in page.rows {
+            let mut stack = vec![(root, 0usize)];
+            while let Some((row, depth)) = stack.pop() {
+                if !seen.insert(row.summary.id) {
+                    continue;
+                }
+                writeln!(
+                    out,
+                    "{}{}",
+                    "  ".repeat(depth),
+                    format_summary_row(&row.summary)
+                )?;
+                printed = true;
+                if row.has_children {
+                    let children =
+                        grid_rows(state, ResourceGridParent::Children(row.summary.id), &query)
+                            .await?;
+                    stack.extend(children.into_iter().rev().map(|child| (child, depth + 1)));
+                }
+            }
         }
-        println!("{}{}", "  ".repeat(depth), format_summary_row(&row.summary));
-        if row.has_children {
-            let children =
-                grid_rows(state, ResourceGridParent::Children(row.summary.id), &query).await?;
-            stack.extend(children.into_iter().rev().map(|child| (child, depth + 1)));
+        out.flush()?;
+        match page.next_offset {
+            Some(next) => offset = next,
+            None => break,
         }
     }
+    if !printed {
+        writeln!(out, "(none)")?;
+    }
+    out.flush()?;
     Ok(())
 }
-
 /// Full-replace edit: fetch the record, merge the set flags into its
 /// write-side twin, send it back. Unchanged fields ride through untouched,
 /// the same merge `person update` performs.
@@ -1056,6 +1137,35 @@ mod tests {
         let err = listing_query(&list_args(None, Some("not-an-id"), None, None))
             .expect_err("bad creator id rejects");
         assert!(err.to_string().contains("--creator"));
+    }
+
+    #[test]
+    fn jev_endpoint_accepts_https_and_loopback_http_only() {
+        for endpoint in [
+            "https://openrouter.ai/api/alpha/decisions",
+            "http://127.0.0.1:8080/api/alpha/decisions",
+            "http://localhost/api",
+            "http://LOCALHOST:9/api",
+            "http://[::1]:8080/api",
+        ] {
+            assert!(validate_jev_endpoint(endpoint).is_ok(), "{endpoint}");
+        }
+        for endpoint in [
+            "http://example.com/api",
+            "http://127.0.0.1.example.com/api",
+            "http://localhost@example.com/api",
+            "http://localhost.example.com/api",
+            "http://10.0.0.1/api",
+            "ftp://127.0.0.1/api",
+            "http://127.0.0.1\\@example.com/api",
+        ] {
+            let err = validate_jev_endpoint(endpoint).expect_err(endpoint);
+            assert!(
+                err.downcast_ref::<oeuvre_app::CommandError>()
+                    .is_some_and(|cmd| cmd.kind() == oeuvre_app::ErrorKind::Invalid),
+                "{endpoint}"
+            );
+        }
     }
 
     fn update_args() -> UpdateArgs {

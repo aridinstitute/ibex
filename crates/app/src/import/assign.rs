@@ -259,8 +259,7 @@ impl AssignmentPlan {
                 } else {
                     CommandError::Store(err)
                 }
-            })?;
-        Ok(())
+            })
     }
 
     /// Targets this save applied; empty until the first entry received them.

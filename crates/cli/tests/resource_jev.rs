@@ -2,6 +2,38 @@ use std::io::{Read, Write};
 use std::process::Command;
 
 #[test]
+fn jev_rejects_insecure_non_loopback_endpoint_as_invalid_input() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.toml"),
+        "openrouter_api_key = 'sk-secret'\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ovr"))
+        .arg("--data")
+        .arg(dir.path().join("library"))
+        .env("OEUVRE_CONFIG_DIR", dir.path())
+        .env("OEUVRE_JEV_URL", "http://example.com/api/alpha/decisions")
+        .args([
+            "resource",
+            "classify",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--engine",
+            "jev",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("OEUVRE_JEV_URL"), "{error}");
+    assert!(
+        error.contains("HTTPS") && error.contains("loopback"),
+        "{error}"
+    );
+    assert!(!error.contains("sk-secret"));
+}
+
+#[test]
 fn jev_requires_key_and_combines_predictions_with_keywords() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str], endpoint: Option<&str>| {

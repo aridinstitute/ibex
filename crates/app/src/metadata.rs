@@ -1,13 +1,15 @@
 //! Free ISBN/DOI metadata lookup shared by desktop and CLI.
 use crate::command::{
-    CreatePerson, CreateResource, FindPersonsByName, GetResource, ListResources, UpdateResource,
+    CreatePerson, CreateResource, FindPersonsByName, GetResource, ListResourcesQueryPage,
+    UpdateResource,
 };
 use crate::{AppState, Command, Outcome};
 use std::time::Duration;
 
 use oeuvre_core::{
     BibliographicDate, CreatorRole, CreatorSpec, DateCertainty, DatePrecision, Identifier, Name,
-    NewResource, NonEmptyStr, Pages, Resource, ResourceId, ResourceKind, UtcMillis,
+    NewResource, NonEmptyStr, Pages, Resource, ResourceFilter, ResourceId, ResourceKind,
+    ResourceQuery, UtcMillis,
 };
 use serde_json::Value;
 
@@ -913,27 +915,40 @@ pub async fn link_journal(
     if article.parent_id.is_some() || article.kind != oeuvre_core::ResourceKind::JournalArticle {
         return Ok(());
     }
-    let rows = match state
-        .execute(Command::ListResources(ListResources))
-        .await
-        .map_err(|e| e.to_string())?
-    {
-        Outcome::ListResources(rows) => rows,
-        _ => return Err("unexpected outcome from list_resources".into()),
+    // Title filtering would hide conflicting ISSN matches under a different title.
+    let query = ResourceQuery {
+        sort: None,
+        filter: ResourceFilter::by_kind(ResourceKind::Journal),
     };
     let mut journals = Vec::new();
-    for row in rows
-        .into_iter()
-        .filter(|r| r.kind == oeuvre_core::ResourceKind::Journal)
-    {
-        match state
-            .execute(Command::GetResource(GetResource { id: row.id }))
+    let mut offset = 0;
+    loop {
+        let page = match state
+            .execute(Command::ListResourcesQueryPage(ListResourcesQueryPage {
+                query: query.clone(),
+                offset,
+                limit: 100,
+            }))
             .await
             .map_err(|e| e.to_string())?
         {
-            Outcome::GetResource(resource) => journals.push(resource),
-            _ => return Err("unexpected outcome from get_resource".into()),
+            Outcome::ListResourcesQueryPage(page) => page,
+            _ => return Err("unexpected outcome from list_resources_query_page".into()),
+        };
+        for row in page.rows {
+            match state
+                .execute(Command::GetResource(GetResource { id: row.id }))
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                Outcome::GetResource(resource) => journals.push(resource),
+                _ => return Err("unexpected outcome from get_resource".into()),
+            }
         }
+        let Some(next_offset) = page.next_offset else {
+            break;
+        };
+        offset = next_offset;
     }
     let title = journal.title.as_str();
     let by_title: Vec<_> = journals
