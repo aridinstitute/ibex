@@ -130,6 +130,67 @@ async fn set_classification_emits_one_annotated_event() {
 }
 
 #[tokio::test]
+async fn update_collection_is_one_command_and_rolls_back_later_parent_failure() {
+    use oeuvre_app::command::UpdateCollection;
+    use oeuvre_core::CollectionUpdate;
+    let (state, sink) = state();
+    let a = create(&state, "A").await;
+    let b = create(&state, "B").await;
+    let child = create(&state, "Child").await;
+    sink.take();
+    let patch = CollectionUpdate {
+        id: child.id,
+        name: Some(NonEmptyStr::try_new("Changed").unwrap()),
+        keywords: Some(vec![" Keyword ".into(), "keyword".into()]),
+        jev_enabled: Some(true),
+        add_parents: vec![a.id, b.id],
+        remove_parents: vec![],
+    };
+    let Outcome::UpdateCollection(result) = state
+        .execute(Command::UpdateCollection(UpdateCollection(patch.clone())))
+        .await
+        .unwrap()
+    else {
+        panic!("update result")
+    };
+    assert_eq!(result.keywords, vec!["Keyword"]);
+    assert!(result.jev_enabled);
+    let events = sink.take();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].command(), "update_collection");
+    let mut failed = patch;
+    failed.name = Some(NonEmptyStr::try_new("MustNotPersist").unwrap());
+    failed.remove_parents = vec![a.id];
+    failed.add_parents = vec![a.id, CollectionId::generate()];
+    assert!(
+        state
+            .execute(Command::UpdateCollection(UpdateCollection(failed)))
+            .await
+            .is_err()
+    );
+    let events = sink.take();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].status(), Status::Error);
+    let Outcome::ListCollectionForest(forest) = state
+        .execute(Command::ListCollectionForest(
+            oeuvre_app::command::ListCollectionForest,
+        ))
+        .await
+        .unwrap()
+    else {
+        panic!("forest")
+    };
+    for parent in [a.id, b.id] {
+        let node = forest
+            .iter()
+            .find(|node| node.collection.id == parent)
+            .unwrap();
+        assert_eq!(node.children.len(), 1);
+        assert_eq!(node.children[0].collection.name.as_str(), "Changed");
+    }
+}
+
+#[tokio::test]
 async fn detail_resolves_collections_in_membership_order() {
     let (state, _) = state();
     let a = create(&state, "Alpha").await;

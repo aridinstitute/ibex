@@ -16,8 +16,8 @@ pub struct PersonCmd {
 pub enum PersonAction {
     /// Add a person. With no name flags, prompts interactively.
     Add(NameFlags),
-    /// Fetch one person by id.
-    Get { id: String },
+    /// Show one person by id.
+    Show { id: String },
     /// List people. With name flags, filters by that name.
     List(NameFlags),
     /// Update a person's primary name. With no name flags, prompts interactively.
@@ -33,7 +33,7 @@ pub enum PersonAction {
 pub async fn run(state: &AppState, cmd: PersonCmd) -> Result<()> {
     match cmd.action {
         PersonAction::Add(name) => add(state, name).await,
-        PersonAction::Get { id } => get(state, &id).await,
+        PersonAction::Show { id } => show(state, &id).await,
         PersonAction::List(name) => list(state, name).await,
         PersonAction::Update { id, name } => update(state, &id, name).await,
         PersonAction::Delete { id } => delete(state, &id).await,
@@ -55,7 +55,7 @@ async fn add(state: &AppState, name: NameFlags) -> Result<()> {
     Ok(())
 }
 
-async fn get(state: &AppState, id: &str) -> Result<()> {
+async fn show(state: &AppState, id: &str) -> Result<()> {
     let id = parse_id(id)?;
     let Outcome::GetPerson(person) = state.execute(Command::GetPerson(GetPerson { id })).await?
     else {

@@ -1,11 +1,15 @@
 use anyhow::{Context, Result, anyhow, bail};
-use clap::{Args, Subcommand};
-use oeuvre_app::command::{GetResource, ListResources, ListResourcesQueryPage, UpdateResource};
+use clap::{Args, Subcommand, ValueEnum};
+use oeuvre_app::command::{
+    CreateResource, GetResource, GetResourceDetail, ListResourceGridPage, ListResources,
+    ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
+};
 use oeuvre_app::{AppState, Command, Outcome};
 use oeuvre_core::{
-    BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId,
-    PublishedRange, Resource, ResourceFilter, ResourceId, ResourceKind, ResourceQuery,
-    ResourceSummary, SeriesId, UtcMillis,
+    BibliographicDate, CollectionId, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId,
+    PublishedRange, Resource, ResourceFilter, ResourceGridParent, ResourceGridRow, ResourceId,
+    ResourceKind, ResourceQuery, ResourceSort, ResourceSummary, SeriesId, SortDirection, TagId,
+    UtcMillis, format_published_label, format_recorded_date,
 };
 
 #[derive(Debug, Args)]
@@ -19,9 +23,57 @@ pub enum ResourceAction {
     /// List resources as summary rows, newest first; every set filter
     /// flag narrows the same listing additively.
     List(ListArgs),
+    /// Show the complete, resolved metadata for one resource.
+    Show { id: String },
+    /// Create a resource with manually provided metadata.
+    Add(AddArgs),
+    /// Fetch ISBN/DOI metadata and store a new resource, or fill gaps on an existing one.
+    Fetch {
+        identifier: String,
+        #[arg(long)]
+        update: Option<String>,
+    },
+    /// Preview collection suggestions; --apply attaches them.
+    Classify {
+        id: String,
+        #[arg(long, value_enum, default_value = "keywords")]
+        engine: ClassifyEngine,
+        #[arg(long)]
+        apply: bool,
+    },
     /// Update a resource by id. Only the fields whose flags are set change;
     /// the rest keep their stored values.
     Update(UpdateArgs),
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+pub enum ClassifyEngine {
+    Keywords,
+    Jev,
+    Both,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum SortArg {
+    Added,
+    Edited,
+    Title,
+    Creator,
+    Published,
+    Publisher,
+}
+
+impl From<SortArg> for ResourceSort {
+    fn from(value: SortArg) -> Self {
+        match value {
+            SortArg::Added => Self::DateAdded,
+            SortArg::Edited => Self::DateEdited,
+            SortArg::Title => Self::Title,
+            SortArg::Creator => Self::PrimaryCreator,
+            SortArg::Published => Self::Published,
+            SortArg::Publisher => Self::Publisher,
+        }
+    }
 }
 
 /// Filter flags for `resource list`.
@@ -42,6 +94,55 @@ pub struct ListArgs {
     /// Keep rows published in this year or earlier.
     #[arg(long)]
     pub published_to: Option<u16>,
+
+    /// Search title and other indexed text.
+    #[arg(long)]
+    pub search: Option<String>,
+    /// Filter by resource kind slug.
+    #[arg(long)]
+    pub kind: Option<String>,
+    /// Only favorited resources.
+    #[arg(long)]
+    pub favorite: bool,
+    /// Filter by tag id.
+    #[arg(long)]
+    pub tag: Option<String>,
+    /// Filter by collection id.
+    #[arg(long)]
+    pub collection: Option<String>,
+
+    /// Sort by a resource field (default direction: ascending).
+    #[arg(long, value_enum)]
+    pub sort: Option<SortArg>,
+    /// Sort ascending; requires --sort.
+    #[arg(long, requires = "sort", conflicts_with = "desc")]
+    pub asc: bool,
+    /// Sort descending; requires --sort.
+    #[arg(long, requires = "sort", conflicts_with = "asc")]
+    pub desc: bool,
+    /// Display parent/child resource nesting.
+    #[arg(long)]
+    pub tree: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct AddArgs {
+    #[arg(long)]
+    pub title: String,
+    #[arg(long, default_value = "book")]
+    pub kind: String,
+    #[arg(long = "creator")]
+    pub creators: Vec<String>,
+    #[arg(long)]
+    pub parent: Option<String>,
+    #[arg(long)]
+    pub publisher: Option<String>,
+    #[arg(long)]
+    pub published_year: Option<u16>,
+    #[arg(long = "tag")]
+    pub tags: Vec<String>,
+    #[arg(long = "collection")]
+    pub collections: Vec<String>,
 }
 
 /// Field flags for `resource update`: each set flag replaces that field,
@@ -118,6 +219,27 @@ pub struct UpdateArgs {
     /// are rejected by the update itself.
     #[arg(long, conflicts_with = "creators")]
     pub clear_creators: bool,
+
+    /// Add this resource to favorites.
+    #[arg(long, conflicts_with = "unfavorite")]
+    pub favorite: bool,
+
+    /// Remove this resource from favorites.
+    #[arg(long, conflicts_with = "favorite")]
+    pub unfavorite: bool,
+
+    /// Attach a tag by id; repeatable.
+    #[arg(long = "tag")]
+    pub tags: Vec<String>,
+    /// Detach a tag by id; repeatable.
+    #[arg(long = "remove-tag")]
+    pub remove_tags: Vec<String>,
+    /// Add a collection membership by id; repeatable.
+    #[arg(long = "collection")]
+    pub collections: Vec<String>,
+    /// Remove a collection membership by id; repeatable.
+    #[arg(long = "remove-collection")]
+    pub remove_collections: Vec<String>,
 }
 
 impl UpdateArgs {
@@ -139,6 +261,10 @@ impl UpdateArgs {
             || self.clear_series_number
             || !self.creators.is_empty()
             || self.clear_creators
+            || !self.tags.is_empty()
+            || !self.remove_tags.is_empty()
+            || !self.collections.is_empty()
+            || !self.remove_collections.is_empty()
     }
 }
 
@@ -148,8 +274,221 @@ const QUERY_PAGE: u32 = 500;
 pub async fn run(state: &AppState, cmd: ResourceCmd) -> Result<()> {
     match cmd.action {
         ResourceAction::List(args) => list(state, args).await,
+        ResourceAction::Show { id } => show(state, &id).await,
+        ResourceAction::Add(args) => add(state, args).await,
+        ResourceAction::Fetch { identifier, update } => {
+            fetch(state, &identifier, update.as_deref()).await
+        }
         ResourceAction::Update(args) => update(state, args).await,
+        ResourceAction::Classify { id, engine, apply } => classify(state, &id, engine, apply).await,
     }
+}
+
+async fn classify(state: &AppState, id: &str, engine: ClassifyEngine, apply: bool) -> Result<()> {
+    let id = ResourceId::parse(id).context("invalid resource id")?;
+    let mut suggestions: Vec<(oeuvre_core::Collection, Option<f32>)> = Vec::new();
+    if engine != ClassifyEngine::Keywords {
+        let config = crate::config::load()?;
+        let key = config.get("openrouter_api_key").and_then(toml::Value::as_str)
+            .filter(|key| !key.trim().is_empty())
+            .context("Set an OpenRouter API key with `ovr config set openrouter-api-key` before Jev classification")?;
+        let model = config
+            .get("jev_model")
+            .and_then(toml::Value::as_str)
+            .unwrap_or(oeuvre_app::jev::DEFAULT_JEV_MODEL);
+        let endpoint = std::env::var("OEUVRE_JEV_URL")
+            .unwrap_or_else(|_| oeuvre_app::jev::DECISIONS_URL.to_owned());
+        let picks = oeuvre_app::classification::suggest_jev(state, id, key, model, &endpoint)
+            .await
+            .map_err(|message| anyhow!(message))?;
+        suggestions.extend(
+            picks
+                .into_iter()
+                .map(|(collection, probability)| (collection, Some(probability))),
+        );
+    }
+    if engine != ClassifyEngine::Jev {
+        for collection in oeuvre_app::classification::suggest_keywords(state, id).await? {
+            if !suggestions
+                .iter()
+                .any(|(existing, _)| existing.id == collection.id)
+            {
+                suggestions.push((collection, None));
+            }
+        }
+    }
+    if suggestions.is_empty() {
+        println!("(none)");
+        return Ok(());
+    }
+    if apply {
+        let collections = suggestions
+            .iter()
+            .map(|(collection, _)| collection.clone())
+            .collect::<Vec<_>>();
+        oeuvre_app::classification::apply_suggestions(state, id, &collections).await?;
+    }
+    for (collection, probability) in suggestions {
+        if let Some(probability) = probability {
+            println!(
+                "{}  {}  {}%",
+                collection.id,
+                collection.name.as_str(),
+                (probability * 100.).round() as u32
+            );
+        } else {
+            println!("{}  {}", collection.id, collection.name.as_str());
+        }
+    }
+    Ok(())
+}
+
+async fn fetch(state: &AppState, identifier: &str, update: Option<&str>) -> Result<()> {
+    let target = update
+        .map(|id| ResourceId::parse(id).context("invalid --update resource id"))
+        .transpose()?;
+    let resource = oeuvre_app::metadata::fetch(state, identifier, target)
+        .await
+        .map_err(|message| anyhow!(message))?;
+    println!(
+        "{}  {}  {}",
+        resource.id,
+        resource.kind.as_str(),
+        resource.title.as_str()
+    );
+    Ok(())
+}
+
+async fn add(state: &AppState, args: AddArgs) -> Result<()> {
+    let title =
+        NonEmptyStr::try_new(&args.title).map_err(|_| anyhow!("--title must not be empty"))?;
+    let kind = ResourceKind::from_slug(&args.kind)
+        .with_context(|| format!("unknown --kind '{}'", args.kind))?;
+    let creators = parse_creator_specs(&args.creators)?;
+    let parent_id = args
+        .parent
+        .as_deref()
+        .map(ResourceId::parse)
+        .transpose()
+        .context("invalid --parent id")?;
+    let tag_ids = args
+        .tags
+        .iter()
+        .map(|id| TagId::parse(id).context("invalid --tag id"))
+        .collect::<Result<Vec<_>>>()?;
+    let collection_ids = args
+        .collections
+        .iter()
+        .map(|id| CollectionId::parse(id).context("invalid --collection id"))
+        .collect::<Result<Vec<_>>>()?;
+    let published = args
+        .published_year
+        .map(|year| year_date("--published-year", year))
+        .transpose()?;
+    let new = NewResource {
+        kind,
+        title,
+        creators,
+        publisher: args.publisher,
+        published,
+        accessed: None,
+        parent_id,
+        series_id: None,
+        series_number: None,
+        tag_ids,
+        collection_ids,
+        metadata: Default::default(),
+        subtitle: None,
+        title_addon: None,
+        short_title: None,
+        place: None,
+        volume: None,
+        issue: None,
+        pages: None,
+        total_pages: None,
+        article_number: None,
+        edition: None,
+        doi: None,
+        url: None,
+        eprint: None,
+        isbns: vec![],
+        issns: vec![],
+        isrns: vec![],
+        original_date: None,
+        event_date: None,
+        language: None,
+        document_type: None,
+        publication_method: None,
+        institution: None,
+        organization: None,
+        school: None,
+        abstract_text: None,
+        keywords: vec![],
+    };
+    let Outcome::CreateResource(resource) = state
+        .execute(Command::CreateResource(CreateResource { new }))
+        .await?
+    else {
+        bail!("unexpected outcome from create_resource");
+    };
+    println!(
+        "{}  {}  {}",
+        resource.id,
+        resource.kind.as_str(),
+        resource.title.as_str()
+    );
+    Ok(())
+}
+
+async fn show(state: &AppState, id: &str) -> Result<()> {
+    let id = ResourceId::parse(id).context("invalid resource id")?;
+    let Outcome::GetResourceDetail(detail) = state
+        .execute(Command::GetResourceDetail(GetResourceDetail { id }))
+        .await?
+    else {
+        bail!("unexpected outcome from get_resource_detail");
+    };
+    let value = serde_json::to_value(&detail)?;
+    let Some(fields) = value.as_object() else {
+        bail!("unexpected resource detail shape");
+    };
+    for (field, value) in fields {
+        let date = match field.as_str() {
+            "published" => detail
+                .published
+                .as_ref()
+                .map(|date| format_published_label(date).as_str().to_owned()),
+            "accessed" => detail
+                .accessed
+                .as_ref()
+                .map(|date| format_published_label(date).as_str().to_owned()),
+            "original_date" => detail
+                .original_date
+                .as_ref()
+                .map(|date| format_published_label(date).as_str().to_owned()),
+            "event_date" => detail
+                .event_date
+                .as_ref()
+                .map(|date| format_published_label(date).as_str().to_owned()),
+            "date_added" => Some(format_recorded_date(detail.date_added)),
+            "date_edited" => Some(format_recorded_date(detail.date_edited)),
+            _ => None,
+        };
+        if let Some(date) = date {
+            println!("{field}: {date}");
+            continue;
+        }
+        if !value.is_null() && !value.as_array().is_some_and(Vec::is_empty) {
+            println!(
+                "{field}: {}",
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string())
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The listing the flags compose to: no flag keeps the plain newest-first
@@ -174,20 +513,60 @@ fn listing_query(args: &ListArgs) -> Result<Option<ResourceQuery>> {
             to: year_bound(to, 1)?,
         }),
     };
-    if title.is_none() && creator.is_none() && published.is_none() {
+    let search = args
+        .search
+        .as_deref()
+        .map(|text| NonEmptyStr::try_new(text).map_err(|_| anyhow!("--search must not be empty")))
+        .transpose()?;
+    let kind = args
+        .kind
+        .as_deref()
+        .map(|text| {
+            ResourceKind::from_slug(text).with_context(|| format!("unknown --kind '{text}'"))
+        })
+        .transpose()?;
+    let tag = args
+        .tag
+        .as_deref()
+        .map(|id| TagId::parse(id).context("invalid --tag id"))
+        .transpose()?;
+    let collection = args
+        .collection
+        .as_deref()
+        .map(|id| CollectionId::parse(id).context("invalid --collection id"))
+        .transpose()?;
+    if title.is_none()
+        && creator.is_none()
+        && published.is_none()
+        && search.is_none()
+        && kind.is_none()
+        && !args.favorite
+        && tag.is_none()
+        && collection.is_none()
+        && args.sort.is_none()
+    {
         return Ok(None);
     }
     Ok(Some(ResourceQuery {
-        sort: None,
+        sort: args.sort.map(|sort| {
+            (
+                sort.into(),
+                if args.desc {
+                    SortDirection::Descending
+                } else {
+                    SortDirection::Ascending
+                },
+            )
+        }),
         filter: ResourceFilter {
-            search: None,
+            search,
             title,
             creator,
             published,
-            kind: None,
-            favorite: None,
-            tag: None,
-            collection: None,
+            kind,
+            favorite: args.favorite.then_some(true),
+            tag,
+            collection,
         },
     }))
 }
@@ -201,6 +580,9 @@ fn year_bound(year: Option<u16>, shift: i64) -> Result<Option<UtcMillis>> {
 }
 
 async fn list(state: &AppState, args: ListArgs) -> Result<()> {
+    if args.tree {
+        return list_tree(state, &args).await;
+    }
     let rows = match listing_query(&args)? {
         // Unfiltered keeps the plain listing: the same rows through the
         // command the library already had.
@@ -248,6 +630,57 @@ async fn list(state: &AppState, args: ListArgs) -> Result<()> {
     Ok(())
 }
 
+async fn grid_rows(
+    state: &AppState,
+    parent: ResourceGridParent,
+    query: &ResourceQuery,
+) -> Result<Vec<ResourceGridRow>> {
+    let mut rows = Vec::new();
+    let mut offset = 0;
+    loop {
+        let Outcome::ResourceGridPage(page) = state
+            .execute(Command::ListResourceGridPage(ListResourceGridPage {
+                parent,
+                query: query.clone(),
+                offset,
+                limit: QUERY_PAGE,
+            }))
+            .await?
+        else {
+            bail!("unexpected outcome from list_resource_grid_page");
+        };
+        rows.extend(page.rows);
+        match page.next_offset {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    Ok(rows)
+}
+
+async fn list_tree(state: &AppState, args: &ListArgs) -> Result<()> {
+    let query = listing_query(args)?.unwrap_or_else(ResourceQuery::newest_first);
+    let roots = grid_rows(state, ResourceGridParent::Roots, &query).await?;
+    if roots.is_empty() {
+        println!("(none)");
+        return Ok(());
+    }
+    let mut stack: Vec<_> = roots.into_iter().rev().map(|row| (row, 0usize)).collect();
+    let mut seen = std::collections::HashSet::new();
+    while let Some((row, depth)) = stack.pop() {
+        if !seen.insert(row.summary.id) {
+            continue;
+        }
+        println!("{}{}", "  ".repeat(depth), format_summary_row(&row.summary));
+        if row.has_children {
+            let children =
+                grid_rows(state, ResourceGridParent::Children(row.summary.id), &query).await?;
+            stack.extend(children.into_iter().rev().map(|child| (child, depth + 1)));
+        }
+    }
+    Ok(())
+}
+
 /// Full-replace edit: fetch the record, merge the set flags into its
 /// write-side twin, send it back. Unchanged fields ride through untouched,
 /// the same merge `person update` performs.
@@ -262,14 +695,32 @@ async fn update(state: &AppState, args: UpdateArgs) -> Result<()> {
         bail!("unexpected outcome from get_resource");
     };
 
-    let new = merge_update(&existing, &args)?;
-
-    let Outcome::UpdateResource(updated) = state
-        .execute(Command::UpdateResource(UpdateResource { id, new }))
-        .await?
-    else {
-        bail!("unexpected outcome from update_resource");
-    };
+    if !args.has_changes() && !args.favorite && !args.unfavorite {
+        bail!("nothing to update; pass a field flag");
+    }
+    let mut updated = existing;
+    if args.has_changes() {
+        let new = merge_update(&updated, &args)?;
+        let Outcome::UpdateResource(resource) = state
+            .execute(Command::UpdateResource(UpdateResource { id, new }))
+            .await?
+        else {
+            bail!("unexpected outcome from update_resource");
+        };
+        updated = resource;
+    }
+    if args.favorite || args.unfavorite {
+        let Outcome::SetResourceFavorite(resource) = state
+            .execute(Command::SetResourceFavorite(SetResourceFavorite {
+                id,
+                favorite: args.favorite,
+            }))
+            .await?
+        else {
+            bail!("unexpected outcome from set_resource_favorite");
+        };
+        updated = resource;
+    }
     println!(
         "{}  {}  {}",
         updated.id,
@@ -347,6 +798,46 @@ fn merge_update(existing: &Resource, args: &UpdateArgs) -> Result<NewResource> {
     }
     if args.clear_creators {
         edit.creators = Vec::new();
+    }
+    let tags = args
+        .tags
+        .iter()
+        .map(|id| TagId::parse(id).context("invalid --tag id"))
+        .collect::<Result<Vec<_>>>()?;
+    let removed_tags = args
+        .remove_tags
+        .iter()
+        .map(|id| TagId::parse(id).context("invalid --remove-tag id"))
+        .collect::<Result<Vec<_>>>()?;
+    let collections = args
+        .collections
+        .iter()
+        .map(|id| CollectionId::parse(id).context("invalid --collection id"))
+        .collect::<Result<Vec<_>>>()?;
+    let removed_collections = args
+        .remove_collections
+        .iter()
+        .map(|id| CollectionId::parse(id).context("invalid --remove-collection id"))
+        .collect::<Result<Vec<_>>>()?;
+    if tags.iter().any(|id| removed_tags.contains(id))
+        || collections
+            .iter()
+            .any(|id| removed_collections.contains(id))
+    {
+        bail!("cannot add and remove the same membership in one update");
+    }
+    edit.tag_ids.retain(|id| !removed_tags.contains(id));
+    for id in tags {
+        if !edit.tag_ids.contains(&id) {
+            edit.tag_ids.push(id);
+        }
+    }
+    edit.collection_ids
+        .retain(|id| !removed_collections.contains(id));
+    for id in collections {
+        if !edit.collection_ids.contains(&id) {
+            edit.collection_ids.push(id);
+        }
     }
 
     Ok(edit)
@@ -496,6 +987,15 @@ mod tests {
             creator: creator.map(str::to_owned),
             published_from,
             published_to,
+            search: None,
+            kind: None,
+            favorite: false,
+            tag: None,
+            collection: None,
+            sort: None,
+            asc: false,
+            desc: false,
+            tree: false,
         }
     }
 
@@ -577,6 +1077,12 @@ mod tests {
             clear_series_number: false,
             creators: Vec::new(),
             clear_creators: false,
+            tags: vec![],
+            remove_tags: vec![],
+            collections: vec![],
+            remove_collections: vec![],
+            favorite: false,
+            unfavorite: false,
         }
     }
 

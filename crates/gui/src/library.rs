@@ -60,6 +60,7 @@ use crate::edit::{
     prefill_draft,
 };
 use crate::icons::symbol;
+use crate::import_dialog::{ConflictPolicy, ImportConfirmed, ImportDialog};
 use crate::inline_edit::{
     InlineField, InlineRowEdit, InlineSession, PersonChoice, PersonDelegate,
     creators_badge_trigger, person_items, person_name_from_query, selected_person_ids,
@@ -2793,15 +2794,7 @@ impl LibraryApp {
                 app.import_state = ImportState::Idle;
                 match result {
                     Ok(None) => {}
-                    Ok(Some(plan)) if !plan.preview.needs_review() => {
-                        app.commit_biblatex_import(
-                            plan.source_text,
-                            ImportChoices::default(),
-                            window,
-                            cx,
-                        );
-                    }
-                    Ok(Some(plan)) => app.show_import_review(plan, window, cx),
+                    Ok(Some(plan)) => app.show_import_dialog(plan, window, cx),
                     Err(error) => app.show_import_report(Err(error), window, cx),
                 }
                 cx.notify();
@@ -2817,6 +2810,9 @@ impl LibraryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.import_state != ImportState::Idle {
+            return;
+        }
         self.import_state = ImportState::Importing;
         let worker = self.table.read(cx).delegate().worker().clone();
         self.import_task = Some(cx.spawn_in(window, async move |app, window| {
@@ -2830,123 +2826,70 @@ impl LibraryApp {
         cx.notify();
     }
 
-    fn show_import_review(
+    /// Open the import dialog for a previewed bibliography. Nothing is
+    /// written until the user confirms; Cancel and Escape close it as-is and
+    /// the dialog root restores the previous focus.
+    fn show_import_dialog(
         &mut self,
         plan: crate::db::BiblatexImportPlan,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let review_lines: Vec<String> = plan
-            .preview
-            .entries
-            .iter()
-            .filter(|e| e.needs_review())
-            .flat_map(|e| {
-                e.conflicts
-                    .iter()
-                    .map(move |c| format!("{} — {}: {}", e.entry_key, c.code, c.message))
-            })
-            .take(100)
-            .collect();
-        let summary = format!(
-            "{} entr{} need review before saving",
-            plan.preview
-                .entries
-                .iter()
-                .filter(|e| e.needs_review())
-                .count(),
-            if plan
-                .preview
-                .entries
-                .iter()
-                .filter(|e| e.needs_review())
-                .count()
-                == 1
-            {
-                "y"
-            } else {
-                "ies"
-            }
-        );
-        let source_text = plan.source_text.clone();
-        let preview = plan.preview.clone();
-        let app = cx.weak_entity();
+        let crate::db::BiblatexImportPlan {
+            source_text,
+            preview,
+        } = plan;
+        let tags = self.tags.clone();
+        let collections = flatten_collections(&self.collection_forest);
+        let dialog_preview = preview.clone();
+        let content = cx.new(|cx| ImportDialog::new(dialog_preview, tags, collections, window, cx));
+        cx.subscribe_in(
+            &content,
+            window,
+            move |this, _, event: &ImportConfirmed, window, cx| {
+                let mut choices = match event.policy {
+                    None => ImportChoices::default(),
+                    Some(ConflictPolicy::SkipConflicted) => safe_skip_choices(&preview),
+                    Some(ConflictPolicy::ImportDuplicates) => {
+                        intentional_duplicate_choices(&preview)
+                    }
+                };
+                choices.assignments = event.assignments.clone();
+                window.close_dialog(cx);
+                this.commit_biblatex_import(source_text.clone(), choices, window, cx);
+            },
+        )
+        .detach();
         window.open_dialog(cx, move |dialog, _, cx| {
-            let source_skip = source_text.clone();
-            let preview_skip = preview.clone();
-            let source_dup = source_text.clone();
-            let preview_dup = preview.clone();
-            let app_skip = app.clone();
-            let app_dup = app.clone();
+            let footer = content.update(cx, |content, cx| content.footer(cx));
             dialog
-                .title("Review import conflicts")
+                .title("Import bibliography")
                 .entrance(gpui_kit::component::dialog::DialogEntrance::None)
                 .width(px(560.))
-                .child(
-                    v_flex()
-                        .id("biblatex-import-review")
-                        .test_support()
-                        .aria_label(summary.clone())
-                        .gap_3()
-                        .child(summary.clone())
-                        .child(
-                            div()
-                                .id("biblatex-import-review-issues")
-                                .max_h(px(280.))
-                                .overflow_y_scroll()
-                                .child(v_flex().gap_2().children(
-                                    review_lines.iter().map(|line| {
-                                        div().text_size(px(12.)).child(line.clone())
-                                    }),
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(
-                                    "Choices are applied by the shared import pipeline and revalidated on save. Citekeys stay local to this source.",
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Button::new("import-skip-conflicts")
-                                        .label("Skip conflicted")
-                                        .on_click(move |_, window, cx| {
-                                            window.close_dialog(cx);
-                                            let choices = safe_skip_choices(&preview_skip);
-                                            let _ = app_skip.update(cx, |this, cx| {
-                                                this.commit_biblatex_import(
-                                                    source_skip.clone(),
-                                                    choices,
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        }),
-                                )
-                                .child(
-                                    Button::new("import-intentional-dups")
-                                        .label("Import duplicates")
-                                        .on_click(move |_, window, cx| {
-                                            window.close_dialog(cx);
-                                            let choices =
-                                                intentional_duplicate_choices(&preview_dup);
-                                            let _ = app_dup.update(cx, |this, cx| {
-                                                this.commit_biblatex_import(
-                                                    source_dup.clone(),
-                                                    choices,
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        }),
-                                ),
-                        ),
-                )
+                .child(content.clone())
+                .footer(footer)
         });
+    }
+
+    /// Reload library tags and collections after a write that may have
+    /// created some (an import with new batch targets).
+    fn reload_tags_and_collections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let tags = worker.list_tags().await;
+            let forest = worker.list_collection_forest().await;
+            _ = app.update_in(window, |app, window, cx| {
+                if let Ok(tags) = tags {
+                    app.tags = tags;
+                    app.sync_tag_picker(window, cx);
+                }
+                if let Ok(forest) = forest {
+                    app.set_collection_forest(forest, window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn show_import_report(
@@ -2957,6 +2900,7 @@ impl LibraryApp {
     ) {
         // Refresh even when later units failed — earlier commits remain.
         self.refresh_counts(window, cx);
+        self.reload_tags_and_collections(window, cx);
         let selected = self.selected;
         self.table.update(cx, |table, cx| {
             table
@@ -3004,6 +2948,47 @@ impl LibraryApp {
                     .collect();
                 if count > 100 {
                     issues.push(format!("Showing the first 100 of {count} issues."));
+                }
+                let targets = |names: Vec<String>| names.join(", ");
+                if !report.assignments.tags.is_empty() {
+                    issues.insert(
+                        0,
+                        format!(
+                            "Tags — {}",
+                            targets(
+                                report
+                                    .assignments
+                                    .tags
+                                    .iter()
+                                    .map(|t| if t.created {
+                                        format!("{} (new)", t.name)
+                                    } else {
+                                        t.name.clone()
+                                    })
+                                    .collect()
+                            )
+                        ),
+                    );
+                }
+                if !report.assignments.collections.is_empty() {
+                    issues.insert(
+                        0,
+                        format!(
+                            "Collections — {}",
+                            targets(
+                                report
+                                    .assignments
+                                    .collections
+                                    .iter()
+                                    .map(|c| if c.created {
+                                        format!("{} (new)", c.name)
+                                    } else {
+                                        c.name.clone()
+                                    })
+                                    .collect()
+                            )
+                        ),
+                    );
                 }
                 ("BibLaTeX import complete", summary, issues)
             }
@@ -3657,16 +3642,19 @@ impl LibraryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let CollectionChoice::Existing(choice) = choice else {
+            return;
+        };
         let Some(collection) = flatten_collections(&self.collection_forest)
             .into_iter()
-            .find(|c| c.id == choice.0)
+            .find(|c| c.id == choice)
         else {
             return;
         };
         let Some(EditFetch::Ready(form)) = &mut self.edit else {
             return;
         };
-        if form.collections.iter().any(|c| c.id == choice.0) {
+        if form.collections.iter().any(|c| c.id == choice) {
             return;
         }
         form.collections.push(collection);
@@ -6889,12 +6877,12 @@ impl Render for LibraryApp {
                                                     menu.item(
                                                         PopupMenuItem::new("Add by ISBN or DOI…")
                                                             .on_click(window.listener_for(
-                                                            &app,
-                                                            |this, _, window, cx| {
-                                                                if let Some(palette) =
-                                                                    this.open_palette(window, cx)
-                                                                {
-                                                                    palette.update(
+                                                                &app,
+                                                                |this, _, window, cx| {
+                                                                    if let Some(palette) = this
+                                                                        .open_palette(window, cx)
+                                                                    {
+                                                                        palette.update(
                                                                         cx,
                                                                         |palette, cx| {
                                                                             palette.open_identifier(
@@ -6902,9 +6890,9 @@ impl Render for LibraryApp {
                                                                             )
                                                                         },
                                                                     );
-                                                                }
-                                                            },
-                                                        )),
+                                                                    }
+                                                                },
+                                                            )),
                                                     )
                                                     .item(
                                                         PopupMenuItem::new("Import file…")
@@ -8841,18 +8829,24 @@ mod biblatex_gui_tests {
     use crate::db::DbWorker;
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
-    use gpui_kit::{AppContext as _, KeyBinding};
+    use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, KeyBinding, TestAppContext};
+    use oeuvre_app::testing::MemoryStore;
+    use oeuvre_core::{Resource, Store as _};
 
-    #[gpui_kit::test]
-    fn toolbar_imports_bibliography_refreshes_rows_and_cancel_does_not_write(
-        cx: &mut gpui_kit::TestAppContext,
-    ) {
+    struct Fixture {
+        handle: AnyWindowHandle,
+        app: Entity<LibraryApp>,
+        worker: DbWorker,
+        store: MemoryStore,
+        dir: tempfile::TempDir,
+    }
+
+    fn open(cx: &mut TestAppContext) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("example.bib");
-        std::fs::write(&path, "@book{book,title={A GUI imported book}}\n@online{web,title={A GUI imported website}}\n@patent{patent,title={Skipped}}").unwrap();
         cx.executor().allow_parking();
+        let store = MemoryStore::new();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+            oeuvre_app::AppState::builder(store.clone())
                 .surface(oeuvre_app::Surface::Test)
                 .build(),
         );
@@ -8867,6 +8861,7 @@ mod biblatex_gui_tests {
                 50,
             )
             .unwrap();
+        let root = dir.path().to_path_buf();
         let (handle, app) = cx.update(|cx| {
             gpui_kit::init(cx);
             cx.bind_keys([KeyBinding::new(
@@ -8888,78 +8883,279 @@ mod biblatex_gui_tests {
                         cx,
                     )
                 });
-                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+                cx.new(|cx| LibraryApp::new(table, root, window, cx))
             })
             .unwrap()
         });
-        cx.update_window(handle, |_, window, cx| {
-            window.render_frame(cx);
-            app.update(cx, |app, cx| app.focus_table(window, cx));
+        Fixture {
+            handle,
+            app,
+            worker,
+            store,
+            dir,
+        }
+    }
+
+    impl Fixture {
+        fn write(&self, name: &str, source: &str) -> std::path::PathBuf {
+            let path = self.dir.path().join(name);
+            std::fs::write(&path, source).unwrap();
+            path
+        }
+
+        fn row_count(&self) -> usize {
+            self.worker.list_page_blocking(None, 50).unwrap().rows.len()
+        }
+
+        /// Let worker replies land: fence on the worker queue between parks.
+        fn settle(&self, cx: &mut TestAppContext) {
+            for _ in 0..3 {
+                cx.run_until_parked();
+                self.worker.list_page_blocking(None, 50).unwrap();
+            }
+            cx.run_until_parked();
+        }
+
+        /// Pick `path` through the keyboard shortcut and wait for the preview.
+        fn choose(&self, cx: &mut TestAppContext, path: &std::path::Path) {
+            cx.update_window(self.handle, |_, window, cx| {
+                window.render_frame(cx);
+                self.app.update(cx, |app, cx| app.focus_table(window, cx));
+                window.press("cmd-shift-i", cx);
+            })
+            .unwrap();
+            assert!(cx.did_prompt_for_paths());
+            let path = path.to_path_buf();
+            cx.simulate_path_prompt_response(move |_| Some(vec![path]));
+            self.settle(cx);
+        }
+
+        fn window<R>(
+            &self,
+            cx: &mut TestAppContext,
+            f: impl FnOnce(&mut gpui_kit::Window, &mut gpui_kit::App) -> R,
+        ) -> R {
+            cx.update_window(self.handle, |_, window, cx| {
+                window.render_frame(cx);
+                f(window, cx)
+            })
+            .unwrap()
+        }
+
+        /// Stage a name in a dialog picker using the pointer to open it and
+        /// the keyboard to search and pick the first row.
+        fn pick(&self, cx: &mut TestAppContext, picker: &'static str, query: &str) {
+            self.window(cx, |window, cx| window.click(picker, cx));
+            cx.run_until_parked();
+            self.window(cx, |window, cx| window.input(query, cx));
+            // The picker's search is debounced.
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(200));
+            cx.run_until_parked();
+            self.window(cx, |window, cx| {
+                window.press("down", cx);
+                window.press("enter", cx);
+            });
+            cx.run_until_parked();
+        }
+
+        fn resources(&self) -> Vec<Resource> {
+            let ids: Vec<_> = self
+                .worker
+                .list_page_blocking(None, 50)
+                .unwrap()
+                .rows
+                .into_iter()
+                .map(|row| row.id)
+                .collect();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            ids.into_iter()
+                .map(|id| runtime.block_on(self.store.get_resource(id)).unwrap())
+                .collect()
+        }
+
+        fn tag_texts(&self) -> Vec<String> {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let mut texts: Vec<String> = runtime
+                .block_on(self.store.list_tags())
+                .unwrap()
+                .into_iter()
+                .map(|tag| tag.text.as_str().to_owned())
+                .collect();
+            texts.sort();
+            texts
+        }
+    }
+
+    #[gpui_kit::test]
+    fn toolbar_imports_bibliography_refreshes_rows_and_cancel_does_not_write(
+        cx: &mut TestAppContext,
+    ) {
+        let f = open(cx);
+        let path = f.write(
+            "example.bib",
+            "@book{book,title={A GUI imported book}}\n@online{web,title={A GUI imported website}}\n@patent{patent,title={Skipped}}",
+        );
+        f.window(cx, |window, cx| {
+            f.app.update(cx, |app, cx| app.focus_table(window, cx));
             window.press("n", cx);
             window.click("add-resource", cx);
             window.press("down", cx);
             window.press("down", cx);
             window.press("enter", cx);
-        })
-        .unwrap();
+        });
         assert!(cx.did_prompt_for_paths());
         cx.run_until_parked();
-        worker.list_page_blocking(None, 50).unwrap();
+        f.worker.list_page_blocking(None, 50).unwrap();
         cx.run_until_parked();
-        cx.update_window(handle, |_, _window, cx| {
+        f.window(cx, |_, cx| {
             assert!(
-                !app.read(cx).has_inline(cx),
+                !f.app.read(cx).has_inline(cx),
                 "stale new-row reply must not open a draft during import"
             );
-        })
-        .unwrap();
+        });
         cx.simulate_path_prompt_response(|options| {
             assert!(options.files);
             assert!(!options.directories);
             assert!(!options.multiple);
             Some(vec![path.clone()])
         });
-        cx.run_until_parked();
-        // Preview and commit are separate worker round trips. Let the preview
-        // completion enqueue the commit before fencing its persisted rows.
-        worker.list_page_blocking(None, 50).unwrap();
-        cx.run_until_parked();
-        assert_eq!(worker.list_page_blocking(None, 50).unwrap().rows.len(), 2);
-        cx.run_until_parked();
-        worker.list_page_blocking(None, 50).unwrap();
-        cx.run_until_parked();
-        cx.update_window(handle, |_, window, cx| {
-            window.render_frame(cx);
+        f.settle(cx);
+
+        // The dialog always opens, and nothing is written before confirming.
+        f.window(cx, |window, cx| {
             assert!(window.has_active_dialog(cx));
-            assert!(window.try_find("biblatex-import-report").is_some());
+            assert_eq!(
+                window.find("import-bibliography").label(),
+                Some("3 entries · 2 new · 1 will be skipped")
+            );
+            window.click("import-confirm", cx);
+        });
+        f.settle(cx);
+        assert_eq!(f.row_count(), 2);
+        f.window(cx, |window, cx| {
+            assert!(window.has_active_dialog(cx));
             assert_eq!(
                 window.find("biblatex-import-report").label(),
                 Some("2 imported · 0 reused · 1 skipped · 0 conflicted · 0 failed · 0 not attempted · 0 warnings")
             );
-            assert_eq!(app.read(cx).counts.as_ref().unwrap().all_items, 2);
-            assert_eq!(app.read(cx).table.read(cx).delegate().rows.len(), 2);
+            assert_eq!(f.app.read(cx).counts.as_ref().unwrap().all_items, 2);
+            assert_eq!(f.app.read(cx).table.read(cx).delegate().rows.len(), 2);
             window.press("escape", cx);
-        })
-        .unwrap();
+        });
         cx.run_until_parked();
-        cx.update_window(handle, |_, window, cx| {
-            window.render_frame(cx);
+        f.window(cx, |window, cx| {
             assert!(!window.has_active_dialog(cx));
-            app.update(cx, |app, cx| app.focus_table(window, cx));
+            f.app.update(cx, |app, cx| app.focus_table(window, cx));
             window.press("cmd-shift-i", cx);
-        })
-        .unwrap();
+        });
         assert!(cx.did_prompt_for_paths());
         cx.simulate_path_prompt_response(|_| None);
         cx.run_until_parked();
-        assert_eq!(worker.list_page_blocking(None, 50).unwrap().rows.len(), 2);
-        cx.update_window(handle, |_, window, cx| {
-            assert!(!window.has_active_dialog(cx));
-        })
-        .unwrap();
+        assert_eq!(f.row_count(), 2);
+        f.window(cx, |window, cx| assert!(!window.has_active_dialog(cx)));
+    }
+
+    #[gpui_kit::test]
+    fn escape_cancels_the_import_dialog_without_writing_staged_names(cx: &mut TestAppContext) {
+        let f = open(cx);
+        let path = f.write("cancel.bib", "@book{a,title={Never imported}}");
+        f.choose(cx, &path);
+        f.pick(cx, "import-tags-picker", "staged only");
+        f.window(cx, |window, cx| {
+            assert!(window.has_active_dialog(cx));
+            window.press("escape", cx);
+        });
+        f.settle(cx);
+        f.window(cx, |window, cx| assert!(!window.has_active_dialog(cx)));
+        assert_eq!(f.row_count(), 0);
+        assert!(f.tag_texts().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn staged_tags_and_collections_attach_to_every_imported_entry(cx: &mut TestAppContext) {
+        let f = open(cx);
+        let path = f.write(
+            "batch.bib",
+            "@book{a,title={First batch book}}\n@book{b,title={Second batch book}}",
+        );
+        f.choose(cx, &path);
+        f.pick(cx, "import-tags-picker", "reading");
+        f.pick(cx, "import-collections-picker", "Thesis");
+        f.window(cx, |window, cx| {
+            assert!(window.try_find("import-remove-tag-new-reading").is_some());
+            assert!(
+                window
+                    .try_find("import-remove-collection-new-Thesis")
+                    .is_some()
+            );
+            window.click("import-confirm", cx);
+            // A second activation while the import runs must not resubmit.
+            if window.try_find("import-confirm").is_some() {
+                window.click("import-confirm", cx);
+            }
+        });
+        f.settle(cx);
+        assert_eq!(f.tag_texts(), ["reading"]);
+        let resources = f.resources();
+        assert_eq!(resources.len(), 2);
+        for resource in &resources {
+            assert_eq!(resource.tag_ids.len(), 1);
+            assert_eq!(resource.collection_ids.len(), 1);
+        }
+        f.settle(cx);
+        f.window(cx, |_, cx| {
+            let app = f.app.read(cx);
+            assert!(app.tags.iter().any(|tag| tag.text.as_str() == "reading"));
+            assert!(
+                super::flatten_collections(&app.collection_forest)
+                    .iter()
+                    .any(|c| c.name.as_str() == "Thesis")
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn conflict_choice_keeps_staged_targets(cx: &mut TestAppContext) {
+        let f = open(cx);
+        let seed = f.write(
+            "seed.bib",
+            "@book{seed, title={Notes}, author={Ada, Lovelace}, doi={10.1000/notes}}",
+        );
+        f.choose(cx, &seed);
+        f.window(cx, |window, cx| window.click("import-confirm", cx));
+        f.settle(cx);
+        f.window(cx, |window, cx| window.press("escape", cx));
+        cx.run_until_parked();
+        assert_eq!(f.row_count(), 1);
+
+        let next = f.write(
+            "next.bib",
+            "@book{dup, title={Dup}, author={Ada, Lovelace}, doi={10.1000/notes}}\n@book{fresh, title={Fresh book}}",
+        );
+        f.choose(cx, &next);
+        f.pick(cx, "import-tags-picker", "batch");
+        f.window(cx, |window, cx| {
+            assert!(window.try_find("import-confirm").is_none());
+            assert!(window.try_find("import-intentional-dups").is_some());
+            window.click("import-skip-conflicts", cx);
+        });
+        f.settle(cx);
+        let resources = f.resources();
+        assert_eq!(resources.len(), 2);
+        let fresh = resources
+            .iter()
+            .find(|r| r.title.as_str() == "Fresh book")
+            .unwrap();
+        let notes = resources
+            .iter()
+            .find(|r| r.title.as_str() == "Notes")
+            .unwrap();
+        assert_eq!(fresh.tag_ids.len(), 1);
+        assert!(notes.tag_ids.is_empty(), "skipped conflict stays unchanged");
+        assert_eq!(f.tag_texts(), ["batch"]);
     }
 }
-
 #[cfg(test)]
 mod resource_grid_tests {
     use super::{DbWorker, LibraryDelegate, ResourceKind, Settings};

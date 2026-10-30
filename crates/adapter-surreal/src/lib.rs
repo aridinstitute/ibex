@@ -1,15 +1,16 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
 use oeuvre_core::{
-    BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole,
-    DateCertainty, DatePrecision, ImportedResourceWrite, Name, NewResource, NewSeries, NonEmptyStr,
-    Person, PersonId, Resource, ResourceCounts, ResourceFilter, ResourceId, ResourceKind,
-    ResourceMetadata, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary, Series, SeriesId,
-    SortDirection, SortedResourcePage, Store, StoreError, StoreHealth, Tag, TagId, UtcMillis,
-    build_collection_forest, collection_descendant_closure, creator_label_name,
-    format_creators_label, gather_ancestors, published_label_from, resolve_effective,
+    BibliographicDate, Collection, CollectionId, CollectionTreeNode, CollectionUpdate, Creator,
+    CreatorRole, DateCertainty, DatePrecision, ImportedResourceWrite, Name, NewResource, NewSeries,
+    NonEmptyStr, Person, PersonId, Resource, ResourceCounts, ResourceFilter, ResourceId,
+    ResourceKind, ResourceMetadata, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary,
+    Series, SeriesId, SortDirection, SortedResourcePage, Store, StoreError, StoreHealth, Tag,
+    TagId, UtcMillis, build_collection_forest, collection_descendant_closure,
+    collection_update_edges, creator_label_name, format_creators_label, gather_ancestors,
+    published_label_from, resolve_effective,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -1876,6 +1877,94 @@ impl Store for SurrealStore {
         .await
     }
 
+    async fn update_collection(&self, update: CollectionUpdate) -> Result<Collection, StoreError> {
+        let txn = self.db.clone().begin().await.map_err(map_err)?;
+        let result = async {
+            let doc: Option<CollectionDoc> = txn
+                .select(Self::collection_key(update.id))
+                .await
+                .map_err(map_err)?;
+            let mut collection = doc
+                .ok_or_else(|| StoreError::not_found(format!("collection {}", update.id)))?
+                .into_collection(update.id);
+            let mut response = txn
+                .query("SELECT id FROM collection; SELECT in, out FROM child_of;")
+                .await
+                .map_err(map_err)?
+                .check()
+                .map_err(map_err)?;
+            let ids: Vec<CollectionIdRow> = response.take(0).map_err(map_err)?;
+            let edges: Vec<ChildOfEdgeRow> = response.take(1).map_err(map_err)?;
+            let ids: HashSet<_> = ids
+                .iter()
+                .map(|row| Self::thing_to_collection_id(&row.id))
+                .collect::<Result<_, _>>()?;
+            let edges: Vec<_> = edges
+                .iter()
+                .map(|row| {
+                    Ok((
+                        Self::thing_to_collection_id(&row.child)?,
+                        Self::thing_to_collection_id(&row.parent)?,
+                    ))
+                })
+                .collect::<Result<_, StoreError>>()?;
+            collection_update_edges(&update, &ids, &edges)?;
+            if let Some(name) = &update.name {
+                collection.name = name.clone();
+            }
+            if let Some(keywords) = &update.keywords {
+                collection.keywords = keywords.clone();
+            }
+            if let Some(jev_enabled) = update.jev_enabled {
+                collection.jev_enabled = jev_enabled;
+            }
+            let mut response = txn
+                .query("UPDATE ONLY $id SET name = $name, keywords = $keywords, jev_enabled = $jev")
+                .bind(("id", Self::collection_key(update.id)))
+                .bind(("name", collection.name.as_str().to_owned()))
+                .bind(("keywords", collection.keywords.clone()))
+                .bind(("jev", collection.jev_enabled))
+                .await
+                .map_err(map_err)?
+                .check()
+                .map_err(map_err)?;
+            let written: Option<CollectionDoc> = response.take(0).map_err(map_err)?;
+            if written.is_none() {
+                return Err(StoreError::not_found(format!("collection {}", update.id)));
+            }
+            for parent in &update.remove_parents {
+                txn.query("DELETE child_of WHERE in = $child AND out = $parent")
+                    .bind(("child", Self::collection_key(update.id)))
+                    .bind(("parent", Self::collection_key(*parent)))
+                    .await
+                    .map_err(map_err)?
+                    .check()
+                    .map_err(map_err)?;
+            }
+            for parent in &update.add_parents {
+                txn.query("RELATE $child -> child_of -> $parent")
+                    .bind(("child", Self::collection_key(update.id)))
+                    .bind(("parent", Self::collection_key(*parent)))
+                    .await
+                    .map_err(map_err)?
+                    .check()
+                    .map_err(map_err)?;
+            }
+            Ok(collection)
+        }
+        .await;
+        match result {
+            Ok(collection) => {
+                txn.commit().await.map_err(map_err)?;
+                Ok(collection)
+            }
+            Err(error) => {
+                let _ = txn.cancel().await;
+                Err(error)
+            }
+        }
+    }
+
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {
         let (collections, edges) = self.load_collection_graph().await?;
         Ok(build_collection_forest(collections, edges))
@@ -2142,6 +2231,39 @@ impl Store for SurrealStore {
             .query("UPDATE ONLY $resource MERGE { favorite: $favorite }")
             .bind(("resource", Self::resource_key(id)))
             .bind(("favorite", favorite))
+            .await
+            .map_err(map_err)?;
+        let updated: Option<ResourceDoc> = response.take(0).map_err(map_err)?;
+        if updated.is_none() {
+            return Err(StoreError::not_found(format!("resource {id}")));
+        }
+        self.get_resource(id).await
+    }
+
+    async fn add_resource_labels(
+        &self,
+        id: ResourceId,
+        tag_ids: &[TagId],
+        collection_ids: &[CollectionId],
+    ) -> Result<Resource, StoreError> {
+        // array::union keeps existing order and drops duplicates, so a retry
+        // never doubles a membership. A missing row yields empty → not-found.
+        let tags: Vec<RecordId> = tag_ids.iter().copied().map(Self::tag_key).collect();
+        let collections: Vec<RecordId> = collection_ids
+            .iter()
+            .copied()
+            .map(Self::collection_key)
+            .collect();
+        let mut response = self
+            .db
+            .query(
+                "UPDATE ONLY $resource SET \
+                 tags = array::union(tags ?? [], $tags), \
+                 collections = array::union(collections ?? [], $collections)",
+            )
+            .bind(("resource", Self::resource_key(id)))
+            .bind(("tags", tags))
+            .bind(("collections", collections))
             .await
             .map_err(map_err)?;
         let updated: Option<ResourceDoc> = response.take(0).map_err(map_err)?;
@@ -2597,6 +2719,68 @@ mod tests {
             .await
             .unwrap_err();
         assert!(missing.is_not_found());
+    }
+
+    #[tokio::test]
+    async fn atomic_collection_update_preserves_row_and_every_edge_on_later_failure() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        let name = |s| NonEmptyStr::try_new(s).unwrap();
+        let a = store.create_collection(name("A"), None).await.unwrap();
+        let b = store.create_collection(name("B"), None).await.unwrap();
+        let child = store
+            .create_collection(name("Child"), Some(a.id))
+            .await
+            .unwrap();
+        let patch = CollectionUpdate {
+            id: child.id,
+            name: Some(name("Changed")),
+            keywords: Some(vec!["tag".into()]),
+            jev_enabled: Some(true),
+            add_parents: vec![b.id],
+            remove_parents: vec![],
+        };
+        store.update_collection(patch).await.unwrap();
+        let failed = CollectionUpdate {
+            id: child.id,
+            name: Some(name("Not saved")),
+            keywords: Some(vec![]),
+            jev_enabled: Some(false),
+            add_parents: vec![],
+            remove_parents: vec![a.id, b.id, a.id],
+        };
+        assert!(store.update_collection(failed).await.is_err());
+        let saved = store.get_collection(child.id).await.unwrap();
+        assert_eq!(saved.name.as_str(), "Changed");
+        assert_eq!(saved.keywords, vec!["tag"]);
+        assert!(saved.jev_enabled);
+        let forest = store.list_collection_forest().await.unwrap();
+        for parent in [a.id, b.id] {
+            assert_eq!(
+                forest
+                    .iter()
+                    .find(|n| n.collection.id == parent)
+                    .unwrap()
+                    .children[0]
+                    .collection
+                    .id,
+                child.id
+            );
+        }
+        assert!(
+            store
+                .update_collection(CollectionUpdate {
+                    id: a.id,
+                    name: Some(name("No cycle")),
+                    keywords: None,
+                    jev_enabled: None,
+                    add_parents: vec![child.id],
+                    remove_parents: vec![],
+                })
+                .await
+                .unwrap_err()
+                .is_invalid()
+        );
+        assert_eq!(store.get_collection(a.id).await.unwrap().name.as_str(), "A");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

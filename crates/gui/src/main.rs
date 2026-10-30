@@ -5,6 +5,7 @@ mod db;
 mod detail;
 mod edit;
 mod icons;
+mod import_dialog;
 mod inline_edit;
 mod jev;
 mod kind;

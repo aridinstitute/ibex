@@ -15,6 +15,7 @@ use crate::command::resource::validate_new_resource_refs;
 use crate::event::{self, Event};
 use crate::{AppState, CommandError};
 
+use super::assign::AssignmentPlan;
 use super::link::{
     ContainerDecision, ImportEntityIndex, plan_parent_for_entry, resolve_explicit_container,
 };
@@ -156,6 +157,17 @@ pub(crate) async fn save_draft_inner(
         }
     }
 
+    // Validate batch targets before any write; named targets are created
+    // lazily, just before the first entry that receives them.
+    let mut plan = AssignmentPlan::resolve(state, &choices.assignments).await?;
+    if let Some(ev) = ev.as_mut() {
+        ev.set(event::IMPORT_ASSIGNED_TAG_COUNT, plan.tag_count());
+        ev.set(
+            event::IMPORT_ASSIGNED_COLLECTION_COUNT,
+            plan.collection_count(),
+        );
+    }
+
     let library_resources = state.store().list_resources_for_import().await?;
     let mut identity = IdentityIndex::default();
     for resource in &library_resources {
@@ -188,6 +200,7 @@ pub(crate) async fn save_draft_inner(
                     .with_code(import_codes::CANCELLED),
                 );
             }
+            report.assignments = plan.report();
             sync_event_counts(ev.as_deref_mut(), &report);
             return Ok(report);
         }
@@ -222,6 +235,19 @@ pub(crate) async fn save_draft_inner(
             {
                 if !matches!(entry_choice, EntryChoice::IntentionalDuplicate) {
                     index.by_citekey.insert(entry_key.clone(), id);
+                    if let Err(error) = plan.attach(state, id).await {
+                        if record_entry_error(
+                            &mut report,
+                            entry_key,
+                            error,
+                            &entry_keys[entry_pos + 1..],
+                        )? {
+                            report.assignments = plan.report();
+                            sync_event_counts(ev.as_deref_mut(), &report);
+                            return Ok(report);
+                        }
+                        continue;
+                    }
                     report.reused.push(ImportedEntry {
                         entry_key: entry_key.clone(),
                         resource_id: id,
@@ -238,6 +264,19 @@ pub(crate) async fn save_draft_inner(
                 match revalidate_reuse(state, *resource_id).await {
                     Ok(()) => {
                         index.by_citekey.insert(entry_key.clone(), *resource_id);
+                        if let Err(error) = plan.attach(state, *resource_id).await {
+                            if record_entry_error(
+                                &mut report,
+                                entry_key,
+                                error,
+                                &entry_keys[entry_pos + 1..],
+                            )? {
+                                report.assignments = plan.report();
+                                sync_event_counts(ev.as_deref_mut(), &report);
+                                return Ok(report);
+                            }
+                            continue;
+                        }
                         report.reused.push(ImportedEntry {
                             entry_key,
                             resource_id: *resource_id,
@@ -268,6 +307,19 @@ pub(crate) async fn save_draft_inner(
             match decision {
                 ContainerDecision::Reuse(id) => {
                     index.by_citekey.insert(entry_key.clone(), id);
+                    if let Err(error) = plan.attach(state, id).await {
+                        if record_entry_error(
+                            &mut report,
+                            entry_key,
+                            error,
+                            &entry_keys[entry_pos + 1..],
+                        )? {
+                            report.assignments = plan.report();
+                            sync_event_counts(ev.as_deref_mut(), &report);
+                            return Ok(report);
+                        }
+                        continue;
+                    }
                     report.reused.push(ImportedEntry {
                         entry_key: entry_key.clone(),
                         resource_id: id,
@@ -299,6 +351,10 @@ pub(crate) async fn save_draft_inner(
             if new.metadata.citekey.is_none() {
                 new.metadata.citekey = Some(entry_key.clone());
             }
+            if !plan.is_empty() {
+                plan.materialize(state).await?;
+                plan.apply_to_new(&mut new);
+            }
 
             let mut new_series = None;
             let mut planned_series_title = None;
@@ -323,7 +379,7 @@ pub(crate) async fn save_draft_inner(
             }
 
             let parent_plan = plan_parent_for_entry(&entry, &mut index)?;
-            for conflict in parent_plan.conflicts {
+            if let Some(conflict) = parent_plan.conflicts.into_iter().next() {
                 return Ok(EntrySave::Conflicted(conflict));
             }
             new.parent_id = parent_plan.parent_id;
@@ -407,51 +463,72 @@ pub(crate) async fn save_draft_inner(
             Ok(EntrySave::Conflicted(issue)) => {
                 report.conflicted.push(issue);
             }
-            Err(CommandError::Invalid(message)) => {
-                let code = if message.starts_with("ambiguous creator") {
-                    Some(import_codes::AMBIGUOUS_CREATOR.to_owned())
-                } else if message.starts_with("stale preview") {
-                    Some(import_codes::STALE_PREVIEW.to_owned())
-                } else {
-                    Some(import_codes::ENTRY_SKIPPED.to_owned())
-                };
-                let is_stale = code.as_deref() == Some(import_codes::STALE_PREVIEW);
-                let is_ambiguous = code.as_deref() == Some(import_codes::AMBIGUOUS_CREATOR);
-                let issue = ImportIssue {
-                    entry_key: Some(entry_key),
-                    code,
-                    message,
-                };
-                if is_stale || is_ambiguous {
-                    report.conflicted.push(issue);
-                } else {
-                    report.skipped.push(issue);
+            Err(error) => {
+                if record_entry_error(&mut report, entry_key, error, &entry_keys[entry_pos + 1..])?
+                {
+                    report.assignments = plan.report();
+                    sync_event_counts(ev.as_deref_mut(), &report);
+                    return Ok(report);
                 }
             }
-            Err(CommandError::Store(err)) => {
-                // Truthful partial report: keep prior commits; mark this failed
-                // and remaining entries not-attempted.
-                report.failed.push(
-                    ImportIssue::new(Some(entry_key), err.to_string())
-                        .with_code(import_codes::ENTRY_FAILED),
-                );
-                for key in entry_keys.iter().skip(entry_pos + 1) {
-                    report.not_attempted.push(
-                        ImportIssue::new(
-                            Some(key.clone()),
-                            "not attempted because an earlier storage operation failed",
-                        )
-                        .with_code(import_codes::ENTRY_NOT_ATTEMPTED),
-                    );
-                }
-                sync_event_counts(ev.as_deref_mut(), &report);
-                return Ok(report);
-            }
-            Err(error) => return Err(error),
         }
         sync_event_counts(ev.as_deref_mut(), &report);
     }
+    report.assignments = plan.report();
     Ok(report)
+}
+
+/// Record a per-entry failure. Returns `true` when the save must stop (a
+/// storage failure); remaining entries are then marked not-attempted.
+fn record_entry_error(
+    report: &mut ImportReport,
+    entry_key: String,
+    error: CommandError,
+    remaining: &[String],
+) -> Result<bool, CommandError> {
+    match error {
+        CommandError::Invalid(message) => {
+            let code = if message.starts_with("ambiguous creator") {
+                Some(import_codes::AMBIGUOUS_CREATOR.to_owned())
+            } else if message.starts_with("stale preview") {
+                Some(import_codes::STALE_PREVIEW.to_owned())
+            } else {
+                Some(import_codes::ENTRY_SKIPPED.to_owned())
+            };
+            let is_stale = code.as_deref() == Some(import_codes::STALE_PREVIEW);
+            let is_ambiguous = code.as_deref() == Some(import_codes::AMBIGUOUS_CREATOR);
+            let issue = ImportIssue {
+                entry_key: Some(entry_key),
+                code,
+                message,
+            };
+            if is_stale || is_ambiguous {
+                report.conflicted.push(issue);
+            } else {
+                report.skipped.push(issue);
+            }
+            Ok(false)
+        }
+        CommandError::Store(err) => {
+            // Truthful partial report: keep prior commits; mark this failed
+            // and remaining entries not-attempted.
+            report.failed.push(
+                ImportIssue::new(Some(entry_key), err.to_string())
+                    .with_code(import_codes::ENTRY_FAILED),
+            );
+            for key in remaining {
+                report.not_attempted.push(
+                    ImportIssue::new(
+                        Some(key.clone()),
+                        "not attempted because an earlier storage operation failed",
+                    )
+                    .with_code(import_codes::ENTRY_NOT_ATTEMPTED),
+                );
+            }
+            Ok(true)
+        }
+        error => Err(error),
+    }
 }
 
 fn sync_event_counts(ev: Option<&mut Event>, report: &ImportReport) {

@@ -1,6 +1,10 @@
+mod collection;
+mod config;
+mod import;
 mod name;
 mod person;
 mod resource;
+mod tag;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -10,8 +14,12 @@ use clap::{Parser, Subcommand};
 use oeuvre_adapter_surreal::SurrealStore;
 use oeuvre_app::{AppState, CommandError, ErrorKind, Surface};
 
+use crate::collection::CollectionCmd;
+use crate::config::ConfigCmd;
+use crate::import::ImportArgs;
 use crate::person::PersonCmd;
 use crate::resource::ResourceCmd;
+use crate::tag::TagCmd;
 
 #[derive(Debug, Parser)]
 #[command(name = "ovr", version, about = "Oeuvre citation manager")]
@@ -30,10 +38,19 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Manage collections in the library.
+    Collection(CollectionCmd),
+    /// Manage classification settings shared with the desktop app.
+    Config(ConfigCmd),
+    /// Import a BibLaTeX or CSL-JSON bibliography, optionally adding every
+    /// entry to collections and tags.
+    Import(ImportArgs),
     /// Manage people in the library.
     Person(PersonCmd),
     /// Manage resources in the library.
     Resource(ResourceCmd),
+    /// Manage tags in the library.
+    Tag(TagCmd),
 }
 
 #[tokio::main]
@@ -53,11 +70,21 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Commands::Config(_)) {
+        let Commands::Config(cmd) = cli.command else {
+            unreachable!()
+        };
+        return config::run(cmd);
+    }
     let state = open_state(&cli).await?;
 
     match cli.command {
+        Commands::Config(_) => unreachable!("handled before opening the library"),
+        Commands::Collection(cmd) => collection::run(&state, cmd).await?,
+        Commands::Import(args) => import::run(&state, args).await?,
         Commands::Person(cmd) => person::run(&state, cmd).await?,
         Commands::Resource(cmd) => resource::run(&state, cmd).await?,
+        Commands::Tag(cmd) => tag::run(&state, cmd).await?,
     }
     Ok(())
 }
@@ -139,5 +166,36 @@ mod tests {
         };
         assert_eq!(args.id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
         assert_eq!(args.title.as_deref(), Some("Retitled"));
+    }
+
+    #[test]
+    fn parses_import_with_repeatable_assignment_flags() {
+        let cli = Cli::try_parse_from([
+            "ovr",
+            "import",
+            "references.json",
+            "--format",
+            "csl-json",
+            "--collection",
+            "Research",
+            "--collection-id",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--tag",
+            "review",
+            "--tag",
+            "2026",
+            "--tag-id",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        ])
+        .expect("valid args");
+        let Commands::Import(args) = cli.command else {
+            panic!("expected import");
+        };
+        assert_eq!(args.path, PathBuf::from("references.json"));
+        assert_eq!(args.format, Some(crate::import::ImportFormatArg::CslJson));
+        assert_eq!(args.collections, vec!["Research"]);
+        assert_eq!(args.collection_ids.len(), 1);
+        assert_eq!(args.tags, vec!["review", "2026"]);
+        assert_eq!(args.tag_ids.len(), 1);
     }
 }
