@@ -5,12 +5,16 @@
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use oeuvre_core::{Collection, CollectionId, parse_keywords};
 
 use crate::db::DbWorker;
+
+/// Saves faster than this finish without a status label, which would only
+/// blink in and out.
+const SAVING_LABEL_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// A row was saved; the library refreshes its collections from the store.
 pub struct ClassificationRulesSaved;
@@ -20,6 +24,9 @@ struct RuleRow {
     collection: Collection,
     keywords: Entity<InputState>,
     saving: bool,
+    /// Distinguishes saves so a stale label timer cannot reveal a later one.
+    save_seq: u64,
+    show_saving: bool,
     error: Option<String>,
     _subscription: Subscription,
 }
@@ -105,6 +112,8 @@ impl ClassificationRules {
             collection,
             keywords,
             saving: false,
+            save_seq: 0,
+            show_saving: false,
             error: None,
             _subscription: subscription,
         }
@@ -170,6 +179,22 @@ impl ClassificationRules {
             return;
         };
         row.saving = true;
+        row.save_seq += 1;
+        let seq = row.save_seq;
+        cx.spawn_in(window, async move |this, window| {
+            window.background_executor().timer(SAVING_LABEL_DELAY).await;
+            _ = this.update(window, |this, cx| {
+                if let Some(row) = this
+                    .rows
+                    .iter_mut()
+                    .find(|row| row.collection.id == id && row.saving && row.save_seq == seq)
+                {
+                    row.show_saving = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         // A checkbox save leaves the draft untouched, so a validation error
         // for that draft must survive; only a stale save failure is obsolete.
         row.error = if rewrite_field {
@@ -187,10 +212,13 @@ impl ClassificationRules {
                     return;
                 };
                 row.saving = false;
+                row.show_saving = false;
                 match result {
                     Ok(collection) => {
-                        if rewrite_field {
-                            let text = collection.keywords.join(", ");
+                        let text = collection.keywords.join(", ");
+                        // set_value moves the caret and scroll, so skip it when
+                        // the saved form already matches what is on screen.
+                        if rewrite_field && row.keywords.read(cx).value().as_ref() != text {
                             row.keywords
                                 .update(cx, |state, cx| state.set_value(text, window, cx));
                         }
@@ -299,18 +327,38 @@ impl Render for ClassificationRules {
                             .child(
                                 h_flex()
                                     .gap_3()
-                                    .child(div().w(px(NAME_WIDTH)).truncate().child(name.clone()))
+                                    .child(
+                                        h_flex()
+                                            .w(px(NAME_WIDTH))
+                                            .gap_2()
+                                            .child(div().min_w_0().truncate().child(name.clone()))
+                                            // Inline so a save never changes the row height.
+                                            .when(row.show_saving, |el| {
+                                                el.child(
+                                                    div()
+                                                        .id(("rule-saving", ix))
+                                                        .test_support()
+                                                        .flex_shrink_0()
+                                                        .text_sm()
+                                                        .text_color(muted)
+                                                        .child("Saving…"),
+                                                )
+                                            }),
+                                    )
                                     .child(
                                         div()
                                             .flex_1()
                                             .min_w_0()
-                                            .child(Input::new(&row.keywords).disabled(row.saving)),
+                                            // Read-only keeps focus and colors steady; disabling
+                                            // the field made it flash on every save.
+                                            .child(Input::new(&row.keywords).readonly(row.saving)),
                                     )
                                     .child(
                                         div().w(px(INCLUDE_WIDTH)).child(
+                                            // Not disabled while saving, to avoid the dimming
+                                            // flash; `set_included` ignores clicks mid-save.
                                             Checkbox::new(("rule-auto", ix))
                                                 .checked(row.collection.jev_enabled)
-                                                .disabled(row.saving)
                                                 .accessibility_label(format!(
                                                     "Include {name} in auto-classify"
                                                 ))
@@ -322,9 +370,6 @@ impl Render for ClassificationRules {
                                         ),
                                     ),
                             )
-                            .when(row.saving, |el| {
-                                el.child(div().text_sm().text_color(muted).child("Saving…"))
-                            })
                             .when_some(row.error.clone(), |el, error| {
                                 el.child(
                                     div()
@@ -354,6 +399,96 @@ mod tests {
             worker.list_page_blocking(None, 1).unwrap();
         }
         cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn saving_keeps_rule_rows_and_keyword_focus_steady(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let collections = rt.block_on(async {
+            let mut collections = Vec::new();
+            for name in ["Networks", "Other"] {
+                collections.push(
+                    worker
+                        .create_collection(NonEmptyStr::try_new(name).unwrap(), None)
+                        .await
+                        .unwrap(),
+                );
+            }
+            collections
+        });
+        let (handle, rules) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                cx.new(|cx| ClassificationRules::new(worker.clone(), collections, window, cx))
+            })
+            .unwrap()
+        });
+        let (input, before) = cx
+            .update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                let input = rules.read(cx).rows[0].keywords.clone();
+                input.focus_handle(cx).focus(window, cx);
+                window.input("networks", cx);
+                // A caret away from the end shows whether the save resets the field.
+                window.press("home", cx);
+                let before = [0usize, 1].map(|ix| window.find(("rule-row", ix)).bounds());
+                window.press("enter", cx);
+                (input, before)
+            })
+            .unwrap();
+        // The Enter subscription runs once the previous update flushes; the
+        // async write stays pending until the executor is parked.
+        let before = cx
+            .update_window(handle.into(), |_, window, cx| {
+                let input = input.clone();
+                assert!(rules.read(cx).rows[0].saving);
+                window.render_frame(cx);
+                assert_eq!(
+                    [0usize, 1].map(|ix| window.find(("rule-row", ix)).bounds()),
+                    before,
+                    "saving must not insert a line and shift the collection rows"
+                );
+                assert_ne!(
+                    window.find(("input", input.entity_id())).disabled(),
+                    Some(true)
+                );
+                assert!(
+                    window.try_find(("rule-saving", 0usize)).is_none(),
+                    "a fast save must not blink a status label"
+                );
+                assert!(input.focus_handle(cx).is_focused(window));
+                window.input(" ignored", cx);
+                assert_eq!(input.read(cx).value().as_ref(), "networks");
+                before
+            })
+            .unwrap();
+        settle(cx, &worker);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                [0usize, 1].map(|ix| window.find(("rule-row", ix)).bounds()),
+                before
+            );
+            let row = &rules.read(cx).rows[0];
+            assert!(!row.saving);
+            assert!(row.error.is_none());
+            assert_eq!(row.collection.keywords, vec!["networks"]);
+            let input = row.keywords.clone();
+            assert!(input.focus_handle(cx).is_focused(window));
+            window.input("x", cx);
+            assert_eq!(
+                input.read(cx).value().as_ref(),
+                "xnetworks",
+                "an unchanged value must keep the caret where the user left it"
+            );
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
