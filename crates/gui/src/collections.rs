@@ -5,7 +5,7 @@ use gpui_kit::component::searchable_list::{SearchableListDelegate, SearchableLis
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, h_flex};
 use gpui_kit::*;
 
-use oeuvre_core::{Collection, CollectionId, CollectionTreeNode};
+use ibex_core::{Collection, CollectionId, CollectionTreeNode};
 
 /// Flatten the forest into rows for the picker (name only, no nesting UI).
 pub fn flatten_collections(forest: &[CollectionTreeNode]) -> Vec<Collection> {
@@ -176,7 +176,7 @@ mod tests {
     use gpui_kit::component::searchable_list::{
         SearchableListDelegate as _, SearchableListItem as _,
     };
-    use oeuvre_core::{Collection, CollectionId, NonEmptyStr};
+    use ibex_core::{Collection, CollectionId, NonEmptyStr};
 
     fn collection(name: &str) -> Collection {
         Collection::try_new(

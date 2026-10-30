@@ -3,7 +3,7 @@
 //! Parsing lives in [`crate::import`]; persistence in [`crate::import::save_draft`].
 //! Preview and choice-aware save are available for review flows (Task 06+).
 
-use oeuvre_core::{ImportChoices, ImportPreview, ImportReport};
+use ibex_core::{ImportChoices, ImportPreview, ImportReport};
 
 use crate::event::Event;
 use crate::import::{
@@ -12,7 +12,7 @@ use crate::import::{
 };
 use crate::{AppState, CommandError, Handler, Outcome};
 
-pub use oeuvre_core::{ImportIssue, ImportedEntry};
+pub use ibex_core::{ImportIssue, ImportedEntry};
 
 #[derive(Debug, Clone)]
 pub struct ImportBiblatex {
@@ -138,7 +138,7 @@ impl Handler for PreviewBiblatex {
 /// Save an already-parsed draft with review choices (shared by formats).
 #[derive(Debug, Clone)]
 pub struct SaveImportDraft {
-    pub draft: oeuvre_core::ImportDraft,
+    pub draft: ibex_core::ImportDraft,
     pub choices: ImportChoices,
 }
 

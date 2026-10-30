@@ -1,4 +1,4 @@
-use oeuvre_core::{
+use ibex_core::{
     Collection, CollectionId, CollectionTreeNode, CollectionUpdate, NonEmptyStr, StoreError,
     normalize_keywords,
 };

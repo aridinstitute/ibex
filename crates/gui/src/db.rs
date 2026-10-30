@@ -1,29 +1,29 @@
 //! Store access for the UI: one OS thread owns a tokio runtime and serves
 //! page requests over channels, so gpui's executor never runs Surreal I/O.
 
-use oeuvre_app::command::ListResourceGridPage;
+use ibex_app::command::ListResourceGridPage;
 #[cfg(test)]
-use oeuvre_app::command::ListResourcesPage;
-use oeuvre_app::command::{
+use ibex_app::command::ListResourcesPage;
+use ibex_app::command::{
     AddCollectionParent, CountResources, CreateCollection, CreatePerson, CreateResource, CreateTag,
     DeleteCollection, FindTagByText, GetResource, GetResourceDetail, ListCollectionForest,
     ListPersons, ListResources, ListResourcesQueryPage, ListTags, RemoveCollectionParent,
     RenameCollection, SetCollectionClassification, SetResourceFavorite, UpdateResource,
 };
-use oeuvre_app::command::{ImportBiblatex, ImportReport, PreviewBiblatex};
-use oeuvre_app::{AppState, Command, Outcome};
+use ibex_app::command::{ImportBiblatex, ImportReport, PreviewBiblatex};
+use ibex_app::{AppState, Command, Outcome};
 #[cfg(test)]
-use oeuvre_core::ResourcePage;
-use oeuvre_core::{
+use ibex_core::ResourcePage;
+use ibex_core::{
     Collection, CollectionId, CollectionTreeNode, CreatorRole, ImportChoices, ImportPreview, Name,
     NewResource, NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId,
     ResourceQuery, SortedResourcePage, Tag,
 };
-use oeuvre_core::{ResourceGridPage, ResourceGridParent};
+use ibex_core::{ResourceGridPage, ResourceGridParent};
 use std::{io::Read as _, path::PathBuf};
 use tokio::sync::oneshot;
 
-use oeuvre_app::metadata::{link_creators, link_journal};
+use ibex_app::metadata::{link_creators, link_journal};
 /// File contents plus preview for the GUI review step.
 #[derive(Debug, Clone)]
 pub struct BiblatexImportPlan {
@@ -190,7 +190,7 @@ impl DbWorker {
     pub fn spawn(state: AppState) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<DbRequest>();
         std::thread::Builder::new()
-            .name("oeuvre-db".into())
+            .name("ibex-db".into())
             // SurrealDB update evaluation plus this worker's request future can
             // exceed the OS default stack in debug builds (even for one record).
             .stack_size(8 * 1024 * 1024)
@@ -399,7 +399,7 @@ impl DbWorker {
                                 reply,
                             } => {
                                 let result =
-                                    oeuvre_app::metadata::fetch(&state, &identifier, target).await;
+                                    ibex_app::metadata::fetch(&state, &identifier, target).await;
                                 let _ = reply.send(result);
                             }
                             DbRequest::ListPersons { reply } => {
@@ -1013,15 +1013,15 @@ fn read_bibliography_file(path: &PathBuf) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oeuvre_app::Surface;
-    use oeuvre_app::testing::MemoryStore;
-    use oeuvre_core::published_label_from;
+    use ibex_app::Surface;
+    use ibex_app::testing::MemoryStore;
+    use ibex_core::published_label_from;
 
     // Use the real adapter: MemoryStore does not exercise SurrealDB's stack usage.
     #[tokio::test]
     async fn worker_toggles_favorite_with_surreal_store() {
-        use oeuvre_adapter_surreal::SurrealStore;
-        use oeuvre_core::{ResourceKind, Store};
+        use ibex_adapter_surreal::SurrealStore;
+        use ibex_core::{ResourceKind, Store};
 
         let store = SurrealStore::open_memory().await.unwrap();
         let created = store
@@ -1051,7 +1051,7 @@ mod tests {
 
     #[tokio::test]
     async fn doi_editors_are_linked_with_distinct_role() {
-        use oeuvre_core::ResourceKind;
+        use ibex_core::ResourceKind;
         let state = AppState::builder(MemoryStore::new())
             .surface(Surface::Test)
             .build();
@@ -1080,7 +1080,7 @@ mod tests {
 
     #[tokio::test]
     async fn doi_article_creates_and_reuses_journal_parent() {
-        use oeuvre_core::{Identifier, ResourceKind};
+        use ibex_core::{Identifier, ResourceKind};
         let state = AppState::builder(MemoryStore::new())
             .surface(Surface::Test)
             .build();
@@ -1130,7 +1130,7 @@ mod tests {
 
     #[tokio::test]
     async fn doi_journal_matching_rejects_ambiguous_title_and_preserves_existing_parent() {
-        use oeuvre_core::ResourceKind;
+        use ibex_core::ResourceKind;
         let state = AppState::builder(MemoryStore::new())
             .surface(Surface::Test)
             .build();
@@ -1168,7 +1168,7 @@ mod tests {
 
     #[tokio::test]
     async fn doi_journal_reuses_unique_title_and_enriches_missing_issn() {
-        use oeuvre_core::{Identifier, ResourceKind};
+        use ibex_core::{Identifier, ResourceKind};
         let state = AppState::builder(MemoryStore::new())
             .surface(Surface::Test)
             .build();
@@ -1215,8 +1215,8 @@ mod tests {
             .build();
         let worker = DbWorker::spawn(state);
         let book = NewResource {
-            kind: oeuvre_core::ResourceKind::Book,
-            title: oeuvre_core::NonEmptyStr::try_new("Grid book").expect("title non-empty"),
+            kind: ibex_core::ResourceKind::Book,
+            title: ibex_core::NonEmptyStr::try_new("Grid book").expect("title non-empty"),
             creators: vec![],
             publisher: None,
             published: None,
@@ -1255,7 +1255,7 @@ mod tests {
             keywords: vec![],
         };
         let chapter = NewResource {
-            kind: oeuvre_core::ResourceKind::BookSection,
+            kind: ibex_core::ResourceKind::BookSection,
             title: NonEmptyStr::try_new("Grid chapter").unwrap(),
             ..book.clone()
         };
@@ -1270,7 +1270,7 @@ mod tests {
 
         let roots = worker
             .list_grid_page(
-                oeuvre_core::ResourceGridParent::Roots,
+                ibex_core::ResourceGridParent::Roots,
                 ResourceQuery::newest_first(),
                 0,
                 10,
@@ -1285,7 +1285,7 @@ mod tests {
 
         let children = std::thread::spawn(move || {
             worker.list_grid_page_blocking(
-                oeuvre_core::ResourceGridParent::Children(book.id),
+                ibex_core::ResourceGridParent::Children(book.id),
                 ResourceQuery::newest_first(),
                 0,
                 10,
@@ -1356,9 +1356,7 @@ mod tests {
     #[tokio::test]
     async fn worker_walks_pages() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5)
-            .await
-            .unwrap();
+        ibex_app::seed::seed_demo_library(&store, 5).await.unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -1384,9 +1382,7 @@ mod tests {
     #[tokio::test]
     async fn worker_counts_the_full_library_not_just_the_first_page() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5)
-            .await
-            .unwrap();
+        ibex_app::seed::seed_demo_library(&store, 5).await.unwrap();
         let worker = DbWorker::spawn(AppState::builder(store).surface(Surface::Test).build());
         assert_eq!(worker.list_page(None, 3).await.unwrap().rows.len(), 3);
         let counts = worker.resource_counts().await.unwrap();
@@ -1397,9 +1393,7 @@ mod tests {
     #[tokio::test]
     async fn worker_fetches_resource_detail() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5)
-            .await
-            .unwrap();
+        ibex_app::seed::seed_demo_library(&store, 5).await.unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -1426,22 +1420,20 @@ mod tests {
     #[tokio::test]
     async fn worker_walks_query_pages() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5)
-            .await
-            .unwrap();
+        ibex_app::seed::seed_demo_library(&store, 5).await.unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
         // 5 demo rows plus 3 containers: pages of 3 must tile 8 exactly,
         // and the database query must hand back title order across pages.
         let mut offset = 0u64;
-        let mut walked: Vec<oeuvre_core::ResourceSummary> = Vec::new();
+        let mut walked: Vec<ibex_core::ResourceSummary> = Vec::new();
         loop {
             let page = worker
                 .list_query_page(
-                    oeuvre_core::ResourceQuery::sorted(
-                        oeuvre_core::ResourceSort::Title,
-                        oeuvre_core::SortDirection::Ascending,
+                    ibex_core::ResourceQuery::sorted(
+                        ibex_core::ResourceSort::Title,
+                        ibex_core::SortDirection::Ascending,
                     ),
                     offset,
                     3,
@@ -1473,20 +1465,18 @@ mod tests {
     #[tokio::test]
     async fn worker_filters_query_pages_by_title() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5)
-            .await
-            .unwrap();
+        ibex_app::seed::seed_demo_library(&store, 5).await.unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
         // A mixed-case substring must match inside the title, not just its prefix.
         let page = worker
             .list_query_page(
-                oeuvre_core::ResourceQuery {
+                ibex_core::ResourceQuery {
                     sort: None,
-                    filter: oeuvre_core::ResourceFilter {
+                    filter: ibex_core::ResourceFilter {
                         search: None,
-                        title: Some(oeuvre_core::NonEmptyStr::try_new("nEtWoR").unwrap()),
+                        title: Some(ibex_core::NonEmptyStr::try_new("nEtWoR").unwrap()),
                         creator: None,
                         published: None,
                         kind: None,
@@ -1508,9 +1498,7 @@ mod tests {
     #[tokio::test]
     async fn worker_filters_query_pages_by_kind() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5)
-            .await
-            .unwrap();
+        ibex_app::seed::seed_demo_library(&store, 5).await.unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -1519,11 +1507,9 @@ mod tests {
         // narrowing — returns only the parentable kind.
         let page = worker
             .list_query_page(
-                oeuvre_core::ResourceQuery {
+                ibex_core::ResourceQuery {
                     sort: None,
-                    filter: oeuvre_core::ResourceFilter::by_kind(
-                        oeuvre_core::ResourceKind::Journal,
-                    ),
+                    filter: ibex_core::ResourceFilter::by_kind(ibex_core::ResourceKind::Journal),
                 },
                 0,
                 10,
@@ -1532,16 +1518,14 @@ mod tests {
             .unwrap();
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.rows[0].title.as_str(), "Journal of Citation Studies");
-        assert_eq!(page.rows[0].kind, oeuvre_core::ResourceKind::Journal);
+        assert_eq!(page.rows[0].kind, ibex_core::ResourceKind::Journal);
         assert_eq!(page.next_offset, None);
     }
 
     #[tokio::test]
     async fn worker_filters_query_pages_by_creator() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5)
-            .await
-            .unwrap();
+        ibex_app::seed::seed_demo_library(&store, 5).await.unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -1557,9 +1541,9 @@ mod tests {
         // assertion reads as a set.
         let page = worker
             .list_query_page(
-                oeuvre_core::ResourceQuery {
+                ibex_core::ResourceQuery {
                     sort: None,
-                    filter: oeuvre_core::ResourceFilter {
+                    filter: ibex_core::ResourceFilter {
                         search: None,
                         title: None,
                         creator: Some(ada.id),
@@ -1589,9 +1573,7 @@ mod tests {
     #[tokio::test]
     async fn worker_filters_query_pages_by_published_range() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5)
-            .await
-            .unwrap();
+        ibex_app::seed::seed_demo_library(&store, 5).await.unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -1599,15 +1581,15 @@ mod tests {
         // keeps the first two rows; the 1984 companion book stays out.
         let page = worker
             .list_query_page(
-                oeuvre_core::ResourceQuery {
+                ibex_core::ResourceQuery {
                     sort: None,
-                    filter: oeuvre_core::ResourceFilter {
+                    filter: ibex_core::ResourceFilter {
                         search: None,
                         title: None,
                         creator: None,
-                        published: Some(oeuvre_core::PublishedRange {
-                            from: oeuvre_core::UtcMillis::jan_1_utc(1962),
-                            to: oeuvre_core::UtcMillis::jan_1_utc(1964),
+                        published: Some(ibex_core::PublishedRange {
+                            from: ibex_core::UtcMillis::jan_1_utc(1962),
+                            to: ibex_core::UtcMillis::jan_1_utc(1964),
                         }),
                         kind: None,
                         favorite: None,
@@ -1634,9 +1616,7 @@ mod tests {
     #[tokio::test]
     async fn worker_ands_all_three_filters() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5)
-            .await
-            .unwrap();
+        ibex_app::seed::seed_demo_library(&store, 5).await.unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -1651,15 +1631,15 @@ mod tests {
         // the whole cycle. Only their intersection names one.
         let page = worker
             .list_query_page(
-                oeuvre_core::ResourceQuery {
+                ibex_core::ResourceQuery {
                     sort: None,
-                    filter: oeuvre_core::ResourceFilter {
+                    filter: ibex_core::ResourceFilter {
                         search: None,
-                        title: Some(oeuvre_core::NonEmptyStr::try_new("0").unwrap()),
+                        title: Some(ibex_core::NonEmptyStr::try_new("0").unwrap()),
                         creator: Some(ada.id),
-                        published: Some(oeuvre_core::PublishedRange {
-                            from: oeuvre_core::UtcMillis::jan_1_utc(1962),
-                            to: oeuvre_core::UtcMillis::jan_1_utc(1967),
+                        published: Some(ibex_core::PublishedRange {
+                            from: ibex_core::UtcMillis::jan_1_utc(1962),
+                            to: ibex_core::UtcMillis::jan_1_utc(1967),
                         }),
                         kind: None,
                         favorite: None,
@@ -1680,9 +1660,7 @@ mod tests {
     #[tokio::test]
     async fn worker_updates_resource_through_command() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 5)
-            .await
-            .unwrap();
+        ibex_app::seed::seed_demo_library(&store, 5).await.unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
@@ -1694,7 +1672,7 @@ mod tests {
         let record = worker.resource(id).await.unwrap();
         let mut edit = record.to_new();
         edit.title =
-            oeuvre_core::NonEmptyStr::try_new("Retitled by worker").expect("title non-empty");
+            ibex_core::NonEmptyStr::try_new("Retitled by worker").expect("title non-empty");
         let updated = worker.update_resource(id, edit).await.unwrap();
         assert_eq!(updated.title.as_str(), "Retitled by worker");
 
@@ -1720,16 +1698,14 @@ mod tests {
     #[tokio::test]
     async fn worker_creates_resource_through_command() {
         let store = MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 2)
-            .await
-            .unwrap();
+        ibex_app::seed::seed_demo_library(&store, 2).await.unwrap();
         let state = AppState::builder(store).surface(Surface::Test).build();
         let worker = DbWorker::spawn(state);
 
         let created = worker
-            .create_resource(oeuvre_core::NewResource {
-                kind: oeuvre_core::ResourceKind::Book,
-                title: oeuvre_core::NonEmptyStr::try_new("Inline draft book")
+            .create_resource(ibex_core::NewResource {
+                kind: ibex_core::ResourceKind::Book,
+                title: ibex_core::NonEmptyStr::try_new("Inline draft book")
                     .expect("title non-empty"),
                 creators: vec![],
                 publisher: None,

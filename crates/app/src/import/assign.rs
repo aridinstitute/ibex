@@ -5,7 +5,7 @@
 //! that receives them. Exact-name lookup on retry finds those same targets, so
 //! retries never create duplicates.
 
-use oeuvre_core::{
+use ibex_core::{
     AssignedTarget, CollectionId, CollectionTreeNode, ExistingIdOrName, ImportAssignmentReport,
     ImportAssignments, NewResource, NonEmptyStr, ResourceId, TagId,
 };
@@ -63,7 +63,7 @@ fn flatten_forest(nodes: &[CollectionTreeNode], out: &mut Vec<(CollectionId, Str
     }
 }
 
-fn not_found(what: &str, id: impl std::fmt::Display, err: oeuvre_core::StoreError) -> CommandError {
+fn not_found(what: &str, id: impl std::fmt::Display, err: ibex_core::StoreError) -> CommandError {
     if err.is_not_found() {
         CommandError::NotFound(format!("{what} {id}"))
     } else if err.is_invalid() {

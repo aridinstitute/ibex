@@ -1,4 +1,4 @@
-//! Oeuvre application runtime.
+//! Ibex application runtime.
 //!
 //! Closed commands, one `AppState::execute` entry point, and exactly-once wide events.
 
@@ -16,6 +16,6 @@ pub mod testing;
 pub use app::{AppState, AppStateBuilder, Surface};
 pub use command::{Call, Command, CommandError, ErrorKind, Outcome};
 pub use event::{EventSink, ExecutionId, FieldValue, FinishedEvent, JsonLinesSink, Status};
-pub use oeuvre_core::{Store, StoreError, StoreHealth};
+pub use ibex_core::{Store, StoreError, StoreHealth};
 
 pub(crate) use command::Handler;

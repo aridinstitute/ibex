@@ -3,10 +3,10 @@
 //! Store-port tests for `list_resources_query_page`: the order contract a
 //! shell page may rely on, independent of which adapter serves it.
 
-use oeuvre_app::command::{CreatePerson, CreateResource, ListResourcesQueryPage};
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
-use oeuvre_core::{
+use ibex_app::command::{CreatePerson, CreateResource, ListResourcesQueryPage};
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
+use ibex_core::{
     BibliographicDate, CreatorRole, CreatorSpec, Name, NewResource, NonEmptyStr, PersonId,
     PublishedRange, ResourceFilter, ResourceId, ResourceKind, ResourceQuery, ResourceSort,
     SortDirection, Store, UtcMillis,
@@ -291,7 +291,7 @@ fn resource(kind: ResourceKind, author: Option<PersonId>, title: &str) -> NewRes
     }
 }
 
-fn titles(page: &oeuvre_core::SortedResourcePage) -> Vec<String> {
+fn titles(page: &ibex_core::SortedResourcePage) -> Vec<String> {
     page.rows
         .iter()
         .map(|row| row.title.as_str().to_owned())

@@ -16,7 +16,7 @@ fn import_duplicate_policy_is_explicit_and_default_skips() {
     )
     .unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ovr"))
+        Command::new(env!("CARGO_BIN_EXE_ibex"))
             .arg("--data")
             .arg(dir.path())
             .args(args)

@@ -11,7 +11,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use oeuvre_core::{Collection, CollectionId, Resource, ResourceId, Tag, TagId, parse_keywords};
+use ibex_core::{Collection, CollectionId, Resource, ResourceId, Tag, TagId, parse_keywords};
 
 #[derive(Clone, Debug)]
 pub struct SetThemeColor {
@@ -1154,7 +1154,7 @@ mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
     use gpui_kit::{Context, IntoElement, ParentElement as _, Render, Styled, Window, div};
-    use oeuvre_core::{
+    use ibex_core::{
         Collection, CollectionId, NewResource, NonEmptyStr, Resource, ResourceId, ResourceKind,
         Tag, TagId,
     };

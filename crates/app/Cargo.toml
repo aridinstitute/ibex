@@ -1,5 +1,5 @@
 [package]
-name = "oeuvre-app"
+name = "ibex-app"
 description = "Application runtime: AppState, commands, and wide-event logging"
 version.workspace = true
 edition.workspace = true
@@ -11,7 +11,7 @@ repository.workspace = true
 testing = []
 
 [dependencies]
-oeuvre-core = { workspace = true }
+ibex-core = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

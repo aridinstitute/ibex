@@ -4,12 +4,12 @@ use std::process::Command;
 fn add_and_list_tags_and_reject_duplicates() {
     let dir = tempfile::tempdir().expect("temporary library");
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ovr"))
+        Command::new(env!("CARGO_BIN_EXE_ibex"))
             .arg("--data")
             .arg(dir.path())
             .args(args)
             .output()
-            .expect("run ovr")
+            .expect("run ibex")
     };
 
     let created = run(&["tag", "add", "review"]);

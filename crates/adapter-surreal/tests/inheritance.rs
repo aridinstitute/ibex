@@ -1,13 +1,11 @@
 //! Real-adapter coverage for Task 05 read-time inheritance.
 
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::command::{
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::command::{
     CreateResource, GetResource, GetResourceDetail, ListResources, UpdateResource,
 };
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{
-    BibliographicDate, NewResource, NonEmptyStr, ResourceId, ResourceKind, UtcMillis,
-};
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{BibliographicDate, NewResource, NonEmptyStr, ResourceId, ResourceKind, UtcMillis};
 
 fn nes(s: &str) -> NonEmptyStr {
     NonEmptyStr::try_new(s).unwrap()

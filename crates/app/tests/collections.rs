@@ -1,12 +1,12 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{
+use ibex_app::command::{
     AddCollectionParent, CreateCollection, CreateResource, DeleteCollection, GetResource,
     ListCollectionForest, ListResourcesQueryPage, RenameCollection,
 };
-use oeuvre_app::testing::MemoryStore;
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{NewResource, NonEmptyStr, ResourceFilter, ResourceKind, ResourceQuery, Store};
+use ibex_app::testing::MemoryStore;
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{NewResource, NonEmptyStr, ResourceFilter, ResourceKind, ResourceQuery, Store};
 
 #[tokio::test]
 async fn create_root_and_nested_collections_list_as_forest() {

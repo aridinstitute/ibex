@@ -4,7 +4,7 @@ use std::process::Command;
 fn tree_lists_container_and_child_with_indentation() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ovr"))
+        Command::new(env!("CARGO_BIN_EXE_ibex"))
             .arg("--data")
             .arg(dir.path())
             .args(args)

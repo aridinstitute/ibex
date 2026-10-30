@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn save_creates_a_missing_directory_and_round_trips_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        let nested = dir.path().join("oeuvre/settings");
+        let nested = dir.path().join("ibex/settings");
         Settings::default().save(&nested).unwrap();
         assert!(nested.join(CONFIG_FILE).is_file());
         assert_eq!(Settings::load(&nested), Settings::default());

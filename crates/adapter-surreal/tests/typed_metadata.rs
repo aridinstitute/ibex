@@ -1,9 +1,9 @@
 //! Task 03: typed dates, pages, names, and provenance through SurrealDB.
 
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::command::{GetResource, ImportBiblatex, ListPersons};
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::command::{GetResource, ImportBiblatex, ListPersons};
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{
     BibliographicDate, DatePrecision, Identifier, Name, NewResource, NonEmptyStr, Pages,
     ResourceKind, Store, UtcMillis,
 };
@@ -107,7 +107,7 @@ async fn dates_pages_names_and_provenance_round_trip_through_real_adapter() {
             .unwrap()
             .resource_id
     };
-    async fn pages_of(state: &AppState, id: oeuvre_core::ResourceId) -> Pages {
+    async fn pages_of(state: &AppState, id: ibex_core::ResourceId) -> Pages {
         let Outcome::GetResource(r) = state
             .execute(Command::GetResource(GetResource { id }))
             .await
@@ -188,7 +188,7 @@ async fn create_resource_round_trips_typed_pages_and_dates() {
         UtcMillis::jan_1_utc(2025).unwrap(),
         None,
         DatePrecision::Day,
-        oeuvre_core::DateCertainty::Exact,
+        ibex_core::DateCertainty::Exact,
         Some(NonEmptyStr::try_new("2025-01-01").unwrap()),
     )
     .unwrap();
@@ -203,7 +203,7 @@ async fn create_resource_round_trips_typed_pages_and_dates() {
                 UtcMillis::jan_1_utc(2020).unwrap(),
                 None,
                 DatePrecision::Year,
-                oeuvre_core::DateCertainty::Exact,
+                ibex_core::DateCertainty::Exact,
                 Some(NonEmptyStr::try_new("2020").unwrap()),
             )
             .unwrap(),

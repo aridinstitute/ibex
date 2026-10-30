@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use oeuvre_core::{
+use ibex_core::{
     CreatorRole, CreatorSpec, EntryChoice, ImportChoices, ImportDraft, ImportEntryDraft,
     ImportIssue, ImportProgress, ImportReport, ImportedEntry, ImportedResourceWrite, Name, NameKey,
     NewSeries, NonEmptyStr, Person, PersonChoice, PersonId, Resource, ResourceId, ResourceKind,
@@ -150,8 +150,8 @@ pub(crate) async fn save_draft_inner(
             message: diagnostic.message,
         };
         match diagnostic.severity {
-            oeuvre_core::DiagnosticSeverity::Error => report.skipped.push(issue),
-            oeuvre_core::DiagnosticSeverity::Warning | oeuvre_core::DiagnosticSeverity::Info => {
+            ibex_core::DiagnosticSeverity::Error => report.skipped.push(issue),
+            ibex_core::DiagnosticSeverity::Warning | ibex_core::DiagnosticSeverity::Info => {
                 report.warnings.push(issue);
             }
         }
@@ -564,7 +564,7 @@ async fn revalidate_reuse(state: &AppState, resource_id: ResourceId) -> Result<(
 pub(crate) fn seed_index_from_resources(index: &mut ImportEntityIndex, resources: &[Resource]) {
     let rows: Vec<_> = resources
         .iter()
-        .map(|r| oeuvre_core::ResourceSummary {
+        .map(|r| ibex_core::ResourceSummary {
             id: r.id,
             kind: r.kind,
             title: r.title.clone(),

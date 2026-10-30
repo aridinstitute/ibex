@@ -1,9 +1,9 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::metadata::{empty_resource, fetch_at};
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, FieldValue, Surface};
-use oeuvre_core::{Identifier, ResourceKind, Store};
+use ibex_app::metadata::{empty_resource, fetch_at};
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, FieldValue, Surface};
+use ibex_core::{Identifier, ResourceKind, Store};
 use std::io::{Read, Write};
 
 fn serve(body: &'static str) -> (String, std::thread::JoinHandle<()>) {

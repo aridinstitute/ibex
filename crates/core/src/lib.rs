@@ -1,6 +1,6 @@
-//! Oeuvre core domain library.
+//! Ibex core domain library.
 //!
-//! Ports and shared domain types. Application runtime lives in `oeuvre-app`.
+//! Ports and shared domain types. Application runtime lives in `ibex-app`.
 
 mod classify;
 mod collection;

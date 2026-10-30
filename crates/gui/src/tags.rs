@@ -5,7 +5,7 @@ use gpui_kit::component::searchable_list::{SearchableListDelegate, SearchableLis
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, h_flex};
 use gpui_kit::*;
 
-use oeuvre_core::{Tag, TagId};
+use ibex_core::{Tag, TagId};
 
 /// What a picked row stands for: a stored tag, or a new one to create
 /// from the typed name.
@@ -154,7 +154,7 @@ mod tests {
     use gpui_kit::component::searchable_list::{
         SearchableListDelegate as _, SearchableListItem as _,
     };
-    use oeuvre_core::{NonEmptyStr, Tag, TagId};
+    use ibex_core::{NonEmptyStr, Tag, TagId};
 
     fn tag(text: &str) -> Tag {
         Tag::try_new(TagId::generate(), NonEmptyStr::try_new(text).unwrap())

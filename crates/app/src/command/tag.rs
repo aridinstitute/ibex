@@ -1,4 +1,4 @@
-use oeuvre_core::{NonEmptyStr, StoreError, Tag, TagId};
+use ibex_core::{NonEmptyStr, StoreError, Tag, TagId};
 
 use crate::event::{self, Event};
 use crate::{AppState, CommandError, Handler, Outcome};

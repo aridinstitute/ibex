@@ -10,9 +10,9 @@
 //! - **xdata** is never a publication parent.
 //!
 //! Inferred containers are real resources (appear in listings) but are not
-//! counted as source-entry imports in [`oeuvre_core::ImportReport::imported`].
+//! counted as source-entry imports in [`ibex_core::ImportReport::imported`].
 
-use oeuvre_core::{
+use ibex_core::{
     Identifier, ImportEntryDraft, ImportIssue, NewResource, NonEmptyStr, Resource, ResourceId,
     ResourceKind, ResourceSummary, import_codes,
 };

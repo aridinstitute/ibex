@@ -4,7 +4,7 @@ use std::process::Command;
 fn update_adds_and_removes_memberships_without_replacing_other_fields() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ovr"))
+        Command::new(env!("CARGO_BIN_EXE_ibex"))
             .arg("--data")
             .arg(dir.path())
             .args(args)

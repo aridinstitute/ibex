@@ -5,7 +5,7 @@
 //! The same count produces the same library. Call once per fresh store;
 //! seeding is not idempotent.
 
-use oeuvre_core::{
+use ibex_core::{
     BibliographicDate, CreatorRole, CreatorSpec, Name, NewResource, NonEmptyStr, PersonId,
     ResourceKind, Store, StoreError, UtcMillis,
 };
@@ -84,7 +84,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
             doi: None,
             url: None,
             eprint: None,
-            isbns: vec![oeuvre_core::Identifier::from("978-0-306-40615-7")],
+            isbns: vec![ibex_core::Identifier::from("978-0-306-40615-7")],
             issns: vec![],
             isrns: vec![],
             original_date: published(1960),
@@ -181,7 +181,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                     place: None,
                     volume: Some((1 + n / 8).to_string()),
                     issue: Some((1 + n % 4).to_string()),
-                    pages: Some(oeuvre_core::Pages::parse("1–12").unwrap()),
+                    pages: Some(ibex_core::Pages::parse("1–12").unwrap()),
                     total_pages: None,
                     article_number: Some(format!("e{n:04}")),
                     edition: None,
@@ -189,7 +189,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                     url: Some(format!("https://example.org/demo/articles/{n}")),
                     eprint: None,
                     isbns: vec![],
-                    issns: vec![oeuvre_core::Identifier::from("1234-5678")],
+                    issns: vec![ibex_core::Identifier::from("1234-5678")],
                     isrns: vec![],
                     original_date: None,
                     event_date: published(year),
@@ -231,7 +231,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 doi: None,
                 url: None,
                 eprint: None,
-                isbns: vec![oeuvre_core::Identifier::from("978-0-306-40615-7")],
+                isbns: vec![ibex_core::Identifier::from("978-0-306-40615-7")],
                 issns: vec![],
                 isrns: vec![],
                 original_date: published(1960),
@@ -264,7 +264,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 place: None,
                 volume: None,
                 issue: None,
-                pages: Some(oeuvre_core::Pages::parse("25–42").unwrap()),
+                pages: Some(ibex_core::Pages::parse("25–42").unwrap()),
                 total_pages: None,
                 article_number: None,
                 edition: None,
@@ -397,7 +397,7 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
                 eprint: None,
                 isbns: vec![],
                 issns: vec![],
-                isrns: vec![oeuvre_core::Identifier::from(format!("DEMO-REPORT-{n:04}"))],
+                isrns: vec![ibex_core::Identifier::from(format!("DEMO-REPORT-{n:04}"))],
                 original_date: None,
                 event_date: None,
                 language: None,
@@ -577,7 +577,7 @@ fn non_empty(s: &str) -> NonEmptyStr {
 mod tests {
     use super::*;
     use crate::testing::MemoryStore;
-    use oeuvre_core::{NonEmptyStr, ResourceKind};
+    use ibex_core::{NonEmptyStr, ResourceKind};
 
     #[tokio::test]
     async fn demo_library_includes_bibliographic_metadata() {

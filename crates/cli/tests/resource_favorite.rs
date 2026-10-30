@@ -10,7 +10,7 @@ fn update_favorite_without_changing_metadata() {
     )
     .unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ovr"))
+        Command::new(env!("CARGO_BIN_EXE_ibex"))
             .arg("--data")
             .arg(dir.path())
             .args(args)

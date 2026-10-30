@@ -6,8 +6,8 @@ fn config_updates_model_and_secret_without_leaking_or_dropping_theme() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("config.toml");
     std::fs::write(&file, "[theme.light]\naccent = \"#0064FF\"\n").unwrap();
-    let model = Command::new(env!("CARGO_BIN_EXE_ovr"))
-        .env("OEUVRE_CONFIG_DIR", dir.path())
+    let model = Command::new(env!("CARGO_BIN_EXE_ibex"))
+        .env("IBEX_CONFIG_DIR", dir.path())
         .args(["config", "set", "classification-model", "typesafe/jev-1.14"])
         .output()
         .unwrap();
@@ -16,8 +16,8 @@ fn config_updates_model_and_secret_without_leaking_or_dropping_theme() {
         "{}",
         String::from_utf8_lossy(&model.stderr)
     );
-    let mut secret = Command::new(env!("CARGO_BIN_EXE_ovr"))
-        .env("OEUVRE_CONFIG_DIR", dir.path())
+    let mut secret = Command::new(env!("CARGO_BIN_EXE_ibex"))
+        .env("IBEX_CONFIG_DIR", dir.path())
         .args(["config", "set", "openrouter-api-key", "--stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

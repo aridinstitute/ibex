@@ -2,13 +2,13 @@
 
 //! Batch collection/tag assignment through the shared import save path.
 
-use oeuvre_app::command::{
+use ibex_app::command::{
     CreateCollection, CreateTag, GetResource, ImportBiblatex, ListCollectionForest, ListResources,
     ListTags, SetResourceFavorite,
 };
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, CommandError, Outcome, Surface};
-use oeuvre_core::{
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, CommandError, Outcome, Surface};
+use ibex_core::{
     CollectionId, CollectionTreeNode, EntryChoice, ExistingIdOrName, ImportAssignments,
     ImportChoices, ImportReport, NonEmptyStr, Resource, ResourceId, TagId, import_codes,
 };

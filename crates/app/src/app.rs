@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use oeuvre_core::Store;
+use ibex_core::Store;
 use tracing::Instrument;
 
 use crate::command::{self, Call, CommandError, Outcome};

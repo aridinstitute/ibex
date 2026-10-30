@@ -21,15 +21,15 @@
 //!   different titles (publication_duplicate path)
 //!
 //! Run:
-//! `rustup run stable cargo test -p oeuvre-app --features testing --test import_benchmark -- --nocapture`
+//! `rustup run stable cargo test -p ibex-app --features testing --test import_benchmark -- --nocapture`
 
 use std::time::Instant;
 
-use oeuvre_app::command::{ImportBiblatex, ImportCslJson};
-use oeuvre_app::import::{parse_biblatex, parse_csl_json};
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::import_codes;
+use ibex_app::command::{ImportBiblatex, ImportCslJson};
+use ibex_app::import::{parse_biblatex, parse_csl_json};
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::import_codes;
 
 #[derive(Clone, Copy)]
 enum Format {
@@ -164,7 +164,7 @@ fn peak_rss_kb() -> Option<u64> {
     None
 }
 
-async fn import(format: Format, state: &AppState, text: &str) -> oeuvre_core::ImportReport {
+async fn import(format: Format, state: &AppState, text: &str) -> ibex_core::ImportReport {
     match format {
         Format::Biblatex => {
             let Outcome::ImportBiblatex(report) = state

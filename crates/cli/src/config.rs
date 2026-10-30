@@ -35,12 +35,12 @@ enum ConfigSetting {
 }
 
 pub fn config_dir() -> PathBuf {
-    std::env::var_os("OEUVRE_CONFIG_DIR")
+    std::env::var_os("IBEX_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             dirs::data_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
-                .join("oeuvre")
+                .join("ibex")
         })
 }
 

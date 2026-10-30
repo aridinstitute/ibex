@@ -1,5 +1,5 @@
 //! Desktop access to the shared Jev classifier.
-pub use oeuvre_app::jev::{DECISIONS_URL, DEFAULT_JEV_MODEL, JevSuggestions, classify_at};
+pub use ibex_app::jev::{DECISIONS_URL, DEFAULT_JEV_MODEL, JevSuggestions, classify_at};
 
 #[cfg(test)]
 pub(crate) mod tests {

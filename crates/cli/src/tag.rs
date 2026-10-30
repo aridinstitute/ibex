@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
-use oeuvre_app::command::{CreateTag, ListTags};
-use oeuvre_app::{AppState, Command, Outcome};
-use oeuvre_core::NonEmptyStr;
+use ibex_app::command::{CreateTag, ListTags};
+use ibex_app::{AppState, Command, Outcome};
+use ibex_core::NonEmptyStr;
 
 #[derive(Debug, Args)]
 pub struct TagCmd {

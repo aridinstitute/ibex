@@ -1,9 +1,9 @@
 //! Task 07: CSL-JSON import through the real Surreal adapter.
 
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::command::{GetResource, ImportCslJson, ListResources};
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::ResourceKind;
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::command::{GetResource, ImportCslJson, ListResources};
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::ResourceKind;
 
 #[tokio::test]
 async fn csl_json_import_and_retry_through_surreal() {
@@ -33,7 +33,7 @@ async fn csl_json_import_and_retry_through_surreal() {
       }
     ]"#;
 
-    let fingerprint = oeuvre_core::source_fingerprint(oeuvre_core::ImportFormat::CslJson, source);
+    let fingerprint = ibex_core::source_fingerprint(ibex_core::ImportFormat::CslJson, source);
     let Outcome::ImportCslJson(first) = state
         .execute(Command::ImportCslJson(ImportCslJson {
             source_text: source.to_owned(),

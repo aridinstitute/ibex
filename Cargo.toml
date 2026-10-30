@@ -16,10 +16,10 @@ repository = "https://github.com/kaden/oeuvre"
 authors = ["Kaden"]
 
 [workspace.dependencies]
-oeuvre-core = { path = "crates/core" }
-oeuvre-app = { path = "crates/app" }
-oeuvre-adapter-surreal = { path = "crates/adapter-surreal" }
-oeuvre-cli = { path = "crates/cli" }
+ibex-core = { path = "crates/core" }
+ibex-app = { path = "crates/app" }
+ibex-adapter-surreal = { path = "crates/adapter-surreal" }
+ibex-cli = { path = "crates/cli" }
 
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

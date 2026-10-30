@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use oeuvre_core::{Collection, CollectionId, CollectionTreeNode, ResourceId, keyword_suggestions};
+use ibex_core::{Collection, CollectionId, CollectionTreeNode, ResourceId, keyword_suggestions};
 
 use crate::command::{GetResource, GetResourceDetail, ListCollectionForest, UpdateResource};
 use crate::{AppState, Command, CommandError, Outcome};

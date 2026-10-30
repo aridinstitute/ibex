@@ -1,7 +1,7 @@
 # GUI settings
 
 The GUI reads `config.toml` from the OS application-data directory under
-`oeuvre` (on macOS: `~/Library/Application Support/oeuvre/config.toml`).
+`ibex` (on macOS: `~/Library/Application Support/ibex/config.toml`).
 This location does not change when opening a library with `--data`.
 The file is created on the first settings save.
 

@@ -21,9 +21,9 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::{AppState, Surface};
-use oeuvre_core::{ResourceGridParent, ResourceQuery};
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::{AppState, Surface};
+use ibex_core::{ResourceGridParent, ResourceQuery};
 
 use gpui_kit::component::TitleBar;
 use gpui_kit::component::table::TableState;
@@ -40,10 +40,10 @@ use crate::library::{
 use crate::settings::Settings;
 
 #[derive(Debug, Parser)]
-#[command(name = "ovr-gui", version, about = "Oeuvre library GUI")]
+#[command(name = "ibex-gui", version, about = "Ibex library GUI")]
 struct Args {
     /// Library data directory (SurrealKV path).
-    #[arg(long, global = true, env = "OEUVRE_DATA")]
+    #[arg(long, global = true, env = "IBEX_DATA")]
     data: Option<PathBuf>,
 
     /// Use an in-memory store seeded with a demo library (overrides --data).
@@ -98,7 +98,7 @@ fn run() -> Result<()> {
                         size: size(px(1100.), px(700.)),
                     })),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Oeuvre".into()),
+                        title: Some("Ibex".into()),
                         // Center the 14px native controls in the 40px toolbar.
                         traffic_light_position: Some(point(px(9.), px(13.))),
                         ..TitleBar::title_bar_options()
@@ -146,12 +146,9 @@ fn setup_state(args: &Args) -> Result<AppState> {
             let store = SurrealStore::open_memory()
                 .await
                 .context("open in-memory library")?;
-            oeuvre_app::seed::seed_demo_library(
-                &store,
-                oeuvre_app::seed::DEFAULT_DEMO_LIBRARY_SIZE,
-            )
-            .await
-            .context("seed demo library")?;
+            ibex_app::seed::seed_demo_library(&store, ibex_app::seed::DEFAULT_DEMO_LIBRARY_SIZE)
+                .await
+                .context("seed demo library")?;
             return Ok::<AppState, anyhow::Error>(
                 AppState::builder(store).surface(Surface::Gui).build(),
             );
@@ -237,5 +234,5 @@ fn bind_favorite_keys(cx: &mut App) {
 fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("oeuvre")
+        .join("ibex")
 }

@@ -1,6 +1,6 @@
 //! Shared bibliography import: format parsers and save orchestration.
 //!
-//! Parsers produce [`oeuvre_core::ImportDraft`] values with no store access.
+//! Parsers produce [`ibex_core::ImportDraft`] values with no store access.
 //! [`preview_draft`] / [`save_draft`] own matching and persistence for every format.
 
 mod assign;

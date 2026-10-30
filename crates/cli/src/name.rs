@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Args;
 use dialoguer::Input;
-use oeuvre_core::{Name, Person};
+use ibex_core::{Name, Person};
 
 #[derive(Debug, Clone, Args)]
 pub struct NameFlags {

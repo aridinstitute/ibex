@@ -1,11 +1,11 @@
 //! Batch collection/tag assignment through the real Surreal adapter.
 
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::command::{
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::command::{
     CreateCollection, GetResource, ImportBiblatex, ListTags, SetResourceFavorite,
 };
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{
     ExistingIdOrName, ImportAssignments, ImportChoices, ImportReport, NonEmptyStr, Resource,
     ResourceId,
 };

@@ -8,7 +8,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use oeuvre_core::{Collection, CollectionId, parse_keywords};
+use ibex_core::{Collection, CollectionId, parse_keywords};
 
 use crate::db::DbWorker;
 
@@ -391,7 +391,7 @@ mod tests {
     use crate::db::DbWorker;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, Focusable as _, TestAppContext};
-    use oeuvre_core::{NonEmptyStr, parse_keywords};
+    use ibex_core::{NonEmptyStr, parse_keywords};
 
     fn settle(cx: &mut TestAppContext, worker: &DbWorker) {
         for _ in 0..4 {
@@ -405,8 +405,8 @@ mod tests {
     fn saving_keeps_rule_rows_and_keyword_focus_steady(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(ibex_app::testing::MemoryStore::new())
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -495,8 +495,8 @@ mod tests {
     fn checkbox_save_keeps_invalid_keyword_error_until_valid_commit(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(ibex_app::testing::MemoryStore::new())
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let rt = tokio::runtime::Runtime::new().unwrap();

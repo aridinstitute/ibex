@@ -76,7 +76,7 @@ mod native {
             assert!(icon("line.3.horizontal.decrease").is_some());
             assert!(icon("sun.max").is_some());
             assert!(icon("moon").is_some());
-            assert!(icon("oeuvre.nonexistent.symbol").is_none());
+            assert!(icon("ibex.nonexistent.symbol").is_none());
         }
 
         #[test]

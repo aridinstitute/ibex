@@ -1,6 +1,6 @@
 [package]
-name = "oeuvre-core"
-description = "Domain types and storage traits for Oeuvre citation management"
+name = "ibex-core"
+description = "Domain types and storage traits for Ibex citation management"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

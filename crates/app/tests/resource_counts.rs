@@ -1,9 +1,9 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{CountResources, CreateResource};
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, Outcome, Status, Surface};
-use oeuvre_core::{NewResource, NonEmptyStr, ResourceKind};
+use ibex_app::command::{CountResources, CreateResource};
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, Outcome, Status, Surface};
+use ibex_core::{NewResource, NonEmptyStr, ResourceKind};
 
 #[tokio::test]
 async fn counts_report_the_whole_library_and_emit_one_event() {

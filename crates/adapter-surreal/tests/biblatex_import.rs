@@ -1,10 +1,10 @@
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::command::{
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::command::{
     GetResource, GetResourceDetail, ImportBiblatex, ListPersons, ListResources,
     ListResourcesQueryPage,
 };
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{
     CreatorRole, CreatorSpec, ImportedResourceWrite, Name, NewResource, NewSeries, NonEmptyStr,
     Person, PersonId, ResourceKind, ResourceQuery, ResourceSort, Series, SeriesId, SortDirection,
     Store,

@@ -11,8 +11,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::{AppState, CommandError, ErrorKind, Surface};
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::{AppState, CommandError, ErrorKind, Surface};
 
 use crate::collection::CollectionCmd;
 use crate::config::ConfigCmd;
@@ -22,10 +22,10 @@ use crate::resource::ResourceCmd;
 use crate::tag::TagCmd;
 
 #[derive(Debug, Parser)]
-#[command(name = "ovr", version, about = "Oeuvre citation manager")]
+#[command(name = "ibex", version, about = "Ibex citation manager")]
 struct Cli {
     /// Library data directory (SurrealKV path).
-    #[arg(long, global = true, env = "OEUVRE_DATA")]
+    #[arg(long, global = true, env = "IBEX_DATA")]
     data: Option<PathBuf>,
 
     /// Use an in-memory store seeded with a demo library (overrides --data).
@@ -94,7 +94,7 @@ async fn open_state(cli: &Cli) -> Result<AppState> {
         let store = SurrealStore::open_memory()
             .await
             .context("open in-memory library")?;
-        oeuvre_app::seed::seed_demo_library(&store, oeuvre_app::seed::DEFAULT_DEMO_LIBRARY_SIZE)
+        ibex_app::seed::seed_demo_library(&store, ibex_app::seed::DEFAULT_DEMO_LIBRARY_SIZE)
             .await
             .context("seed demo library")?;
         return Ok(AppState::builder(store).surface(Surface::Cli).build());
@@ -113,7 +113,7 @@ async fn open_state(cli: &Cli) -> Result<AppState> {
 fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("oeuvre")
+        .join("ibex")
 }
 
 fn exit_for(kind: ErrorKind) -> ExitCode {
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn parses_resource_list() {
-        let cli = Cli::try_parse_from(["ovr", "resource", "list"]).expect("valid args");
+        let cli = Cli::try_parse_from(["ibex", "resource", "list"]).expect("valid args");
         assert!(matches!(
             cli.command,
             Commands::Resource(ResourceCmd {
@@ -143,14 +143,15 @@ mod tests {
 
     #[test]
     fn parses_memory_flag() {
-        let cli = Cli::try_parse_from(["ovr", "--memory", "resource", "list"]).expect("valid args");
+        let cli =
+            Cli::try_parse_from(["ibex", "--memory", "resource", "list"]).expect("valid args");
         assert!(cli.memory);
     }
 
     #[test]
     fn parses_resource_update() {
         let cli = Cli::try_parse_from([
-            "ovr",
+            "ibex",
             "resource",
             "update",
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -171,7 +172,7 @@ mod tests {
     #[test]
     fn parses_import_with_repeatable_assignment_flags() {
         let cli = Cli::try_parse_from([
-            "ovr",
+            "ibex",
             "import",
             "references.json",
             "--format",

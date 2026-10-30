@@ -2,11 +2,11 @@
 
 //! Shared orchestration tests: any draft feeds the same persistence path.
 
-use oeuvre_app::command::{GetResource, ListPersons};
-use oeuvre_app::import::save_draft;
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{
+use ibex_app::command::{GetResource, ListPersons};
+use ibex_app::import::save_draft;
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{
     CreatorRole, EntryProvenance, IMPORT_PARSER_VERSION, ImportDraft, ImportEntryDraft,
     ImportFormat, ImportTempId, Name, NewResource, NonEmptyStr, ResourceKind, SourceProvenance,
     UnresolvedCreator,
@@ -18,7 +18,7 @@ fn book_draft(key: &str, title: &str, author: Name) -> ImportDraft {
             format: ImportFormat::Test,
             parser_version: IMPORT_PARSER_VERSION,
         },
-        source_fingerprint: Some(oeuvre_core::source_fingerprint(
+        source_fingerprint: Some(ibex_core::source_fingerprint(
             ImportFormat::Test,
             &format!("{key}\0{title}"),
         )),

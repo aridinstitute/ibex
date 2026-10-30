@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use oeuvre_core::{
+use ibex_core::{
     Creator, InheritanceError, NewResource, PersonId, Resource, ResourceCounts, ResourceDetail,
     ResourceError, ResourceId, ResourcePage, ResourceQuery, ResourceSummary, SeriesId,
     SortedResourcePage, StoreError, creator_label_name, detail_creator_groups, resolve_effective,
 };
-use oeuvre_core::{ResourceGridPage, ResourceGridParent};
+use ibex_core::{ResourceGridPage, ResourceGridParent};
 
 use crate::event::{self, Event};
 use crate::{AppState, CommandError, Handler, Outcome};
@@ -229,7 +229,7 @@ async fn load_ancestors(
     let mut chain = Vec::new();
     let mut next = resource.parent_id;
     while let Some(parent_id) = next {
-        if chain.len() >= oeuvre_core::INHERITANCE_MAX_DEPTH {
+        if chain.len() >= ibex_core::INHERITANCE_MAX_DEPTH {
             return Err(map_inheritance_err(InheritanceError::DepthExceeded));
         }
         let parent = state
@@ -645,7 +645,7 @@ impl Handler for GetResourceDetail {
         // One person lookup per distinct id: a person may fill several roles,
         // and credited_as belongs to the creator slot, not the person, so
         // labels are composed per slot from the cached names.
-        let mut people: HashMap<PersonId, oeuvre_core::Name> = HashMap::new();
+        let mut people: HashMap<PersonId, ibex_core::Name> = HashMap::new();
         for creator in &resource.creators {
             if people.contains_key(&creator.person_id) {
                 continue;

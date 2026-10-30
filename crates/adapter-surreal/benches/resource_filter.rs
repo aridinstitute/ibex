@@ -6,13 +6,13 @@
 //! query path the library view uses: filter predicates AND together ahead
 //! of the ordering, then a `limit`/`offset` window.
 //!
-//! Library sizes come from `OEUVRE_BENCH_SIZES` (comma-separated, default
+//! Library sizes come from `IBEX_BENCH_SIZES` (comma-separated, default
 //! `1000`) so a 100k run is opt-in rather than a surprise in plain
 //! `cargo bench`:
 //!
 //! ```text
-//! cargo bench -p oeuvre-adapter-surreal --bench resource_filter
-//! OEUVRE_BENCH_SIZES=1000,5000,100000 cargo bench -p oeuvre-adapter-surreal --bench resource_filter
+//! cargo bench -p ibex-adapter-surreal --bench resource_filter
+//! IBEX_BENCH_SIZES=1000,5000,100000 cargo bench -p ibex-adapter-surreal --bench resource_filter
 //! ```
 //!
 //! Seeding is measured once per size with a wall clock and then reused by
@@ -25,9 +25,9 @@
 //! measured as a timeout instead of aborting the run or hanging for hours.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::seed::seed_demo_library;
-use oeuvre_core::{
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::seed::seed_demo_library;
+use ibex_core::{
     NonEmptyStr, PersonId, PublishedRange, ResourceFilter, ResourceQuery, ResourceSort,
     SortDirection, Store, UtcMillis,
 };
@@ -41,19 +41,19 @@ const PAGE_LIMIT: u32 = 50;
 /// SurrealDB's per-query timeout for every benchmark case.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Sizes to seed and benchmark when `OEUVRE_BENCH_SIZES` is unset.
+/// Sizes to seed and benchmark when `IBEX_BENCH_SIZES` is unset.
 const DEFAULT_SIZES: &[usize] = &[1_000];
 
 /// Case whose needle matches nothing, so the empty-page guard skips it.
 const MISS_CASE: &str = "title_miss";
 
 fn sizes() -> Vec<usize> {
-    match std::env::var("OEUVRE_BENCH_SIZES") {
+    match std::env::var("IBEX_BENCH_SIZES") {
         Ok(raw) => raw
             .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(|s| s.parse().expect("OEUVRE_BENCH_SIZES entries are counts"))
+            .map(|s| s.parse().expect("IBEX_BENCH_SIZES entries are counts"))
             .collect(),
         Err(_) => DEFAULT_SIZES.to_vec(),
     }

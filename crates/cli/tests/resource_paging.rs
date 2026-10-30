@@ -1,15 +1,15 @@
 use std::process::Command;
 
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_core::{NonEmptyStr, ResourceId, ResourceKind, Store};
+use ibex_adapter_surreal::SurrealStore;
+use ibex_core::{NonEmptyStr, ResourceId, ResourceKind, Store};
 
-const SEED_DATA: &str = "OEUVRE_PAGING_SEED_DATA";
-const SEED_PARENT: &str = "OEUVRE_PAGING_SEED_PARENT";
-const SEED_OUT: &str = "OEUVRE_PAGING_SEED_OUT";
+const SEED_DATA: &str = "IBEX_PAGING_SEED_DATA";
+const SEED_PARENT: &str = "IBEX_PAGING_SEED_PARENT";
+const SEED_OUT: &str = "IBEX_PAGING_SEED_OUT";
 
 /// Seeds rows past the CLI's 500-row page in a child process: SurrealKV keeps
 /// its directory lock for the life of the process that opened it, so the
-/// `ovr` runs that follow could not open the library from this one.
+/// `ibex` runs that follow could not open the library from this one.
 #[test]
 #[ignore = "helper run by list_and_tree_preserve_every_row_and_order_across_page_boundaries"]
 fn seed_paging_fixture() {
@@ -56,7 +56,7 @@ fn list_and_tree_preserve_every_row_and_order_across_page_boundaries() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("library");
     let run = |args: &[&str]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_ovr"))
+        let output = Command::new(env!("CARGO_BIN_EXE_ibex"))
             .arg("--data")
             .arg(&data)
             .args(args)

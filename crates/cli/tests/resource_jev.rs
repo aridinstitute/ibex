@@ -9,11 +9,11 @@ fn jev_rejects_insecure_non_loopback_endpoint_as_invalid_input() {
         "openrouter_api_key = 'sk-secret'\n",
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_ovr"))
+    let output = Command::new(env!("CARGO_BIN_EXE_ibex"))
         .arg("--data")
         .arg(dir.path().join("library"))
-        .env("OEUVRE_CONFIG_DIR", dir.path())
-        .env("OEUVRE_JEV_URL", "http://example.com/api/alpha/decisions")
+        .env("IBEX_CONFIG_DIR", dir.path())
+        .env("IBEX_JEV_URL", "http://example.com/api/alpha/decisions")
         .args([
             "resource",
             "classify",
@@ -25,7 +25,7 @@ fn jev_rejects_insecure_non_loopback_endpoint_as_invalid_input() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     let error = String::from_utf8_lossy(&output.stderr);
-    assert!(error.contains("OEUVRE_JEV_URL"), "{error}");
+    assert!(error.contains("IBEX_JEV_URL"), "{error}");
     assert!(
         error.contains("HTTPS") && error.contains("loopback"),
         "{error}"
@@ -37,13 +37,13 @@ fn jev_rejects_insecure_non_loopback_endpoint_as_invalid_input() {
 fn jev_requires_key_and_combines_predictions_with_keywords() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str], endpoint: Option<&str>| {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ovr"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ibex"));
         cmd.arg("--data")
             .arg(dir.path())
-            .env("OEUVRE_CONFIG_DIR", dir.path())
+            .env("IBEX_CONFIG_DIR", dir.path())
             .args(args);
         if let Some(endpoint) = endpoint {
-            cmd.env("OEUVRE_JEV_URL", endpoint);
+            cmd.env("IBEX_JEV_URL", endpoint);
         }
         cmd.output().unwrap()
     };

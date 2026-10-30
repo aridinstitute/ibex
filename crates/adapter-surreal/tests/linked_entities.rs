@@ -1,9 +1,9 @@
 //! Real-adapter coverage for Task 04 linked publication entities.
 
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::command::{ImportBiblatex, ListResources};
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{ResourceKind, Store};
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::command::{ImportBiblatex, ListResources};
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{ResourceKind, Store};
 
 #[tokio::test]
 async fn shared_issue_and_series_survive_reopen() {
