@@ -8,7 +8,8 @@ use oeuvre_app::command::{
     AddCollectionParent, CountResources, CreateCollection, CreatePerson, CreateResource, CreateTag,
     DeleteCollection, FindPersonsByName, FindTagByText, GetResource, GetResourceDetail,
     ListCollectionForest, ListPersons, ListResources, ListResourcesQueryPage, ListTags,
-    RemoveCollectionParent, RenameCollection, SetResourceFavorite, UpdateResource,
+    RemoveCollectionParent, RenameCollection, SetCollectionClassification, SetResourceFavorite,
+    UpdateResource,
 };
 use oeuvre_app::command::{ImportBiblatex, ImportReport, PreviewBiblatex};
 use oeuvre_app::{AppState, Command, Outcome};
@@ -285,6 +286,20 @@ pub enum DbRequest {
         id: CollectionId,
         name: NonEmptyStr,
         reply: oneshot::Sender<Result<Collection, String>>,
+    },
+    SetCollectionClassification {
+        id: CollectionId,
+        keywords: Vec<String>,
+        jev_enabled: bool,
+        reply: oneshot::Sender<Result<Collection, String>>,
+    },
+    JevClassify {
+        url: String,
+        detail: Box<ResourceDetail>,
+        candidates: Vec<Collection>,
+        key: String,
+        model: String,
+        reply: oneshot::Sender<Result<crate::jev::JevSuggestions, String>>,
     },
     AddCollectionParent {
         child_id: CollectionId,
@@ -743,6 +758,54 @@ impl DbWorker {
                                     });
                                 let _ = reply.send(result);
                             }
+                            DbRequest::SetCollectionClassification {
+                                id,
+                                keywords,
+                                jev_enabled,
+                                reply,
+                            } => {
+                                let result = state
+                                    .execute(Command::SetCollectionClassification(
+                                        SetCollectionClassification {
+                                            id,
+                                            keywords,
+                                            jev_enabled,
+                                        },
+                                    ))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::SetCollectionClassification(collection) => {
+                                            Ok(collection)
+                                        }
+                                        _ => Err(
+                                            "unexpected outcome from set_collection_classification"
+                                                .into(),
+                                        ),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::JevClassify {
+                                url,
+                                detail,
+                                candidates,
+                                key,
+                                model,
+                                reply,
+                            } => {
+                                // A slow decision must not hold up the store queue.
+                                tokio::spawn(async move {
+                                    let result = crate::jev::classify_at(
+                                        &url,
+                                        &detail,
+                                        &candidates,
+                                        &key,
+                                        &model,
+                                    )
+                                    .await;
+                                    let _ = reply.send(result);
+                                });
+                            }
                             DbRequest::AddCollectionParent {
                                 child_id,
                                 parent_id,
@@ -979,6 +1042,50 @@ impl DbWorker {
             .send(DbRequest::RenameCollection {
                 id,
                 name,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    /// Replace a collection's keyword rules and Jev opt-in.
+    pub async fn set_collection_classification(
+        &self,
+        id: CollectionId,
+        keywords: Vec<String>,
+        jev_enabled: bool,
+    ) -> Result<Collection, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::SetCollectionClassification {
+                id,
+                keywords,
+                jev_enabled,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    /// Ask Jev which of `candidates` fit `detail`; runs off the store queue.
+    pub async fn jev_classify(
+        &self,
+        url: String,
+        detail: ResourceDetail,
+        candidates: Vec<Collection>,
+        key: String,
+        model: String,
+    ) -> Result<crate::jev::JevSuggestions, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::JevClassify {
+                url,
+                detail: Box::new(detail),
+                candidates,
+                key,
+                model,
                 reply: tx,
             })
             .map_err(|_| "db worker stopped".to_string())?;

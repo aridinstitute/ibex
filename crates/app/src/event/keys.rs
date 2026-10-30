@@ -56,6 +56,8 @@ pub(crate) const COLLECTION_ID: Key = Key::new("collection.id");
 pub(crate) const COLLECTION_NAME: Key = Key::new("collection.name");
 pub(crate) const COLLECTION_PARENT_ID: Key = Key::new("collection.parent_id");
 pub(crate) const COLLECTION_FOREST_ROOTS: Key = Key::new("collection.forest_roots");
+pub(crate) const COLLECTION_KEYWORD_COUNT: Key = Key::new("collection.keyword_count");
+pub(crate) const COLLECTION_JEV_ENABLED: Key = Key::new("collection.jev_enabled");
 
 pub(crate) const IMPORT_ENTRY_KEY: Key = Key::new("import.entry_key");
 pub(crate) const IMPORT_IMPORTED_COUNT: Key = Key::new("import.imported_count");
@@ -109,6 +111,8 @@ mod tests {
         COLLECTION_NAME,
         COLLECTION_PARENT_ID,
         COLLECTION_FOREST_ROOTS,
+        COLLECTION_KEYWORD_COUNT,
+        COLLECTION_JEV_ENABLED,
         IMPORT_ENTRY_KEY,
         IMPORT_IMPORTED_COUNT,
         IMPORT_SKIPPED_COUNT,

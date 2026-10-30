@@ -92,6 +92,15 @@ pub trait Store: Send + Sync + 'static {
         name: NonEmptyStr,
     ) -> Result<Collection, StoreError>;
 
+    /// Replace the classification rules of `id`: keyword list and Jev opt-in.
+    /// Callers validate keywords first. Missing → [`StoreError::not_found`].
+    async fn set_collection_classification(
+        &self,
+        id: CollectionId,
+        keywords: Vec<String>,
+        jev_enabled: bool,
+    ) -> Result<Collection, StoreError>;
+
     /// Sidebar forest: roots have no parents; children follow `child_of`.
     /// The same collection may appear under multiple parents.
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError>;

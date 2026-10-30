@@ -2,6 +2,7 @@
 //!
 //! Ports and shared domain types. Application runtime lives in `oeuvre-app`.
 
+mod classify;
 mod collection;
 mod identifier;
 mod import;
@@ -13,6 +14,10 @@ mod series;
 mod store;
 mod tag;
 
+pub use classify::{
+    ClassifyInput, KEYWORD_MAX_CHARS, KEYWORDS_MAX_PER_COLLECTION, keyword_suggestions,
+    normalize_keywords, parse_keywords,
+};
 pub use collection::{
     Collection, CollectionId, CollectionTreeNode, build_collection_forest,
     collection_descendant_closure,

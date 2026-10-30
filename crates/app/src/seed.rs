@@ -128,6 +128,29 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
     store
         .create_collection(non_empty("Empty collection"), None)
         .await?;
+    // Demo rules so the recommend-only classifiers have something to show.
+    for (id, keywords, jev) in [
+        (research, &["research", "survey"][..], false),
+        (
+            methods,
+            &["research methods", "provenance", "methodology"][..],
+            true,
+        ),
+        (
+            networks,
+            &["citation networks", "bibliometrics", "citation"][..],
+            true,
+        ),
+        (to_read, &["introduction", "handbook"][..], true),
+    ] {
+        store
+            .set_collection_classification(
+                id,
+                keywords.iter().map(|k| (*k).to_owned()).collect(),
+                jev,
+            )
+            .await?;
+    }
     let collections = [methods, networks, to_read, research];
 
     for n in 0..count {

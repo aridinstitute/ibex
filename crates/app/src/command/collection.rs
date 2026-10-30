@@ -1,4 +1,6 @@
-use oeuvre_core::{Collection, CollectionId, CollectionTreeNode, NonEmptyStr, StoreError};
+use oeuvre_core::{
+    Collection, CollectionId, CollectionTreeNode, NonEmptyStr, StoreError, normalize_keywords,
+};
 
 use crate::event::{self, Event};
 use crate::{AppState, CommandError, Handler, Outcome};
@@ -30,6 +32,15 @@ pub struct RenameCollection {
     pub name: NonEmptyStr,
 }
 
+/// Replace a collection's classification rules. `keywords` are validated
+/// and normalized (trimmed, deduped case-insensitively) before the write.
+#[derive(Debug, Clone)]
+pub struct SetCollectionClassification {
+    pub id: CollectionId,
+    pub keywords: Vec<String>,
+    pub jev_enabled: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct DeleteCollection {
     pub id: CollectionId,
@@ -42,6 +53,7 @@ pub struct DeletedCollection {
 
 pub(crate) struct Created(pub Collection);
 pub(crate) struct Renamed(pub Collection);
+pub(crate) struct Classified(pub Collection);
 pub(crate) struct Forest(pub Vec<CollectionTreeNode>);
 pub(crate) struct ParentAdded;
 pub(crate) struct ParentRemoved;
@@ -56,6 +68,12 @@ impl From<Created> for Outcome {
 impl From<Renamed> for Outcome {
     fn from(Renamed(collection): Renamed) -> Self {
         Outcome::RenameCollection(collection)
+    }
+}
+
+impl From<Classified> for Outcome {
+    fn from(Classified(collection): Classified) -> Self {
+        Outcome::SetCollectionClassification(collection)
     }
 }
 
@@ -207,5 +225,30 @@ impl Handler for DeleteCollection {
             .await
             .map_err(map_create)?;
         Ok(Deleted(DeletedCollection { id: self.id }))
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for SetCollectionClassification {
+    const NAME: &'static str = "set_collection_classification";
+    type Output = Classified;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::COLLECTION_ID, self.id.to_string());
+        ev.set(event::COLLECTION_KEYWORD_COUNT, self.keywords.len());
+        ev.set(event::COLLECTION_JEV_ENABLED, self.jev_enabled);
+    }
+
+    async fn run(self, state: &AppState, ev: &mut Event) -> Result<Classified, CommandError> {
+        let keywords = normalize_keywords(&self.keywords).map_err(CommandError::Invalid)?;
+        let collection = state
+            .store()
+            .set_collection_classification(self.id, keywords, self.jev_enabled)
+            .await
+            .map_err(map_create)?;
+        ev.set(event::COLLECTION_NAME, collection.name.as_str().to_owned());
+        ev.set(event::COLLECTION_KEYWORD_COUNT, collection.keywords.len());
+        ev.set(event::COLLECTION_JEV_ENABLED, collection.jev_enabled);
+        Ok(Classified(collection))
     }
 }

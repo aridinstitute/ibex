@@ -41,11 +41,15 @@ use oeuvre_core::{
     PersonMatchPreview, PublishedRange, Resource, ResourceCounts, ResourceDetail, ResourceFilter,
     ResourceGridPage, ResourceGridParent, ResourceId, ResourceKind, ResourceQuery, ResourceSort,
     ResourceSummary, SortDirection, Tag, TagId, UtcMillis, format_recorded_date,
+    keyword_suggestions,
 };
 
+use crate::classification_rules::{ClassificationRules, ClassificationRulesSaved};
 use crate::collections::{CollectionChoice, CollectionDelegate, flatten_collections};
 use crate::command_palette::{
-    CommandPalette, IdentifierRequest, PaletteRequest, SetThemeColor, ToggleResourceGrouping,
+    ClassifyWithJevRequest, CollectionClassificationRequest, CommandPalette, IdentifierRequest,
+    JevSettingRequest, OpenClassificationRules, PaletteRequest, SetThemeColor,
+    ToggleResourceGrouping,
 };
 use crate::db::DbWorker;
 use crate::detail::{
@@ -213,6 +217,20 @@ fn can_nest_under(
 }
 
 /// Sidebar-density menu row (12px type). PopupMenu has no public Small size API.
+/// A small rounded label used for collection memberships and suggestions.
+fn membership_chip(label: String, cx: &App) -> Div {
+    h_flex()
+        .items_center()
+        .gap_0p5()
+        .pl_1p5()
+        .pr_0p5()
+        .min_h(px(20.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(cx.theme().border)
+        .child(div().pr_1().child(label))
+}
+
 fn compact_menu_item(
     label: impl Into<SharedString>,
     handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -1739,6 +1757,7 @@ gpui_kit::actions!([
     BeginNewRow,
     FocusColumnFilter,
     ToggleFavorite,
+    ClassifyWithJev,
     FocusSearch,
     InlineNextField,
     InlinePrevField,
@@ -1898,6 +1917,15 @@ pub struct LibraryApp {
     detail_inflight: HashSet<ResourceId>,
     /// Ignore repeated keyboard/button requests until this id's write completes.
     favorite_pending: HashSet<ResourceId>,
+    /// Resources with a suggestion-accept write in flight.
+    suggestion_pending: HashSet<ResourceId>,
+    /// Latest Jev invocation; only the newest generation may land.
+    jev: Option<JevState>,
+    jev_gen: u64,
+    /// Decisions API endpoint; tests point it at a local server.
+    jev_endpoint: String,
+    /// The classification rules window while it is open.
+    rules_window: Option<(AnyWindowHandle, Entity<ClassificationRules>)>,
     /// The edit form while one is open: loading while the raw record is
     /// fetched, ready once the inputs exist. One form at a time, owned by
     /// the row it was opened on.
@@ -2712,6 +2740,11 @@ impl LibraryApp {
             detail_cache: DetailCache::new(),
             detail_inflight: HashSet::new(),
             favorite_pending: HashSet::new(),
+            suggestion_pending: HashSet::new(),
+            jev: None,
+            jev_gen: 0,
+            jev_endpoint: crate::jev::DECISIONS_URL.to_owned(),
+            rules_window: None,
             edit: None,
             detail_gens: HashMap::new(),
             last_escape_at: None,
@@ -3031,22 +3064,47 @@ impl LibraryApp {
     }
 
     fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_palette(window, cx);
+    }
+
+    /// Open the palette straight on one collection's classification screen.
+    fn open_collection_classification(
+        &mut self,
+        id: CollectionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(palette) = self.open_palette(window, cx) {
+            palette.update(cx, |palette, cx| {
+                palette.open_classification(id, window, cx)
+            });
+        }
+    }
+
+    fn open_palette(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<CommandPalette>> {
+        if self.wait_for_library_write(window, cx) {
+            return None;
+        }
         if self.theme_editor_open {
-            return;
+            return None;
         }
         if self.import_state != ImportState::Idle {
             window.push_notification("Wait for the bibliography import to finish", cx);
-            return;
+            return None;
         }
         if window.has_active_dialog(cx) {
-            return;
+            return None;
         }
         if self.edit.is_some() || self.has_inline(cx) {
             window.push_notification(
                 "Save or cancel your edit before opening resource commands",
                 cx,
             );
-            return;
+            return None;
         }
         self.last_escape_at = None;
         let targets: Vec<_> = {
@@ -3084,6 +3142,14 @@ impl LibraryApp {
             )
         };
         let colors = (hex(cx.theme().primary.to_rgb()), hex(secondary));
+        let library_collections = flatten_collections(&self.collection_forest);
+        let jev_settings = {
+            let settings = &self.table.read(cx).delegate().settings;
+            (
+                settings.openrouter_api_key.is_some(),
+                settings.jev_model.clone(),
+            )
+        };
         let palette = cx.new(|cx| {
             let mut palette = if targets.len() <= 1 {
                 CommandPalette::new(targets.first().copied(), grouped, window, cx)
@@ -3091,8 +3157,131 @@ impl LibraryApp {
                 CommandPalette::new_for_targets(targets.clone(), grouped, window, cx)
             };
             palette.set_colors(colors.0, colors.1);
+            palette.set_library_collections(library_collections);
+            palette.set_jev_settings(jev_settings.0, jev_settings.1);
             palette
         });
+        cx.subscribe_in(
+            &palette,
+            window,
+            |app, palette, request: &JevSettingRequest, window, cx| {
+                let started = std::time::Instant::now();
+                let mut settings = app.table.read(cx).delegate().settings.clone();
+                let (command, result) = match request {
+                    JevSettingRequest::ApiKey(key) => (
+                        "set_openrouter_api_key",
+                        settings.set_openrouter_api_key(key, &app.settings_dir),
+                    ),
+                    JevSettingRequest::Model(model) => (
+                        "set_jev_model",
+                        settings.set_jev_model(model, &app.settings_dir),
+                    ),
+                };
+                // The key itself is never logged, only whether one is set.
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "level": "INFO", "command": command, "surface": "gui",
+                        "jev.key_set": settings.openrouter_api_key.is_some(),
+                        "jev.model": settings.jev_model(),
+                        "duration_us": started.elapsed().as_micros() as u64,
+                        "status": if result.is_ok() { "ok" } else { "error" },
+                        "error": result.as_ref().err().map(|error| error.to_string()),
+                    })
+                );
+                match result {
+                    Ok(()) => {
+                        let message = match request {
+                            JevSettingRequest::ApiKey(key) if key.trim().is_empty() => {
+                                "Removed the OpenRouter API key".to_owned()
+                            }
+                            JevSettingRequest::ApiKey(_) => {
+                                "Saved the OpenRouter API key".to_owned()
+                            }
+                            JevSettingRequest::Model(_) => {
+                                format!("Classification model set to {}", settings.jev_model())
+                            }
+                        };
+                        app.table.update(cx, |table, cx| {
+                            table.delegate_mut().settings = settings;
+                            cx.notify();
+                        });
+                        window.close_dialog(cx);
+                        app.focus_table(window, cx);
+                        window.push_notification(message, cx);
+                        cx.notify();
+                    }
+                    Err(error) => palette.update(cx, |palette, cx| {
+                        palette.identifier_failed(format!("Could not save: {error}"), cx)
+                    }),
+                }
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &palette,
+            window,
+            |app, _, _: &OpenClassificationRules, window, cx| {
+                window.close_dialog(cx);
+                app.focus_table(window, cx);
+                app.open_classification_rules(window, cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &palette,
+            window,
+            |app, _, _: &ClassifyWithJevRequest, window, cx| {
+                window.close_dialog(cx);
+                app.focus_table(window, cx);
+                app.classify_with_jev(window, cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &palette,
+            window,
+            |app, palette, request: &CollectionClassificationRequest, window, cx| {
+                let request = request.clone();
+                let palette = palette.downgrade();
+                let worker = app.table.read(cx).delegate().worker().clone();
+                cx.spawn_in(window, async move |app, window| {
+                    let result = worker
+                        .set_collection_classification(
+                            request.id,
+                            request.keywords,
+                            request.jev_enabled,
+                        )
+                        .await;
+                    let forest = match &result {
+                        Ok(_) => worker.list_collection_forest().await.ok(),
+                        Err(_) => None,
+                    };
+                    _ = app.update_in(window, |app, window, cx| match result {
+                        Ok(collection) => {
+                            if let Some(forest) = forest {
+                                app.set_collection_forest(forest, window, cx);
+                            }
+                            if palette.upgrade().is_some() {
+                                window.close_dialog(cx);
+                            }
+                            app.focus_table(window, cx);
+                            window.push_notification(
+                                format!("Saved classification for {}", collection.name.as_str()),
+                                cx,
+                            );
+                            cx.notify();
+                        }
+                        Err(error) => {
+                            _ = palette
+                                .update(cx, |palette, cx| palette.identifier_failed(error, cx));
+                        }
+                    });
+                })
+                .detach();
+            },
+        )
+        .detach();
         cx.subscribe_in(
             &palette,
             window,
@@ -3223,11 +3412,20 @@ impl LibraryApp {
                 let palette = palette.downgrade();
                 let worker = app.table.read(cx).delegate().worker().clone();
                 cx.spawn_in(window, async move |app, window| {
+                    let before = match request.target {
+                        Some(id) => worker.resource(id).await.ok(),
+                        None => None,
+                    };
                     let result = worker
                         .resolve_identifier(request.identifier, request.target)
                         .await;
                     _ = app.update_in(window, |app, window, cx| match result {
                         Ok(resource) => {
+                            if before.as_ref().is_some_and(|before| {
+                                classification_input_changed(&before.to_new(), &resource.to_new())
+                            }) {
+                                app.invalidate_jev(resource.id);
+                            }
                             *app.detail_gens.entry(resource.id).or_default() += 1;
                             app.detail_inflight.remove(&resource.id);
                             app.detail_cache.invalidate(&resource.id);
@@ -3304,6 +3502,7 @@ impl LibraryApp {
             })
             .detach();
         }
+        Some(palette)
     }
 
     fn set_counts(
@@ -3345,6 +3544,69 @@ impl LibraryApp {
         .detach();
     }
 
+    /// Focus the rules window, opening it first when needed.
+    fn open_classification_rules(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((handle, _)) = &self.rules_window {
+            if cx
+                .update_window(*handle, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+            self.rules_window = None;
+        }
+        let worker = self.table.read(cx).delegate().worker().clone();
+        let collections = flatten_collections(&self.collection_forest);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(760.), px(520.)),
+                cx,
+            ))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Classification rules".into()),
+                traffic_light_position: Some(point(px(9.), px(13.))),
+                ..TitleBar::title_bar_options()
+            }),
+            ..Default::default()
+        };
+        let opened = gpui_kit::open_window(options, cx, |window, cx| {
+            cx.new(|cx| ClassificationRules::new(worker, collections, window, cx))
+        });
+        let (handle, rules) = match opened {
+            Ok(opened) => opened,
+            Err(err) => {
+                eprintln!("warning: could not open classification rules: {err:#}");
+                return;
+            }
+        };
+        cx.subscribe_in(
+            &rules,
+            window,
+            |app, _, _: &ClassificationRulesSaved, window, cx| {
+                app.refresh_collections_after_rule_save(window, cx);
+            },
+        )
+        .detach();
+        self.rules_window = Some((handle, rules));
+    }
+
+    /// Rules feed suggestions and auto-classify candidates, so reload the
+    /// forest those read from.
+    fn refresh_collections_after_rule_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let Ok(forest) = worker.list_collection_forest().await else {
+                return;
+            };
+            _ = app.update_in(window, |app, window, cx| {
+                app.set_collection_forest(forest, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn set_collection_forest(
         &mut self,
         forest: Vec<CollectionTreeNode>,
@@ -3361,6 +3623,17 @@ impl LibraryApp {
             .extend(parents.difference(&previous_parents).copied());
         self.collection_forest = forest;
         self.sync_collection_picker(window, cx);
+        if let Some((handle, rules)) = self.rules_window.clone() {
+            let collections = flatten_collections(&self.collection_forest);
+            let synced = cx.update_window(handle, |_, window, cx| {
+                rules.update(cx, |rules, cx| {
+                    rules.set_collections(collections, window, cx)
+                })
+            });
+            if synced.is_err() {
+                self.rules_window = None;
+            }
+        }
     }
 
     fn sync_collection_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3793,8 +4066,144 @@ impl LibraryApp {
         cx.notify();
     }
 
+    /// Ask Jev to rank the selected resource against every Jev-enabled
+    /// collection. Failures land in the panel rather than a notification, so
+    /// the reason stays visible next to the button that caused it.
+    fn classify_with_jev(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_inline(cx) || self.edit.is_some() {
+            return;
+        }
+        let Some(id) = self.selected else {
+            return;
+        };
+        if self.table.read(cx).delegate().selected_ids.len() > 1 {
+            return;
+        }
+        if self
+            .jev
+            .as_ref()
+            .is_some_and(|jev| jev.resource_id == id && jev.status == JevStatus::Pending)
+        {
+            return;
+        }
+        self.jev_gen += 1;
+        let generation = self.jev_gen;
+        let fail = |message: &str| JevState {
+            resource_id: id,
+            status: JevStatus::Failed(message.to_owned()),
+        };
+        let settings = &self.table.read(cx).delegate().settings;
+        let Some(key) = settings
+            .openrouter_api_key
+            .as_ref()
+            .map(|k| k.expose().to_owned())
+        else {
+            self.jev = Some(fail(
+                "Set an OpenRouter API key in the command palette (⌘K) to auto-classify",
+            ));
+            cx.notify();
+            return;
+        };
+        let model = settings.jev_model().to_owned();
+        let DetailView::Fields(detail) = self.detail_view() else {
+            self.jev = Some(fail(
+                "Wait for the resource details to load, then try again",
+            ));
+            cx.notify();
+            return;
+        };
+        let detail = detail.clone();
+        let candidates: Vec<Collection> = flatten_collections(&self.collection_forest)
+            .into_iter()
+            .filter(|c| c.jev_enabled)
+            .collect();
+        if candidates.is_empty() {
+            self.jev = Some(fail(
+                "No collections are included in auto-classify; turn it on in Classification rules",
+            ));
+            cx.notify();
+            return;
+        }
+        // Exclude memberships before Jev's top-five cap, otherwise existing
+        // collections can crowd every useful new match out of the response.
+        let candidates: Vec<_> = candidates
+            .into_iter()
+            .filter(|c| !detail.collections.iter().any(|member| member.id == c.id))
+            .collect();
+        if candidates.is_empty() {
+            self.jev = Some(fail(
+                "This resource already belongs to every collection included in auto-classify",
+            ));
+            cx.notify();
+            return;
+        }
+        self.jev = Some(JevState {
+            resource_id: id,
+            status: JevStatus::Pending,
+        });
+        let worker = self.table.read(cx).delegate().worker().clone();
+        let url = self.jev_endpoint.clone();
+        let candidate_count = candidates.len();
+        let started = Instant::now();
+        cx.spawn_in(window, async move |app, window| {
+            let result = worker
+                .jev_classify(url, detail, candidates, key, model.clone())
+                .await;
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "level": "INFO", "command": "jev_classify", "surface": "gui",
+                    "resource.id": id.to_string(), "jev.model": model,
+                    "jev.candidate_count": candidate_count,
+                    "jev.suggestion_count": result.as_ref().map(Vec::len).unwrap_or(0),
+                    "duration_us": started.elapsed().as_micros() as u64,
+                    "status": if result.is_ok() { "ok" } else { "error" },
+                    "error": result.as_ref().err(),
+                })
+            );
+            _ = app.update_in(window, |app, _, cx| {
+                app.finish_jev(generation, id, result, cx)
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Keep the reply for its resource even while another row is selected.
+    fn finish_jev(
+        &mut self,
+        generation: u64,
+        id: ResourceId,
+        result: Result<crate::jev::JevSuggestions, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.jev_gen != generation || !self.jev.as_ref().is_some_and(|jev| jev.resource_id == id)
+        {
+            return;
+        }
+        self.jev = Some(JevState {
+            resource_id: id,
+            status: match result {
+                Ok(picks) => JevStatus::Ready(picks),
+                Err(error) => JevStatus::Failed(error),
+            },
+        });
+        cx.notify();
+    }
+
+    /// Classification outlives selection, but never the content it classified.
+    fn invalidate_jev(&mut self, id: ResourceId) {
+        if self.jev.as_ref().is_some_and(|jev| jev.resource_id == id) {
+            self.jev_gen += 1;
+            self.jev = None;
+        }
+    }
+
     /// Toggle by stored identity even when the detail panel is still loading.
     fn toggle_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.wait_for_library_write(window, cx) {
+            return;
+        }
         if self.has_inline(cx) {
             return;
         }
@@ -4506,6 +4915,9 @@ impl LibraryApp {
 
     /// Fetch the selected record and open borderless cell editors on its row.
     fn begin_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.wait_for_library_write(window, cx) {
+            return;
+        }
         if self.import_state != ImportState::Idle {
             window.push_notification("Wait for the bibliography import to finish", cx);
             return;
@@ -4581,6 +4993,9 @@ impl LibraryApp {
 
     /// N opens a new Book draft as table row 0 in the same inline chrome.
     fn begin_new_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.wait_for_library_write(window, cx) {
+            return;
+        }
         if self.import_state != ImportState::Idle {
             window.push_notification("Wait for the bibliography import to finish", cx);
             return;
@@ -4601,6 +5016,9 @@ impl LibraryApp {
             let people = worker.list_persons().await.unwrap_or_default();
             _ = app.update_in(window, |app, window, cx| {
                 if app.import_gen != import_gen || app.import_state != ImportState::Idle {
+                    return;
+                }
+                if app.wait_for_library_write(window, cx) {
                     return;
                 }
                 let form = InlineRowEdit::for_create(&people, window, cx);
@@ -4677,6 +5095,9 @@ impl LibraryApp {
         self.focus_table(window, cx);
         let worker = self.table.read(cx).delegate().worker().clone();
         let update_id = record.as_ref().map(|r| r.id);
+        let content_changed = record
+            .as_ref()
+            .is_some_and(|record| classification_input_changed(&record.to_new(), &new));
         cx.spawn_in(window, async move |app, window| {
             let reply = if let Some(id) = update_id {
                 worker.update_resource(id, new).await.map(|r| r.id)
@@ -4686,6 +5107,9 @@ impl LibraryApp {
             _ = app.update_in(window, |app, window, cx| {
                 match reply {
                     Ok(id) => {
+                        if content_changed {
+                            app.invalidate_jev(id);
+                        }
                         app.table.update(cx, |table, _| {
                             table.delegate_mut().inline = None;
                             table.col_selectable = true;
@@ -4732,6 +5156,9 @@ impl LibraryApp {
     /// a second fetch in the same flow. One form at a time; the sidebar
     /// swaps to it while it exists.
     fn request_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.wait_for_library_write(window, cx) {
+            return;
+        }
         if self.table.read(cx).delegate().selected_ids.len() > 1 {
             window.push_notification("Select one resource to edit its details", cx);
             return;
@@ -4941,6 +5368,7 @@ impl LibraryApp {
             }
         };
         let id = record.id;
+        let content_changed = classification_input_changed(&record.to_new(), &new);
         if let Some(EditFetch::Ready(form)) = &mut self.edit {
             form.saving = true;
             form.error = None;
@@ -4954,6 +5382,9 @@ impl LibraryApp {
             _ = app.update_in(window, |app, window, cx| {
                 match reply {
                     Ok(_) => {
+                        if content_changed {
+                            app.invalidate_jev(id);
+                        }
                         app.edit = None;
                         // Any cached article may inherit from the edited container.
                         // Reject pre-edit replies as well as cached projections.
@@ -5287,17 +5718,34 @@ impl LibraryApp {
                             let nest_targets = nest_targets.clone();
                             move |menu, window, menu_cx| {
                                 let app_rename = app.clone();
+                                let app_classify = app.clone();
+                                let app_rules = app.clone();
                                 let app_unnest = app.clone();
                                 let app_delete = app.clone();
-                                let mut menu = menu.min_w(px(0.)).item(compact_menu_item(
-                                    "Rename",
-                                    move |_, window, cx| {
+                                let mut menu = menu
+                                    .min_w(px(0.))
+                                    .item(compact_menu_item("Rename", move |_, window, cx| {
                                         let _ = app_rename.update(cx, |this, cx| {
                                             this.select_collection_row(id, tree_parent, window, cx);
                                             this.begin_collection_rename(id, window, cx);
                                         });
-                                    },
-                                ));
+                                    }))
+                                    .item(compact_menu_item(
+                                        "Classification…",
+                                        move |_, window, cx| {
+                                            let _ = app_classify.update(cx, |this, cx| {
+                                                this.open_collection_classification(id, window, cx);
+                                            });
+                                        },
+                                    ))
+                                    .item(compact_menu_item(
+                                        "All classification rules…",
+                                        move |_, window, cx| {
+                                            let _ = app_rules.update(cx, |this, cx| {
+                                                this.open_classification_rules(window, cx);
+                                            });
+                                        },
+                                    ));
                                 if !nest_targets.is_empty() {
                                     let app_nest = app.clone();
                                     menu = menu.submenu("Nest under", window, menu_cx, {
@@ -5425,11 +5873,11 @@ impl LibraryApp {
     fn render_side_panel(&self, cx: &mut Context<Self>) -> Div {
         let selected_count = self.table.read(cx).delegate().selected_ids.len();
         if selected_count > 1 {
-            return render_panel(DetailView::Multiple(selected_count), None, None, cx);
+            return render_panel(DetailView::Multiple(selected_count), None, Vec::new(), cx);
         }
         match &self.edit {
             Some(EditFetch::Ready(form)) => self.render_edit_panel(form, cx),
-            Some(EditFetch::Loading(_)) => render_panel(DetailView::Loading, None, None, cx),
+            Some(EditFetch::Loading(_)) => render_panel(DetailView::Loading, None, Vec::new(), cx),
             None => {
                 let favorited = match self.detail_view() {
                     DetailView::Fields(detail) => Some(detail.favorite),
@@ -5442,8 +5890,36 @@ impl LibraryApp {
                     }
                     .with_size(px(16.))
                     .text_color(favorite_star_color(cx.theme().is_dark()));
+                    let has_key = self
+                        .table
+                        .read(cx)
+                        .delegate()
+                        .settings
+                        .openrouter_api_key
+                        .is_some();
+                    let jev_pending = self.jev.as_ref().is_some_and(|jev| {
+                        Some(jev.resource_id) == self.selected && jev.status == JevStatus::Pending
+                    });
                     h_flex()
                         .gap_1()
+                        .child(
+                            Button::new("classify-jev")
+                                .ghost()
+                                .icon(
+                                    symbol("sparkles", AssetIconName::Sparkles)
+                                        .with_size(px(16.)),
+                                )
+                                .loading(jev_pending)
+                                .disabled(jev_pending || !has_key || favorited.is_none())
+                                .tooltip(if has_key {
+                                    "Auto-classify (⌘J)"
+                                } else {
+                                    "Set an OpenRouter API key in the command palette (⌘K) to auto-classify"
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.classify_with_jev(window, cx)
+                                })),
+                        )
                         .child(
                             Button::new("toggle-favorite")
                                 .ghost()
@@ -5474,26 +5950,239 @@ impl LibraryApp {
                         )
                         .into_any_element()
                 });
-                // Read-only hashtags; editing happens on the edit form.
-                let tags_value = match self.detail_view() {
-                    DetailView::Fields(detail) if !detail.tags.is_empty() => Some(
-                        h_flex()
-                            .flex_wrap()
-                            .gap_x_2()
-                            .gap_y_1()
-                            .children(
-                                detail
-                                    .tags
-                                    .iter()
-                                    .map(|tag| div().child(format!("#{}", tag.text.as_str()))),
-                            )
-                            .into_any_element(),
-                    ),
-                    _ => None,
-                };
-                render_panel(self.detail_view(), actions, tags_value, cx)
+                // Read-only hashtags and memberships; editing happens on the
+                // edit form or palette.
+                let mut extra_rows: Vec<(SharedString, AnyElement)> = Vec::new();
+                if let DetailView::Fields(detail) = self.detail_view() {
+                    if !detail.tags.is_empty() {
+                        extra_rows.push((
+                            "Tags".into(),
+                            h_flex()
+                                .flex_wrap()
+                                .gap_x_2()
+                                .gap_y_1()
+                                .children(
+                                    detail
+                                        .tags
+                                        .iter()
+                                        .map(|tag| div().child(format!("#{}", tag.text.as_str()))),
+                                )
+                                .into_any_element(),
+                        ));
+                    }
+                    // Detail/cache/in-flight projections retain membership IDs, not
+                    // authoritative collection names or existence. Use the forest
+                    // so sidebar renames and deletes apply to every projection.
+                    let memberships: Vec<_> = flatten_collections(&self.collection_forest)
+                        .into_iter()
+                        .filter(|c| detail.collections.iter().any(|member| member.id == c.id))
+                        .collect();
+                    if !memberships.is_empty() {
+                        extra_rows.push((
+                            "Collections".into(),
+                            h_flex()
+                                .id("detail-collections")
+                                .test_support()
+                                .aria_label(
+                                    memberships
+                                        .iter()
+                                        .map(|c| c.name.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", "),
+                                )
+                                .flex_wrap()
+                                .gap_1()
+                                .children(
+                                    memberships
+                                        .iter()
+                                        .map(|c| membership_chip(c.name.as_str().to_owned(), cx)),
+                                )
+                                .into_any_element(),
+                        ));
+                    }
+                    if let Some(row) = self.render_suggestions(detail, cx) {
+                        extra_rows.push(("Suggested".into(), row));
+                    }
+                }
+                render_panel(self.detail_view(), actions, extra_rows, cx)
             }
         }
+    }
+
+    /// The "Suggested" value cell: one chip per suggestion with an accept
+    /// button, plus "Add all" when there are several. `None` when there is
+    /// nothing to suggest.
+    fn render_suggestions(
+        &self,
+        detail: &ResourceDetail,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let library = flatten_collections(&self.collection_forest);
+        let jev = self
+            .jev
+            .as_ref()
+            .filter(|jev| jev.resource_id == detail.id)
+            .map(|jev| &jev.status);
+        let picks = match jev {
+            Some(JevStatus::Ready(picks)) => Some(picks.as_slice()),
+            _ => None,
+        };
+        let suggestions = collection_suggestions(detail, &library, picks);
+        let status = match jev {
+            Some(JevStatus::Pending) => Some(
+                div()
+                    .id("jev-pending")
+                    .test_support()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Auto-classifying…"),
+            ),
+            Some(JevStatus::Failed(error)) => Some(
+                div()
+                    .id("jev-error")
+                    .test_support()
+                    .text_color(cx.theme().danger)
+                    .child(error.clone()),
+            ),
+            Some(JevStatus::Ready(picks))
+                if !picks.iter().any(|(id, _)| {
+                    suggestions
+                        .iter()
+                        .any(|s| s.collection.id == *id && s.probability.is_some())
+                }) =>
+            {
+                Some(
+                    div()
+                        .id("jev-empty")
+                        .test_support()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Auto-classify found no new collections"),
+                )
+            }
+            _ => None,
+        };
+        if suggestions.is_empty() && status.is_none() {
+            return None;
+        }
+        let pending = self.suggestion_pending.contains(&detail.id);
+        let all: Vec<CollectionId> = suggestions.iter().map(|s| s.collection.id).collect();
+        Some(
+            v_flex()
+                .gap_1()
+                .when(!suggestions.is_empty(), |cell| {
+                    cell.child(
+                        h_flex()
+                            .id("detail-suggestions")
+                            .test_support()
+                            .flex_wrap()
+                            .gap_1()
+                            .children(suggestions.iter().enumerate().map(|(ix, suggestion)| {
+                                let id = suggestion.collection.id;
+                                let name = suggestion.collection.name.as_str().to_owned();
+                                membership_chip(suggestion_label(suggestion), cx)
+                                    .id(("suggestion", ix))
+                                    .test_support()
+                                    .child(
+                                        Button::new(("accept-suggestion", ix))
+                                            .ghost()
+                                            .xsmall()
+                                            .icon(Icon::new(IconName::Plus).xsmall())
+                                            .disabled(pending)
+                                            .tooltip(format!("Add to {name}"))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.accept_suggestions(vec![id], window, cx)
+                                            })),
+                                    )
+                            }))
+                            .when(all.len() >= 2, |row| {
+                                row.child(
+                                    Button::new("accept-all-suggestions")
+                                        .ghost()
+                                        .xsmall()
+                                        .label("Add all")
+                                        .disabled(pending)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.accept_suggestions(all.clone(), window, cx)
+                                        })),
+                                )
+                            }),
+                    )
+                })
+                .children(status)
+                .into_any_element(),
+        )
+    }
+
+    /// Add the selected resource to `ids` through the palette's persistence
+    /// path, then refresh its detail so the accepted chips disappear.
+    fn accept_suggestions(
+        &mut self,
+        ids: Vec<CollectionId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // These writes replace the full resource. Do not race an editor's
+        // snapshot or another write, and never open a draft the refresh drops.
+        if self.has_inline(cx)
+            || self.edit.is_some()
+            || !self.favorite_pending.is_empty()
+            || window.has_active_dialog(cx)
+        {
+            window.push_notification(
+                "Finish the current resource edit before adding collections",
+                cx,
+            );
+            return;
+        }
+        let Some(id) = self.selected else {
+            return;
+        };
+        if ids.is_empty() || !self.suggestion_pending.insert(id) {
+            return;
+        }
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let request = PaletteRequest::EditCollections(id, ids, Vec::new());
+            let result = apply_palette_request(&worker, &request).await;
+            _ = app.update_in(window, |app, window, cx| {
+                app.suggestion_pending.remove(&id);
+                match result {
+                    Ok(_) => app.refresh_after_write(id, window, cx),
+                    Err(error) => window
+                        .push_notification(format!("Could not add to collection: {error}"), cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn wait_for_library_write(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.suggestion_pending.is_empty() || self.table.read(cx).delegate().reloading {
+            window.push_notification("Wait for the library update to finish", cx);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A stored record changed: drop stale detail reads, refetch the panel
+    /// when it shows `id`, and reload counts and the listing.
+    fn refresh_after_write(&mut self, id: ResourceId, window: &mut Window, cx: &mut Context<Self>) {
+        *self.detail_gens.entry(id).or_default() += 1;
+        self.detail_inflight.remove(&id);
+        self.detail_cache.invalidate(&id);
+        if self.selected == Some(id) {
+            self.detail = Some((id, DetailFetch::Loading));
+            self.fetch_detail(id, window, cx);
+        }
+        self.refresh_counts(window, cx);
+        let selected = self.selected;
+        self.table.update(cx, |table, cx| {
+            table
+                .delegate_mut()
+                .reload_from_top(selected, None, window, cx)
+        });
     }
 
     /// The form: Save/Cancel above, one labelled row per scalar, the error
@@ -6036,6 +6725,9 @@ impl Render for LibraryApp {
             .on_action(cx.listener(|this, _: &ToggleFavorite, window, cx| {
                 this.toggle_favorite(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ClassifyWithJev, window, cx| {
+                this.classify_with_jev(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
                 this.focus_search(window, cx);
             }))
@@ -6401,6 +7093,84 @@ impl Render for LibraryApp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum JevStatus {
+    Pending,
+    Ready(crate::jev::JevSuggestions),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct JevState {
+    resource_id: ResourceId,
+    status: JevStatus,
+}
+
+/// Only fields that can change the classification input; collection/tag,
+/// favorite, and other bibliographic changes do not discard valid predictions.
+fn classification_input_changed(
+    before: &oeuvre_core::NewResource,
+    after: &oeuvre_core::NewResource,
+) -> bool {
+    before.title != after.title
+        || before.kind != after.kind
+        || before.creators != after.creators
+        || before.parent_id != after.parent_id
+        || before.abstract_text != after.abstract_text
+        || before.keywords != after.keywords
+}
+
+/// One collection the detail panel offers to add the resource to.
+#[derive(Debug, Clone, PartialEq)]
+struct CollectionSuggestion {
+    collection: Collection,
+    /// Jev's probability; `None` for a keyword-rule match.
+    probability: Option<f32>,
+}
+
+/// Suggestions for `detail`: Jev's picks first (already ranked), then
+/// keyword-rule matches in library order. Current memberships, unknown ids,
+/// and duplicates are dropped. Pure so ordering is unit-testable.
+fn collection_suggestions(
+    detail: &ResourceDetail,
+    library: &[Collection],
+    jev: Option<&[(CollectionId, f32)]>,
+) -> Vec<CollectionSuggestion> {
+    let mut seen: HashSet<CollectionId> = detail.collections.iter().map(|c| c.id).collect();
+    let mut out = Vec::new();
+    for &(id, probability) in jev.unwrap_or_default() {
+        if let Some(collection) = library.iter().find(|c| c.id == id)
+            && seen.insert(id)
+        {
+            out.push(CollectionSuggestion {
+                collection: collection.clone(),
+                probability: Some(probability),
+            });
+        }
+    }
+    for id in keyword_suggestions(detail, library) {
+        if let Some(collection) = library.iter().find(|c| c.id == id)
+            && seen.insert(id)
+        {
+            out.push(CollectionSuggestion {
+                collection: collection.clone(),
+                probability: None,
+            });
+        }
+    }
+    out
+}
+
+fn suggestion_label(suggestion: &CollectionSuggestion) -> String {
+    match suggestion.probability {
+        Some(p) => format!(
+            "{} · {}%",
+            suggestion.collection.name.as_str(),
+            (p * 100.).round() as u32
+        ),
+        None => suggestion.collection.name.as_str().to_owned(),
+    }
+}
 struct PaletteBatchResult {
     updated: Vec<ResourceId>,
     failed: Vec<(ResourceId, String)>,
@@ -7755,7 +8525,7 @@ mod detail_prefetch_tests {
 
     /// A detail whose title is the only varying field, enough to prove
     /// which entry a cache read returns.
-    fn detail(id: ResourceId, title: &str) -> ResourceDetail {
+    pub(super) fn detail(id: ResourceId, title: &str) -> ResourceDetail {
         ResourceDetail {
             subtitle: None,
             title_addon: None,
@@ -7795,6 +8565,7 @@ mod detail_prefetch_tests {
             series_number: None,
             favorite: false,
             tags: vec![],
+            collections: vec![],
             date_added: UtcMillis::from_unix_ms(0),
             date_edited: UtcMillis::from_unix_ms(0),
         }
@@ -9293,5 +10064,880 @@ mod favorite_shortcut_tests {
             rt.block_on(worker.resource(target)).unwrap().favorite,
             initial
         );
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::{
+        CollectionSuggestion, DbWorker, DetailFetch, JevState, JevStatus, LibraryApp,
+        LibraryDelegate, Settings, TableState, collection_suggestions, flatten_collections,
+        suggestion_label,
+    };
+    use gpui_kit::component::WindowExt as _;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, TestAppContext};
+    use oeuvre_core::{
+        Collection, CollectionId, NonEmptyStr, ResourceGridParent, ResourceId, ResourceKind,
+        ResourceQuery,
+    };
+
+    fn collection(name: &str, keywords: &[&str]) -> Collection {
+        let mut c = Collection::try_new(
+            CollectionId::generate(),
+            NonEmptyStr::try_new(name).unwrap(),
+        );
+        c.keywords = keywords.iter().map(|k| k.to_string()).collect();
+        c
+    }
+
+    #[test]
+    fn suggestions_rank_jev_first_and_skip_memberships_and_unknown_ids() {
+        let a = collection("Alpha", &["networks"]);
+        let b = collection("Beta", &["networks"]);
+        let c = collection("Gamma", &["networks"]);
+        let library = vec![a.clone(), b.clone(), c.clone()];
+        let mut detail = super::detail_prefetch_tests::detail(ResourceId::generate(), "Networks");
+        detail.collections = vec![a.clone()];
+        let jev = [(c.id, 0.91), (CollectionId::generate(), 0.99), (a.id, 0.8)];
+        let out = collection_suggestions(&detail, &library, Some(&jev));
+        assert_eq!(
+            out,
+            vec![
+                CollectionSuggestion {
+                    collection: c.clone(),
+                    probability: Some(0.91)
+                },
+                CollectionSuggestion {
+                    collection: b.clone(),
+                    probability: None
+                },
+            ]
+        );
+        assert_eq!(suggestion_label(&out[0]), "Gamma · 91%");
+        assert_eq!(suggestion_label(&out[1]), "Beta");
+        detail.collections = library.clone();
+        assert!(collection_suggestions(&detail, &library, None).is_empty());
+    }
+
+    struct Fixture {
+        handle: gpui_kit::AnyWindowHandle,
+        app: gpui_kit::Entity<LibraryApp>,
+        worker: DbWorker,
+        resource: ResourceId,
+        collections: Vec<CollectionId>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn fixture(cx: &mut TestAppContext) -> Fixture {
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let worker = DbWorker::spawn(
+            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
+                .surface(oeuvre_app::Surface::Test)
+                .build(),
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (resource, collections) = rt.block_on(async {
+            let mut ids = Vec::new();
+            for (name, keywords) in [
+                ("Networks", vec!["citation networks".to_string()]),
+                ("Bibliometrics", vec!["bibliometrics".to_string()]),
+                ("Unrelated", vec!["earth".to_string()]),
+            ] {
+                let c = worker
+                    .create_collection(NonEmptyStr::try_new(name).unwrap(), None)
+                    .await
+                    .unwrap();
+                worker
+                    .set_collection_classification(c.id, keywords, false)
+                    .await
+                    .unwrap();
+                ids.push(c.id);
+            }
+            let mut new = crate::metadata::empty_resource(
+                "Citation networks in art history",
+                ResourceKind::Book,
+            )
+            .unwrap();
+            new.keywords = vec!["Bibliometrics".into()];
+            (worker.create_resource(new).await.unwrap().id, ids)
+        });
+        let first = worker
+            .list_grid_page_blocking(
+                ResourceGridParent::Roots,
+                ResourceQuery::newest_first(),
+                0,
+                50,
+            )
+            .unwrap();
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::bind_library_keys(cx);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let table = cx.new(|cx| {
+                    TableState::new(
+                        LibraryDelegate::new(worker.clone(), first, Settings::default()),
+                        window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        Fixture {
+            handle: handle.into(),
+            app,
+            worker,
+            resource,
+            collections,
+            _dir: dir,
+        }
+    }
+
+    fn settle(cx: &mut TestAppContext, worker: &DbWorker) {
+        for _ in 0..8 {
+            cx.run_until_parked();
+            worker.list_page_blocking(None, 1).unwrap();
+        }
+        cx.run_until_parked();
+    }
+
+    fn select_first(f: &Fixture, cx: &mut TestAppContext) {
+        cx.update_window(f.handle, |_, window, cx| {
+            f.app.update(cx, |app, cx| {
+                app.table
+                    .update(cx, |table, cx| table.set_selected_row(0, cx));
+                app.select_row(0, window, cx);
+                app.focus_table(window, cx);
+            });
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+    }
+
+    #[gpui_kit::test]
+    fn keyword_suggestions_accept_one_then_add_all(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(("suggestion", 0usize)).is_some());
+            assert!(window.try_find(("suggestion", 1usize)).is_some());
+            assert!(
+                window.try_find(("suggestion", 2usize)).is_none(),
+                "earth ≠ art"
+            );
+            assert!(window.try_find("detail-collections").is_none());
+            window.click(("accept-suggestion", 0usize), cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource))
+                .unwrap()
+                .collection_ids,
+            // Library order is by name: Bibliometrics, then Networks.
+            vec![f.collections[1]]
+        );
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("detail-collections").is_some());
+            assert!(window.try_find(("suggestion", 0usize)).is_some());
+            assert!(window.try_find(("suggestion", 1usize)).is_none());
+            assert!(window.try_find("accept-all-suggestions").is_none());
+            window.click(("accept-suggestion", 0usize), cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let after = rt.block_on(f.worker.resource(f.resource)).unwrap();
+        assert_eq!(after.collection_ids, [f.collections[1], f.collections[0]]);
+        f.app.read_with(cx, |app, _| {
+            let Some((_, DetailFetch::Loaded(detail))) = &app.detail else {
+                panic!("detail should reload after accepting");
+            };
+            assert_eq!(detail.collections.len(), 2);
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("detail-suggestions").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn accepting_suggestions_gates_inline_drafts_until_refresh_finishes(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("accept-suggestion", 0usize), cx);
+            f.app.read_with(cx, |app, _| {
+                assert!(app.suggestion_pending.contains(&f.resource))
+            });
+            window.press("e", cx);
+            f.app.read_with(cx, |app, cx| {
+                assert!(
+                    !app.has_inline(cx),
+                    "acceptance must not open an editor it will discard"
+                )
+            });
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| window.press("e", cx))
+            .unwrap();
+        settle(cx, &f.worker);
+        f.app.read_with(cx, |app, cx| assert!(app.has_inline(cx)));
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("cmd-a", cx);
+            window.input("An edit after acceptance", cx);
+            window.press("cmd-enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+        assert_eq!(saved.title.as_str(), "An edit after acceptance");
+        assert_eq!(saved.collection_ids, vec![f.collections[1]]);
+    }
+
+    #[gpui_kit::test]
+    fn renamed_membership_uses_fresh_forest_despite_cached_detail(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("accept-suggestion", 0usize), cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            f.app.update(cx, |app, cx| {
+                app.begin_collection_rename(f.collections[1], window, cx);
+            });
+            window.press("cmd-a", cx);
+            window.input("Renamed collection", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("detail-collections").label(),
+                Some("Renamed collection")
+            );
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn deleted_membership_disappears_from_cached_detail(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("accept-suggestion", 0usize), cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("detail-collections").is_some());
+            f.app.update(cx, |app, cx| {
+                app.delete_sidebar_collection(f.collections[1], window, cx)
+            });
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        // Reselect through the detail cache, not just the currently displayed projection.
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("detail-collections").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn add_all_accepts_every_suggestion_at_once(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("accept-all-suggestions", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource))
+                .unwrap()
+                .collection_ids,
+            [f.collections[1], f.collections[0]]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn classification_screen_saves_rules_and_refreshes_suggestions(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        let unrelated = f.collections[2];
+        cx.update_window(f.handle, |_, window, cx| {
+            f.app.update(cx, |app, cx| {
+                app.open_collection_classification(unrelated, window, cx)
+            });
+            window.render_frame(cx);
+            assert!(window.try_find("palette-classification").is_some());
+            window.click(("palette-row", 0usize), cx);
+            window.input(", art history", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let forest = rt.block_on(f.worker.list_collection_forest()).unwrap();
+        let saved = forest
+            .iter()
+            .find(|node| node.collection.id == unrelated)
+            .unwrap();
+        assert_eq!(saved.collection.keywords, vec!["earth", "art history"]);
+        assert!(saved.collection.jev_enabled);
+        cx.update_window(f.handle, |_, window, cx| {
+            assert!(!window.has_active_dialog(cx));
+            window.render_frame(cx);
+            assert!(window.try_find(("suggestion", 2usize)).is_some());
+        })
+        .unwrap();
+    }
+
+    /// Opt collections into Jev (keeping their keyword rules) and refresh
+    /// the sidebar forest the panel reads candidates from.
+    fn enable_jev(f: &Fixture, cx: &mut TestAppContext, picks: &[(usize, &str)]) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let forest = rt.block_on(async {
+            for (ix, keyword) in picks {
+                f.worker
+                    .set_collection_classification(
+                        f.collections[*ix],
+                        vec![(*keyword).to_owned()],
+                        true,
+                    )
+                    .await
+                    .unwrap();
+            }
+            f.worker.list_collection_forest().await.unwrap()
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            f.app
+                .update(cx, |app, cx| app.set_collection_forest(forest, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+
+    fn set_key(f: &Fixture, cx: &mut TestAppContext) {
+        let dir = f._dir.path().to_path_buf();
+        f.app.update(cx, |app, cx| {
+            app.table.update(cx, |table, _| {
+                table
+                    .delegate_mut()
+                    .settings
+                    .set_openrouter_api_key("sk-or-test", &dir)
+                    .unwrap()
+            })
+        });
+    }
+
+    fn wait_for_jev(f: &Fixture, cx: &mut TestAppContext) {
+        for _ in 0..300 {
+            settle(cx, &f.worker);
+            let landed = f.app.read_with(cx, |app, _| {
+                app.jev
+                    .as_ref()
+                    .is_some_and(|jev| jev.status != JevStatus::Pending)
+            });
+            if landed {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("Jev reply never landed");
+    }
+
+    #[gpui_kit::test]
+    fn unrelated_writes_preserve_jev_predictions(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        let expected = JevStatus::Ready(vec![(f.collections[2], 0.92)]);
+        f.app.update(cx, |app, _| {
+            app.jev_gen = 1;
+            app.jev = Some(JevState {
+                resource_id: f.resource,
+                status: expected.clone(),
+            });
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            // Accept the Jev result, then toggle favorite and save a no-op edit.
+            window.click(("accept-suggestion", 0usize), cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            f.app.update(cx, |app, cx| app.toggle_favorite(window, cx));
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| window.press("e", cx))
+            .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| window.press("cmd-enter", cx))
+            .unwrap();
+        settle(cx, &f.worker);
+        f.app.read_with(cx, |app, _| {
+            assert_eq!(app.jev.as_ref().map(|jev| &jev.status), Some(&expected));
+            assert_eq!(app.jev_gen, 1);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn sidebar_content_edit_cancels_pending_jev(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        f.app.update(cx, |app, _| {
+            app.jev_gen = 1;
+            app.jev = Some(JevState {
+                resource_id: f.resource,
+                status: JevStatus::Pending,
+            });
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("cmd-a", cx);
+            window.input("New sidebar title", cx);
+            window.press("cmd-enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource))
+                .unwrap()
+                .title
+                .as_str(),
+            "New sidebar title"
+        );
+        f.app.update(cx, |app, cx| {
+            assert!(app.jev.is_none());
+            app.finish_jev(1, f.resource, Ok(vec![(f.collections[2], 0.92)]), cx);
+            assert!(app.jev.is_none());
+        });
+    }
+
+    #[gpui_kit::test]
+    fn all_jev_candidates_already_joined_explains_without_a_request(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        enable_jev(&f, cx, &[(1, "bibliometrics")]);
+        set_key(&f, cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("accept-suggestion", 0usize), cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| window.press("cmd-j", cx))
+            .unwrap();
+        f.app.read_with(cx, |app, _| {
+            assert!(matches!(&app.jev, Some(JevState { status: JevStatus::Failed(error), .. }) if error.contains("already belongs to every collection")));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn inline_content_edit_invalidates_jev_and_rejects_old_reply(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        enable_jev(&f, cx, &[(2, "earth")]);
+        set_key(&f, cx);
+        let body = serde_json::json!({"answers": {f.collections[2].to_string(): {"type": "noul", "noul": 0.92}}}).to_string();
+        let (url, server) = crate::jev::tests::serve(body, "200 OK");
+        f.app.update(cx, |app, _| app.jev_endpoint = url);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| window.press("cmd-j", cx))
+            .unwrap();
+        wait_for_jev(&f, cx);
+        server.join().unwrap();
+        let generation = f.app.read_with(cx, |app, _| app.jev_gen);
+        cx.update_window(f.handle, |_, window, cx| window.press("e", cx))
+            .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("cmd-a", cx);
+            window.input("A completely different subject", cx);
+            window.press("cmd-enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource))
+                .unwrap()
+                .title
+                .as_str(),
+            "A completely different subject"
+        );
+        f.app.update(cx, |app, cx| {
+            assert!(
+                app.jev.is_none(),
+                "old-content predictions must be invalidated"
+            );
+            app.finish_jev(
+                generation,
+                f.resource,
+                Ok(vec![(f.collections[2], 0.92)]),
+                cx,
+            );
+            assert!(
+                app.jev.is_none(),
+                "an old-content reply must not resurrect predictions"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn jev_ranks_new_candidates_before_applying_top_five(cx: &mut TestAppContext) {
+        let mut f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            for name in ["Fourth", "Fifth", "Sixth"] {
+                f.collections.push(
+                    f.worker
+                        .create_collection(NonEmptyStr::try_new(name).unwrap(), None)
+                        .await
+                        .unwrap()
+                        .id,
+                );
+            }
+            let record = f.worker.resource(f.resource).await.unwrap();
+            let mut new = record.to_new();
+            new.collection_ids = f.collections[..5].to_vec();
+            f.worker.update_resource(f.resource, new).await.unwrap();
+        });
+        enable_jev(
+            &f,
+            cx,
+            &[(0, "a"), (1, "b"), (2, "c"), (3, "d"), (4, "e"), (5, "f")],
+        );
+        set_key(&f, cx);
+        let answers: serde_json::Map<_, _> = f
+            .collections
+            .iter()
+            .enumerate()
+            .map(|(ix, id)| {
+                (
+                    id.to_string(),
+                    serde_json::json!({"type": "noul", "noul": 0.99 - ix as f32 * 0.05}),
+                )
+            })
+            .collect();
+        let (url, server) = crate::jev::tests::serve(
+            serde_json::json!({"answers": answers}).to_string(),
+            "200 OK",
+        );
+        f.app.update(cx, |app, _| app.jev_endpoint = url);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| window.press("cmd-j", cx))
+            .unwrap();
+        wait_for_jev(&f, cx);
+        let request = server.join().unwrap();
+        f.app.read_with(cx, |app, _| {
+            let JevStatus::Ready(picks) = &app.jev.as_ref().unwrap().status else {
+                panic!("expected picks")
+            };
+            assert_eq!(
+                picks.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                vec![f.collections[5]]
+            );
+        });
+        for member in &f.collections[..5] {
+            assert!(!request.contains(&member.to_string()));
+        }
+    }
+
+    #[gpui_kit::test]
+    fn cmd_j_ranks_jev_picks_first_and_accepts_them(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        enable_jev(&f, cx, &[(0, "citation networks"), (2, "earth")]);
+        set_key(&f, cx);
+        let unrelated = f.collections[2];
+        let body = serde_json::json!({"answers": {
+            unrelated.to_string(): {"type": "noul", "noul": 0.92},
+            f.collections[0].to_string(): {"type": "noul", "noul": 0.3},
+        }})
+        .to_string();
+        let (url, server) = crate::jev::tests::serve(body, "200 OK");
+        f.app.update(cx, |app, _| app.jev_endpoint = url);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_ne!(window.find("classify-jev").disabled(), Some(true));
+            window.press("cmd-j", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("jev-pending").is_some());
+            assert_eq!(window.find("classify-jev").disabled(), Some(true));
+        })
+        .unwrap();
+        // The request leaves only once the foreground task runs.
+        wait_for_jev(&f, cx);
+        let request = server.join().unwrap();
+        assert!(request.contains("sk-or-test"));
+        assert!(request.contains("Citation networks in art history"));
+        f.app.read_with(cx, |app, _| {
+            assert_eq!(
+                app.jev.as_ref().map(|jev| &jev.status),
+                Some(&JevStatus::Ready(vec![(unrelated, 0.92)]))
+            );
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            // Jev's pick first, then the two keyword matches.
+            assert!(window.try_find(("suggestion", 2usize)).is_some());
+            assert!(window.try_find("jev-error").is_none());
+            window.click(("accept-suggestion", 0usize), cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource))
+                .unwrap()
+                .collection_ids,
+            vec![unrelated]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn cmd_j_without_a_key_explains_instead_of_calling_jev(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        enable_jev(&f, cx, &[(0, "citation networks")]);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("classify-jev").disabled(), Some(true));
+            window.press("cmd-j", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("jev-error").is_some());
+        })
+        .unwrap();
+        f.app.read_with(cx, |app, _| {
+            let Some(JevState {
+                status: JevStatus::Failed(error),
+                ..
+            }) = &app.jev
+            else {
+                panic!("expected a failure");
+            };
+            assert!(error.contains("OpenRouter API key"));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn cmd_j_without_jev_collections_reports_it(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        set_key(&f, cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("cmd-j", cx);
+        })
+        .unwrap();
+        f.app.read_with(cx, |app, _| {
+            assert!(matches!(
+                &app.jev,
+                Some(JevState { status: JevStatus::Failed(error), .. })
+                    if error.contains("No collections are included")
+            ));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn off_selection_jev_reply_finishes_before_returning(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        f.app.update(cx, |app, cx| {
+            app.jev_gen = 1;
+            app.jev = Some(JevState {
+                resource_id: f.resource,
+                status: JevStatus::Pending,
+            });
+            app.selected = Some(ResourceId::generate());
+            app.finish_jev(1, f.resource, Ok(vec![(f.collections[0], 0.8)]), cx);
+            app.selected = Some(f.resource);
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("jev-pending").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn stale_jev_replies_are_dropped(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        let pick = vec![(f.collections[0], 0.8)];
+        f.app.update(cx, |app, cx| {
+            app.jev_gen = 2;
+            app.jev = Some(JevState {
+                resource_id: f.resource,
+                status: JevStatus::Pending,
+            });
+            app.finish_jev(1, f.resource, Ok(pick.clone()), cx);
+            assert_eq!(app.jev.as_ref().unwrap().status, JevStatus::Pending);
+            app.finish_jev(2, ResourceId::generate(), Ok(pick.clone()), cx);
+            assert_eq!(app.jev.as_ref().unwrap().status, JevStatus::Pending);
+            app.finish_jev(2, f.resource, Ok(pick.clone()), cx);
+            assert_eq!(app.jev.as_ref().unwrap().status, JevStatus::Ready(pick));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn palette_saves_the_api_key_and_model_to_config(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        for (row, value) in [(8usize, "sk-or-v1-saved"), (9, "typesafe/jev-2")] {
+            cx.update_window(f.handle, |_, window, cx| {
+                let palette = f
+                    .app
+                    .update(cx, |app, cx| app.open_palette(window, cx))
+                    .unwrap();
+                window.render_frame(cx);
+                // Rows past the list's max height are scrolled out of view.
+                palette.update(cx, |palette, cx| palette.confirm(row, window, cx));
+                window.render_frame(cx);
+                window.input(value, cx);
+                window.press("enter", cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            cx.update_window(f.handle, |_, window, cx| {
+                assert!(!window.has_active_dialog(cx));
+            })
+            .unwrap();
+        }
+        let saved = Settings::load(f._dir.path());
+        assert_eq!(
+            saved.openrouter_api_key.as_ref().map(|k| k.expose()),
+            Some("sk-or-v1-saved")
+        );
+        assert_eq!(saved.jev_model(), "typesafe/jev-2");
+        f.app.read_with(cx, |app, cx| {
+            assert_eq!(app.table.read(cx).delegate().settings, saved);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn rules_window_saves_each_row_and_keeps_the_library_in_sync(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            f.app
+                .update(cx, |app, cx| app.open_classification_rules(window, cx));
+        })
+        .unwrap();
+        let (rules_handle, rules) = f
+            .app
+            .read_with(cx, |app, _| app.rules_window.clone().unwrap());
+        cx.update_window(f.handle, |_, window, cx| {
+            f.app
+                .update(cx, |app, cx| app.open_classification_rules(window, cx));
+        })
+        .unwrap();
+        f.app.read_with(cx, |app, _| {
+            assert_eq!(app.rules_window.as_ref().unwrap().0, rules_handle, "reused");
+        });
+        let unrelated = f.collections[2];
+        // Rows are ordered by name: Bibliometrics, Networks, Unrelated.
+        let edit = |cx: &mut TestAppContext, value: String| {
+            cx.update_window(rules_handle, |_, window, cx| {
+                let input = rules.read(cx).row_state(2).unwrap().1.clone();
+                assert_eq!(rules.read(cx).row_state(2).unwrap().0.id, unrelated);
+                input.update(cx, |state, cx| state.set_value(value, window, cx));
+                gpui_kit::Focusable::focus_handle(&input, cx).focus(window, cx);
+                window.press("enter", cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let stored = |rt: &tokio::runtime::Runtime| {
+            rt.block_on(f.worker.list_collection_forest())
+                .unwrap()
+                .into_iter()
+                .find(|node| node.collection.id == unrelated)
+                .unwrap()
+                .collection
+        };
+
+        edit(cx, "x".repeat(200));
+        assert!(rules.read_with(cx, |rules, _| rules.row_state(2).unwrap().2.is_some()));
+        assert_eq!(stored(&rt).keywords, vec!["earth"]);
+
+        edit(cx, " earth ,  art history".into());
+        let saved = stored(&rt);
+        assert_eq!(saved.keywords, vec!["earth", "art history"]);
+        assert!(!saved.jev_enabled);
+        cx.update_window(rules_handle, |_, _, cx| {
+            let rules = rules.read(cx);
+            let (_, input, error) = rules.row_state(2).unwrap();
+            assert!(error.is_none());
+            assert_eq!(input.read(cx).value().as_ref(), "earth, art history");
+        })
+        .unwrap();
+        f.app.read_with(cx, |app, _| {
+            let library = flatten_collections(&app.collection_forest);
+            let synced = library.iter().find(|c| c.id == unrelated).unwrap();
+            assert_eq!(synced.keywords, saved.keywords);
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(("suggestion", 2usize)).is_some());
+        })
+        .unwrap();
+
+        cx.update_window(rules_handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("rule-auto", 2usize), cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let saved = stored(&rt);
+        assert!(saved.jev_enabled);
+        assert_eq!(saved.keywords, vec!["earth", "art history"]);
+
+        let added = rt
+            .block_on(
+                f.worker
+                    .create_collection(NonEmptyStr::try_new("Added").unwrap(), None),
+            )
+            .unwrap();
+        let forest = rt.block_on(f.worker.list_collection_forest()).unwrap();
+        cx.update_window(f.handle, |_, window, cx| {
+            f.app
+                .update(cx, |app, cx| app.set_collection_forest(forest, window, cx));
+        })
+        .unwrap();
+        rules.read_with(cx, |rules, _| {
+            assert_eq!(rules.row_count(), 4);
+            assert_eq!(rules.row_state(0).unwrap().0.id, added.id);
+        });
     }
 }

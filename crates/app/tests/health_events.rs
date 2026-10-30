@@ -137,6 +137,15 @@ impl Store for HangStore {
         std::future::pending().await
     }
 
+    async fn set_collection_classification(
+        &self,
+        _id: CollectionId,
+        _keywords: Vec<String>,
+        _jev_enabled: bool,
+    ) -> Result<Collection, StoreError> {
+        std::future::pending().await
+    }
+
     async fn list_collection_forest(&self) -> Result<Vec<CollectionTreeNode>, StoreError> {
         std::future::pending().await
     }

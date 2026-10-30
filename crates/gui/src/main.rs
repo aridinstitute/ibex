@@ -1,3 +1,4 @@
+mod classification_rules;
 mod collections;
 mod command_palette;
 mod db;
@@ -5,6 +6,7 @@ mod detail;
 mod edit;
 mod icons;
 mod inline_edit;
+mod jev;
 mod kind;
 mod library;
 mod metadata;
@@ -179,6 +181,7 @@ fn bind_library_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-k", OpenCommandPalette, Some("LibraryApp")),
         KeyBinding::new("cmd-shift-i", ImportBiblatexFile, Some("LibraryApp")),
+        KeyBinding::new("cmd-j", crate::library::ClassifyWithJev, Some("LibraryApp")),
         KeyBinding::new("]", ToggleDetailPanel, Some("LibraryApp && !Input")),
         KeyBinding::new("[", ToggleLeftPanel, Some("LibraryApp && !Input")),
         // GPUI dispatches actions before Link's keyboard click handling.

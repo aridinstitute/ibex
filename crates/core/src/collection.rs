@@ -31,11 +31,21 @@ impl fmt::Display for CollectionId {
 pub struct Collection {
     pub id: CollectionId,
     pub name: NonEmptyStr,
+    /// Keyword rules for recommend-only classification; see
+    /// [`keyword_suggestions`](crate::keyword_suggestions).
+    pub keywords: Vec<String>,
+    /// Whether Jev classification may suggest this collection.
+    pub jev_enabled: bool,
 }
 
 impl Collection {
     pub fn try_new(id: CollectionId, name: NonEmptyStr) -> Self {
-        Self { id, name }
+        Self {
+            id,
+            name,
+            keywords: Vec::new(),
+            jev_enabled: false,
+        }
     }
 }
 
@@ -158,5 +168,7 @@ mod tests {
         let name = NonEmptyStr::try_new("Methods").unwrap();
         let collection = Collection::try_new(CollectionId::generate(), name.clone());
         assert_eq!(collection.name, name);
+        assert!(collection.keywords.is_empty());
+        assert!(!collection.jev_enabled);
     }
 }
