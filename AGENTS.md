@@ -22,8 +22,9 @@ See `README.md` and `docs/` for product context.
   other path or config logic to the clients.
 - Tests must never touch the real home: pass `--data` and `IBEX_CONFIG_DIR`
   temp dirs (CLI tests use `tests/common::ibex()`), or `--memory`.
-- Never point Ibex at an existing 3.x database: SurrealDB 4.0 upgrades it in
-  place, irreversibly.
+- Never point this SurrealDB 3.3.4 build at a database written by SurrealDB 4.0;
+  the formats are incompatible. Use the matching SurrealDB version to export or
+  migrate data before changing versions.
 
 ## Git: branches
 

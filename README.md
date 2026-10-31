@@ -25,7 +25,7 @@ cargo run -p ibex-gui -- --memory
 ## Where Ibex keeps data
 
 Without `--memory`, both clients open the same persistent library (SurrealKV
-on SurrealDB 4.0) and read the same config file:
+on SurrealDB 3.3.4) and read the same config file:
 
 | What     | Default                                                                 | Override                         |
 |----------|-------------------------------------------------------------------------|----------------------------------|
@@ -42,11 +42,10 @@ on SurrealDB 4.0) and read the same config file:
 - Ibex never opens or migrates data from older installs (such as an Oeuvre
   directory) on its own.
 
-> **Upgrading an existing 3.x database:** opening a database written by
-> SurrealDB 3.x with Ibex (SurrealDB 4.0) converts it to the 4.0 on-disk format
-> in place. The conversion is irreversible and 3.x can no longer open it. Only
-> point `--data` at such a directory after taking a verified export with your
-> 3.x tooling and an offline copy of the directory.
+> **Do not open a SurrealDB 4.0 database with this version.** SurrealDB 4.0
+> can convert older databases in place, and SurrealDB 3.3.4 cannot read the
+> resulting 4.0 format. Keep an offline copy and use the matching SurrealDB
+> version to export or migrate data before changing versions.
 
 ## Importing bibliographies
 

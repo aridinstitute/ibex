@@ -1,6 +1,0 @@
-# SurrealDB 4.0's embedded engine recurses deeper than the 2 MiB default
-# thread stack in debug builds; its docs recommend 10 MiB. This covers test
-# threads and runtime workers under `cargo test` / `cargo run`; the binaries
-# set their own runtime stack sizes for launches outside cargo.
-[env]
-RUST_MIN_STACK = "10485760"

@@ -18,7 +18,15 @@ async fn data_survives_close_and_reopen() {
         store.close().await.unwrap();
         person
     };
-    let reopened = SurrealStore::open(&path).await.unwrap();
+    let reopened = loop {
+        match SurrealStore::open(&path).await {
+            Ok(store) => break store,
+            Err(err) if err.is_in_use() => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await
+            }
+            Err(err) => panic!("reopen failed without a lock race: {err}"),
+        }
+    };
     let loaded = reopened.get_person(created.id).await.unwrap();
     assert_eq!(loaded.name.display(), "Ada Lovelace");
 }
