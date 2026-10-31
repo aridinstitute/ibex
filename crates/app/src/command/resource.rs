@@ -294,14 +294,14 @@ pub(crate) async fn validate_new_resource_refs(
         }
     }
 
-    if let Some(series_id) = new.series_id {
-        if pending_series != Some(series_id) {
-            state
-                .store()
-                .get_series(series_id)
-                .await
-                .map_err(|e| map_series_lookup(e, series_id))?;
-        }
+    if let Some(series_id) = new.series_id
+        && pending_series != Some(series_id)
+    {
+        state
+            .store()
+            .get_series(series_id)
+            .await
+            .map_err(|e| map_series_lookup(e, series_id))?;
     }
 
     for tag_id in &new.tag_ids {

@@ -1,0 +1,17 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      compatible:
+        update-types: [minor, patch]
+    # Storage upgrades require an explicit compatibility/migration review.
+    ignore:
+      - dependency-name: surrealdb
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

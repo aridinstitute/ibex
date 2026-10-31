@@ -19,6 +19,8 @@ pub struct SetThemeColor {
     pub hex: String,
 }
 
+// The shared `Edit` prefix distinguishes these from palette navigation requests.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug)]
 pub enum PaletteRequest {
     /// Resource, additions, removals (relative to the opening snapshot).
@@ -576,12 +578,12 @@ impl CommandPalette {
                         None
                     };
                     self.navigate(Screen::Identifier, window, cx);
-                    if row == 4 {
-                        if let Some(identifier) = &self.suggested_identifier {
-                            self.state.update(cx, |state, cx| {
-                                state.set_value(identifier.clone(), window, cx)
-                            });
-                        }
+                    if row == 4
+                        && let Some(identifier) = &self.suggested_identifier
+                    {
+                        self.state.update(cx, |state, cx| {
+                            state.set_value(identifier.clone(), window, cx)
+                        });
                     }
                 }
                 2 => cx.emit(ToggleResourceGrouping),

@@ -679,7 +679,7 @@ mod tests {
         // mismatched ancestor error path instead.
         assert_eq!(INHERITANCE_MAX_DEPTH, 8);
         let wrong = bare(ResourceKind::Journal, "Other", None);
-        let err = resolve_effective(&article, &[wrong.clone()]).unwrap_err();
+        let err = resolve_effective(&article, std::slice::from_ref(&wrong)).unwrap_err();
         assert!(matches!(
             err,
             InheritanceError::AncestorMismatch { .. } | InheritanceError::MissingParent { .. }

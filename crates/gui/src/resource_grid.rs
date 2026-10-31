@@ -107,10 +107,10 @@ impl ResourceGrid {
                 }
                 positions.insert(id, (depth, parent, row.has_children));
                 rows.push(row.summary.clone());
-                if grid.expanded.contains(&id) {
-                    if let Some(children) = grid.children.get(&id) {
-                        walk(grid, &children.rows, depth + 1, Some(id), rows, positions);
-                    }
+                if grid.expanded.contains(&id)
+                    && let Some(children) = grid.children.get(&id)
+                {
+                    walk(grid, &children.rows, depth + 1, Some(id), rows, positions);
                 }
             }
         }

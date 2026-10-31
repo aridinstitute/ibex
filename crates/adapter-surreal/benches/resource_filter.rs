@@ -148,6 +148,7 @@ fn cases(creator: PersonId) -> Vec<(&'static str, ResourceQuery)> {
 
 fn bench_resource_filter(c: &mut Criterion) {
     let rt = Runtime::new().expect("runtime");
+    let mut failed = false;
 
     for n in sizes() {
         let store = rt
@@ -193,6 +194,7 @@ fn bench_resource_filter(c: &mut Criterion) {
                 ),
                 Ok(_) => {}
                 Err(err) => {
+                    failed = true;
                     eprintln!("resource_filter: case {name} at n={n} failed its guard query: {err}")
                 }
             }
@@ -206,12 +208,19 @@ fn bench_resource_filter(c: &mut Criterion) {
                         0,
                         PAGE_LIMIT,
                     ));
+                    failed |= page.is_err();
                     let _ = black_box(page);
                 });
             });
         }
 
         group.finish();
+    }
+
+    // Keep local exploratory runs useful, but never publish CI timings for
+    // failed queries as if they represented successful work.
+    if std::env::var_os("IBEX_BENCH_STRICT").is_some() {
+        assert!(!failed, "resource_filter: one or more workloads failed");
     }
 }
 

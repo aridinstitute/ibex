@@ -7,23 +7,22 @@ use ibex_app::command::ListResourcesPage;
 use ibex_app::command::{
     AddCollectionParent, CountResources, CreateCollection, CreatePerson, CreateResource, CreateTag,
     DeleteCollection, FindTagByText, GetResource, GetResourceDetail, ListCollectionForest,
-    ListPersons, ListResources, ListResourcesQueryPage, ListTags, RemoveCollectionParent,
-    RenameCollection, SetCollectionClassification, SetResourceFavorite, UpdateResource,
+    ListPersons, ListResourcesQueryPage, ListTags, RemoveCollectionParent, RenameCollection,
+    SetCollectionClassification, SetResourceFavorite, UpdateResource,
 };
 use ibex_app::command::{ImportBiblatex, ImportReport, PreviewBiblatex};
 use ibex_app::{AppState, Command, Outcome};
 #[cfg(test)]
 use ibex_core::ResourcePage;
 use ibex_core::{
-    Collection, CollectionId, CollectionTreeNode, CreatorRole, ImportChoices, ImportPreview, Name,
-    NewResource, NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId,
-    ResourceQuery, SortedResourcePage, Tag,
+    Collection, CollectionId, CollectionTreeNode, ImportChoices, ImportPreview, Name, NewResource,
+    NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId, ResourceQuery,
+    SortedResourcePage, Tag,
 };
 use ibex_core::{ResourceGridPage, ResourceGridParent};
 use std::{io::Read as _, path::PathBuf};
 use tokio::sync::oneshot;
 
-use ibex_app::metadata::{link_creators, link_journal};
 /// File contents plus preview for the GUI review step.
 #[derive(Debug, Clone)]
 pub struct BiblatexImportPlan {
@@ -1015,7 +1014,10 @@ fn read_bibliography_file(path: &PathBuf) -> Result<String, String> {
 mod tests {
     use super::*;
     use ibex_app::Surface;
+    use ibex_app::command::ListResources;
+    use ibex_app::metadata::{link_creators, link_journal};
     use ibex_app::testing::MemoryStore;
+    use ibex_core::CreatorRole;
     use ibex_core::published_label_from;
 
     // Use the real adapter: MemoryStore does not exercise SurrealDB's stack usage.

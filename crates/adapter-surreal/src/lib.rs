@@ -258,7 +258,7 @@ fn millis_to_datetime(ms: UtcMillis) -> Option<Datetime> {
 }
 
 fn datetime_to_millis(dt: &Datetime) -> UtcMillis {
-    let inner = dt.clone().into_inner();
+    let inner = (*dt).into_inner();
     UtcMillis::from_unix_ms(
         inner
             .timestamp()
@@ -1448,10 +1448,11 @@ impl SurrealStore {
         // Second hop: issue → journal (and any other missing grandparents).
         let mut grandparents: Vec<ResourceId> = Vec::new();
         for resource in by_id.values() {
-            if let Some(parent_id) = resource.parent_id {
-                if !by_id.contains_key(&parent_id) && !grandparents.contains(&parent_id) {
-                    grandparents.push(parent_id);
-                }
+            if let Some(parent_id) = resource.parent_id
+                && !by_id.contains_key(&parent_id)
+                && !grandparents.contains(&parent_id)
+            {
+                grandparents.push(parent_id);
             }
         }
         self.fetch_inheritance_ancestors(&mut by_id, &grandparents)
@@ -1489,6 +1490,8 @@ impl SurrealStore {
         Ok(summaries)
     }
 
+    // One parameter per projected ancestor column; callers pass a row's fields.
+    #[allow(clippy::too_many_arguments)]
     fn inheritance_stub(
         id: ResourceId,
         kind: ResourceKind,
@@ -1503,8 +1506,10 @@ impl SurrealStore {
         language: Option<String>,
         venue: Option<String>,
     ) -> Result<Resource, StoreError> {
-        let mut metadata = ResourceMetadata::default();
-        metadata.venue = venue;
+        let metadata = ResourceMetadata {
+            venue,
+            ..ResourceMetadata::default()
+        };
         Resource::try_new(
             id,
             NewResource {
@@ -2466,6 +2471,9 @@ impl Store for SurrealStore {
             let (matches, _) = self
                 .query_resource_rows(query, 0, 0, None, None, true)
                 .await?;
+            // RecordId's Hash/Eq never read the interior-mutable caches Clippy
+            // finds nested inside SurrealDB's Value type.
+            #[allow(clippy::mutable_key_type)]
             let mut seen = std::collections::HashSet::new();
             let mut frontier = Vec::new();
             for row in matches {
@@ -2488,10 +2496,10 @@ impl Store for SurrealStore {
                 let ancestors: Vec<GridLinkRow> = response.take(0).map_err(map_err)?;
                 frontier = Vec::new();
                 for row in ancestors {
-                    if seen.insert(row.id) {
-                        if let Some(parent) = row.parent {
-                            frontier.push(parent);
-                        }
+                    if seen.insert(row.id)
+                        && let Some(parent) = row.parent
+                    {
+                        frontier.push(parent);
                     }
                 }
             }

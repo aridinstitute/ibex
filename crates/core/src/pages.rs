@@ -77,8 +77,7 @@ impl Pages {
         let trimmed = raw.trim();
         let literal = NonEmptyStr::try_new(trimmed)?;
         let normalized = trimmed
-            .replace('\u{2013}', "-")
-            .replace('\u{2014}', "-")
+            .replace(['\u{2013}', '\u{2014}'], "-")
             .replace("--", "-");
         let spans = normalized
             .split(',')

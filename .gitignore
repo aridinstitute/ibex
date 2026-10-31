@@ -1,7 +1,6 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
 
 # IDE / OS
 .idea/
@@ -21,3 +20,4 @@ Cargo.lock
 /docs/*
 !/docs/user-guide.md
 /skills-lock.json
+solo.yml

@@ -430,7 +430,7 @@ mod tests {
             .unwrap()
         });
         let (input, before) = cx
-            .update_window(handle.into(), |_, window, cx| {
+            .update_window(handle, |_, window, cx| {
                 window.render_frame(cx);
                 let input = rules.read(cx).rows[0].keywords.clone();
                 input.focus_handle(cx).focus(window, cx);
@@ -445,7 +445,7 @@ mod tests {
         // The Enter subscription runs once the previous update flushes; the
         // async write stays pending until the executor is parked.
         let before = cx
-            .update_window(handle.into(), |_, window, cx| {
+            .update_window(handle, |_, window, cx| {
                 let input = input.clone();
                 assert!(rules.read(cx).rows[0].saving);
                 window.render_frame(cx);
@@ -469,7 +469,7 @@ mod tests {
             })
             .unwrap();
         settle(cx, &worker);
-        cx.update_window(handle.into(), |_, window, cx| {
+        cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(
                 [0usize, 1].map(|ix| window.find(("rule-row", ix)).bounds()),
@@ -517,7 +517,7 @@ mod tests {
             })
             .unwrap()
         });
-        cx.update_window(handle.into(), |_, window, cx| {
+        cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             let input = rules.read(cx).rows[0].keywords.clone();
             input.update(cx, |state, cx| state.set_value("a,,b", window, cx));
@@ -526,7 +526,7 @@ mod tests {
         })
         .unwrap();
         cx.run_until_parked();
-        cx.update_window(handle.into(), |_, window, cx| {
+        cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             assert!(rules.read(cx).rows[0].error.is_some());
             assert!(window.try_find(("rule-error", 0usize)).is_some());
@@ -534,7 +534,7 @@ mod tests {
         })
         .unwrap();
         settle(cx, &worker);
-        cx.update_window(handle.into(), |_, window, cx| {
+        cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             let row = &rules.read(cx).rows[0];
             assert!(row.collection.jev_enabled);
@@ -556,7 +556,7 @@ mod tests {
         })
         .unwrap();
         settle(cx, &worker);
-        cx.update_window(handle.into(), |_, window, cx| {
+        cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             let row = &rules.read(cx).rows[0];
             assert!(row.error.is_none());

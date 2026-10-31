@@ -660,9 +660,7 @@ impl LibraryDelegate {
     /// The id backing a row, so selection events can drive id-keyed fetches.
     /// A create draft at row 0 has no id yet.
     pub fn row_id(&self, row_ix: usize) -> Option<ResourceId> {
-        let Some(data_ix) = self.data_row_ix(row_ix) else {
-            return None;
-        };
+        let data_ix = self.data_row_ix(row_ix)?;
         self.rows.get(data_ix).map(|row| row.id)
     }
 
@@ -1311,32 +1309,31 @@ impl TableDelegate for LibraryDelegate {
                         .truncate()
                         .child(title),
                 );
-                if expanded {
-                    if let Some(page) = self.grid.children.get(&id) {
-                        let loading = page.request.is_some();
-                        if loading || page.error.is_some() {
-                            let label = if loading {
-                                "Loading children…"
-                            } else {
-                                "Children failed · Retry"
-                            };
-                            let tooltip = page.error.clone().unwrap_or_else(|| {
-                                format!("Load children of {}", row.title.as_str())
-                            });
-                            cell = cell.child(
-                                Button::new(format!("resource-children-{id}"))
-                                    .ghost()
-                                    .xsmall()
-                                    .compact()
-                                    .label(label)
-                                    .tooltip(tooltip)
-                                    .disabled(disabled || loading)
-                                    .on_click(cx.listener(move |table, _, window, cx| {
-                                        cx.stop_propagation();
-                                        table.delegate_mut().request_children(id, window, cx);
-                                    })),
-                            );
-                        }
+                if expanded && let Some(page) = self.grid.children.get(&id) {
+                    let loading = page.request.is_some();
+                    if loading || page.error.is_some() {
+                        let label = if loading {
+                            "Loading children…"
+                        } else {
+                            "Children failed · Retry"
+                        };
+                        let tooltip = page
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| format!("Load children of {}", row.title.as_str()));
+                        cell = cell.child(
+                            Button::new(format!("resource-children-{id}"))
+                                .ghost()
+                                .xsmall()
+                                .compact()
+                                .label(label)
+                                .tooltip(tooltip)
+                                .disabled(disabled || loading)
+                                .on_click(cx.listener(move |table, _, window, cx| {
+                                    cx.stop_propagation();
+                                    table.delegate_mut().request_children(id, window, cx);
+                                })),
+                        );
                     }
                 }
                 cell
@@ -1526,7 +1523,7 @@ fn creator_options(people: &[Person]) -> Vec<(SharedString, PersonId)> {
         .iter()
         .map(|person| (person.name.display().into(), person.id))
         .collect();
-    options.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    options.sort_by_key(|a| a.0.to_lowercase());
     options
 }
 
@@ -1637,6 +1634,8 @@ fn widths_by_key(widths: &[Pixels]) -> BTreeMap<String, f64> {
 }
 
 /// Focus one inline editor without holding a borrow of `InlineRowEdit`.
+// Takes each editor entity separately so the caller can release its borrow first.
+#[allow(clippy::too_many_arguments)]
 fn focus_inline_entities(
     field: InlineField,
     kind: &Entity<ComboboxState<SearchableVec<KindItem>>>,
@@ -3793,14 +3792,13 @@ impl LibraryApp {
         }
         let worker = self.table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
-            if let Some(old_parent) = from_parent {
-                if worker
+            if let Some(old_parent) = from_parent
+                && worker
                     .remove_collection_parent(child_id, old_parent)
                     .await
                     .is_err()
-                {
-                    return;
-                }
+            {
+                return;
             }
             let result = worker.add_collection_parent(child_id, to_parent).await;
             _ = app.update_in(window, |app, window, cx| {
@@ -3923,10 +3921,10 @@ impl LibraryApp {
                 let Some(tag) = self.tags.iter().find(|tag| tag.id == tag_id).cloned() else {
                     return;
                 };
-                if let Some(EditFetch::Ready(form)) = &mut self.edit {
-                    if !form.tags.iter().any(|t| t.id == tag.id) {
-                        form.tags.push(tag);
-                    }
+                if let Some(EditFetch::Ready(form)) = &mut self.edit
+                    && !form.tags.iter().any(|t| t.id == tag.id)
+                {
+                    form.tags.push(tag);
                 }
                 self.sync_tag_picker(window, cx);
                 cx.notify();
@@ -4233,10 +4231,10 @@ impl LibraryApp {
                     Ok(resource) => {
                         // Optimistically patch favorite on a cached/loaded
                         // detail if present, then refetch for consistency.
-                        if let Some((_, DetailFetch::Loaded(detail))) = app.detail.as_mut() {
-                            if detail.id == id {
-                                detail.favorite = resource.favorite;
-                            }
+                        if let Some((_, DetailFetch::Loaded(detail))) = app.detail.as_mut()
+                            && detail.id == id
+                        {
+                            detail.favorite = resource.favorite;
                         }
                         if app.selected == Some(id) {
                             app.fetch_detail(id, window, cx);
@@ -5422,6 +5420,8 @@ impl LibraryApp {
         }
     }
 
+    // gpui render helper: row state plus window and context handles.
+    #[allow(clippy::too_many_arguments)]
     fn sidebar_row(
         &self,
         index: usize,
@@ -7943,7 +7943,7 @@ mod palette_persistence_tests {
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(
-                window.find("open-documentation").label().as_deref(),
+                window.find("open-documentation").label(),
                 Some("Open documentation")
             );
             window.click("open-documentation", cx);
@@ -9919,7 +9919,7 @@ mod sidebar_navigation_tests {
             .unwrap()
         });
         cx.run_until_parked();
-        (handle.into(), app, dir)
+        (handle, app, dir)
     }
 
     #[gpui_kit::test]
@@ -10176,7 +10176,7 @@ mod favorite_shortcut_tests {
             })
             .unwrap()
         });
-        (handle.into(), app, worker, dir)
+        (handle, app, worker, dir)
     }
 
     fn settle(cx: &mut TestAppContext, worker: &DbWorker) {
@@ -10551,7 +10551,7 @@ mod classification_tests {
             .unwrap()
         });
         Fixture {
-            handle: handle.into(),
+            handle,
             app,
             worker,
             resource,
