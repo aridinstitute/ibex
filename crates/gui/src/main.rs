@@ -79,6 +79,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<()> {
+    apply_app_icon();
     let args = Args::parse();
     let started = (|| {
         let paths = resolve_paths(
@@ -165,6 +166,33 @@ fn run() -> Result<()> {
             }
         });
     Ok(())
+}
+
+/// The ibex logo, embedded so the Dock shows it even though the app ships
+/// as a bare binary without a bundle.
+#[cfg(target_os = "macos")]
+const APP_ICON_PNG: &[u8] = include_bytes!("../assets/app-icon.png");
+
+/// Set the macOS app (Dock) icon from the embedded logo. Other platforms
+/// take their icon from bundle metadata, so there is nothing to do.
+#[cfg(target_os = "macos")]
+fn apply_app_icon() {
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let data = NSData::with_bytes(APP_ICON_PNG);
+    let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+        eprintln!("warning: could not decode the embedded app icon");
+        return;
+    };
+    // SAFETY: the icon setter requires the main thread, which this is.
+    unsafe {
+        NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&image));
+    }
 }
 
 /// Show why the library could not open in a window of its own; closing it
