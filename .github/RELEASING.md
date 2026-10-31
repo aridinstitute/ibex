@@ -13,7 +13,8 @@
    git push origin v0.1.0
    ```
 
-4. The Release workflow re-runs CI, packages the Apple Silicon macOS app + CLI
+4. The Release workflow confirms CI already passed for the tagged source tree
+   (it does not re-run CI), packages the Apple Silicon macOS app + CLI
    and the Linux x86_64 CLI, smoke-tests the extracted archives, and creates a
    **draft** GitHub Release. Review it, then publish it manually.
 
@@ -26,14 +27,23 @@ branch; final tags must point at a commit on `main`.
 
 | Workflow | Runs on | Blocking |
 |---|---|---|
-| `ci.yml` | PRs and pushes to `main` / `release/**`, weekly, manual | Yes, via the **CI gate** check |
-| `performance.yml` | Nightly, manual (pick a baseline and `small`/`large`) | No; compares timings on one runner and uploads reports |
+| `ci.yml` | PRs into `main` / `release/**`, pushes to `main`, manual; weekly dependency audit only | Yes, via the **CI gate** check |
+| `performance.yml` | Manual only (pick a baseline and `small`/`large`) | No; compares timings on one runner and uploads reports |
 | `release.yml` | `v*` tags | Creates a draft only |
 
-Clippy and rustdoc warnings fail CI. Benchmark compilation and optimized
-builds run only on pushes to `release/**` and `main` and on release tags, not
-on PRs. Coverage runs weekly or on manual
-dispatch and is informational.
+Clippy and rustdoc warnings fail CI. To save Actions minutes:
+
+- Shared crates are tested on Linux; macOS runs only the GUI crate.
+- Benchmark compilation and optimized builds run only on pushes to `main`;
+  release packaging builds and smoke-tests optimized binaries for every tag.
+- Changes that touch only Markdown or `docs/` skip CI, except
+  `docs/user-guide.md`, which is compiled into the GUI.
+- Coverage runs only on manual dispatch and is informational.
+
+If a release tag points at a commit whose source tree no PR run tested (for
+example, a docs-only merge or a PR that was behind its base), the Release
+workflow stops. Run `gh workflow run ci.yml --ref <branch>`, then re-run the
+release once CI passes.
 
 ## GitHub settings
 
@@ -44,8 +54,8 @@ private repositories. Until then, enforce these by convention:
   check, and block force pushes.
 - Allow only squash merges into `main`.
 - Optionally protect `v*` tags so only maintainers can create them.
-- macOS jobs on private repositories consume Actions minutes at a higher
-  rate than Linux jobs.
+- macOS jobs on private repositories consume 10x the Actions minutes of
+  Linux jobs. A public repository gets standard runners for free.
 
 ## Unsigned builds
 
