@@ -80,7 +80,6 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<()> {
-    apply_app_icon();
     let args = Args::parse();
     let started = (|| {
         let paths = resolve_paths(
@@ -122,6 +121,7 @@ fn run() -> Result<()> {
         .with_assets(AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            apply_app_icon();
             crate::theme::apply(cx.window_appearance().into(), &settings.theme, cx);
             bind_library_keys(cx);
             if let Err(err) = gpui_kit::open_window(
@@ -176,6 +176,9 @@ const APP_ICON_PNG: &[u8] = include_bytes!("../assets/app-icon.png");
 
 /// Set the macOS app (Dock) icon from the embedded logo. Other platforms
 /// take their icon from bundle metadata, so there is nothing to do.
+/// Call only after GPUI creates its shared GPUIApplication: calling
+/// NSApplication::sharedApplication first permanently installs a plain instance
+/// without the `platform` ivar GPUI needs at launch.
 #[cfg(target_os = "macos")]
 fn apply_app_icon() {
     use objc2::{AnyThread, MainThreadMarker};
@@ -203,6 +206,7 @@ fn show_startup_error(message: String) {
         .with_assets(AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            apply_app_icon();
             cx.on_window_closed(|_, _| std::process::exit(1)).detach();
             let opened = gpui_kit::open_window(
                 WindowOptions {
