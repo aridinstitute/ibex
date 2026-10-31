@@ -1,0 +1,238 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a matching version on the right branch
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git ls-files --error-unmatch Cargo.lock
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+
+          version = tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"]
+          numeric = r"(0|[1-9][0-9]*)"
+          identifier = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+          semver = rf"{numeric}\.{numeric}\.{numeric}(?:-{identifier}(?:\.{identifier})*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+          if not re.fullmatch(semver, version) or os.environ["TAG"] != f"v{version}":
+              raise SystemExit("Release tag must be v<workspace.package.version>, with a valid SemVer version")
+          prerelease = "-" in version.split("+", 1)[0]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"version={version}\nprerelease={str(prerelease).lower()}\n")
+          PY
+          # Release candidates come from staging; final releases only from main.
+          if grep -qx 'prerelease=true' "$GITHUB_OUTPUT"; then
+            branches=$(git branch -r --contains HEAD --list 'origin/release/*')
+            test -n "$branches" || { echo '::error::Prerelease tags must point at a commit on a release/* branch'; exit 1; }
+          else
+            git merge-base --is-ancestor HEAD refs/remotes/origin/main ||
+              { echo '::error::Release tags must point at a commit on main'; exit 1; }
+          fi
+
+  checks:
+    name: Release checks
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Package (${{ matrix.target }})
+    needs: [validate, checks]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+      VERSION: ${{ needs.validate.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: release
+      - name: Build native release binaries
+        run: |
+          rustup target add "$TARGET"
+          packages=(-p ibex-cli)
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            test "$(uname -m)" = arm64
+            packages+=(-p ibex-gui)
+          fi
+          cargo build --locked --release --target "$TARGET" "${packages[@]}"
+      - name: Assemble unsigned packages
+        run: |
+          name="ibex-$VERSION-$TARGET"
+          root="package/$name"
+          mkdir -p "$root" dist
+          install -m 755 "target/$TARGET/release/ibex" "$root/ibex"
+          cp README.md "$root/README.md"
+          {
+            echo "Version: $VERSION"
+            echo "Commit: $GITHUB_SHA"
+            echo "Target: $TARGET"
+            echo "Runner image: $ImageOS $ImageVersion"
+            rustc --version --verbose
+            python3 -c 'import hashlib; print("Cargo.lock SHA256:", hashlib.sha256(open("Cargo.lock", "rb").read()).hexdigest())'
+          } > "$root/build-info.txt"
+          cp "$root/build-info.txt" "dist/$name-build-info.txt"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            app="$root/Ibex.app/Contents"
+            mkdir -p "$app/MacOS" "$app/Resources" "$RUNNER_TEMP/Ibex.iconset"
+            install -m 755 "target/$TARGET/release/ibex-gui" "$app/MacOS/ibex-gui"
+            for size in 16 32 128 256 512; do
+              sips -z "$size" "$size" crates/gui/assets/app-icon.png \
+                --out "$RUNNER_TEMP/Ibex.iconset/icon_${size}x${size}.png" > /dev/null
+              double=$((size * 2))
+              sips -z "$double" "$double" crates/gui/assets/app-icon.png \
+                --out "$RUNNER_TEMP/Ibex.iconset/icon_${size}x${size}@2x.png" > /dev/null
+            done
+            iconutil -c icns "$RUNNER_TEMP/Ibex.iconset" -o "$app/Resources/Ibex.icns"
+            export APP_CONTENTS="$app"
+            python3 - <<'PY'
+          import os
+          import plistlib
+          from pathlib import Path
+
+          version = os.environ["VERSION"].split("+", 1)[0].split("-", 1)[0]
+          info = {
+              "CFBundleName": "Ibex",
+              "CFBundleDisplayName": "Ibex",
+              "CFBundleIdentifier": "org.ibex.desktop",
+              "CFBundleExecutable": "ibex-gui",
+              "CFBundlePackageType": "APPL",
+              "CFBundleShortVersionString": version,
+              "CFBundleVersion": version,
+              "CFBundleIconFile": "Ibex.icns",
+              "LSMinimumSystemVersion": "15.0",
+              "NSHighResolutionCapable": True,
+          }
+          with (Path(os.environ["APP_CONTENTS"]) / "Info.plist").open("wb") as output:
+              plistlib.dump(info, output)
+          PY
+          fi
+          tar -czf "dist/$name.tar.gz" -C package "$name"
+      - name: Smoke-test extracted packages and generate checksums
+        run: |
+          name="ibex-$VERSION-$TARGET"
+          mkdir -p "$RUNNER_TEMP/package-smoke"
+          tar -xzf "dist/$name.tar.gz" -C "$RUNNER_TEMP/package-smoke"
+          extracted="$RUNNER_TEMP/package-smoke/$name"
+          test "$("$extracted/ibex" --version)" = "ibex $VERSION"
+          "$extracted/ibex" --memory resource list
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            app="$extracted/Ibex.app/Contents"
+            test "$("$app/MacOS/ibex-gui" --version)" = "ibex-gui $VERSION"
+            plutil -lint "$app/Info.plist"
+            test -s "$app/Resources/Ibex.icns"
+            otool -L "$app/MacOS/ibex-gui"
+          fi
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          for archive in Path("dist").glob("*.tar.gz"):
+              checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+              archive.with_suffix(archive.suffix + ".sha256").write_text(f"{checksum}  {archive.name}\n")
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  provenance:
+    name: Artifact provenance
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Attest packages (no Apple signing credentials needed)
+        if: github.event.repository.private == false || vars.ENABLE_ATTESTATIONS == 'true'
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/*.tar.gz
+
+  draft:
+    name: Create draft release
+    needs: [validate, checks, build, provenance]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Verify archives and create or refresh draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        run: |
+          (cd dist && sha256sum --check ./*.sha256)
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            test "$draft" = true || { echo 'Refusing to overwrite a published release'; exit 1; }
+            gh release upload "$TAG" dist/* --clobber
+          else
+            flags=(--draft --verify-tag --generate-notes --title "Ibex $TAG")
+            if [[ "$PRERELEASE" == true ]]; then flags+=(--prerelease); fi
+            printf '%s\n' \
+              'Unsigned preview: the Mac app is not Developer ID signed or notarized.' \
+              'Apple Silicon macOS 15+ app and CLI; Linux x86_64 CLI built on Ubuntu 24.04.' \
+              'Back up your library before upgrading. Do not open SurrealDB 4.0 data with this build.' \
+              > release-notes.md
+            gh release create "$TAG" dist/* "${flags[@]}" --notes-file release-notes.md
+          fi

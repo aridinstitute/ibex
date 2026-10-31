@@ -1,0 +1,146 @@
+name: Performance
+
+on:
+  schedule:
+    - cron: '43 3 * * *'
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Baseline branch, tag, or SHA (empty means previous release, then parent commit)
+        type: string
+        default: ''
+      size:
+        description: Library sizes (large includes 100K and can be slow)
+        type: choice
+        options: [small, large]
+        default: small
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+  IBEX_BENCH_STRICT: '1'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  benchmarks:
+    name: Criterion comparison
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: benchmarks
+      - name: Resolve baseline and record environment
+        env:
+          BASELINE: ${{ inputs.baseline }}
+          SIZE: ${{ inputs.size }}
+        run: |
+          mkdir -p benchmark-report
+          if [[ -z "$BASELINE" ]]; then
+            BASELINE=$(git describe --tags --match 'v[0-9]*' --abbrev=0 HEAD^ 2>/dev/null || git rev-parse HEAD^)
+          fi
+          baseline_sha=$(git rev-parse --verify --end-of-options "$BASELINE^{commit}" 2>/dev/null ||
+            git rev-parse --verify --end-of-options "refs/remotes/origin/$BASELINE^{commit}")
+          git worktree add --detach "$RUNNER_TEMP/ibex-baseline" "$baseline_sha"
+          echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target" >> "$GITHUB_ENV"
+          if [[ "$SIZE" == large ]]; then
+            echo 'IBEX_BENCH_SIZES=1000,5000,100000' >> "$GITHUB_ENV"
+          else
+            echo 'IBEX_BENCH_SIZES=1000,5000' >> "$GITHUB_ENV"
+          fi
+          {
+            echo "Candidate: $(git rev-parse HEAD)"
+            echo "Baseline: $baseline_sha"
+            echo "Runner image: $ImageOS $ImageVersion"
+            rustc --version --verbose
+            uname -a
+            lscpu
+          } > benchmark-report/environment.txt
+      - name: Benchmark both revisions on the same runner
+        run: |
+          report="$GITHUB_WORKSPACE/benchmark-report"
+          run_suite() {
+            local revision="$1"
+            local directory="$2"
+            (
+              cd "$directory"
+              cargo +1.99.0 bench --locked -p ibex-app --features testing --bench import_pipeline \
+                -- --save-baseline "$revision" 2>&1 | tee "$report/$revision-import.log"
+              cargo +1.99.0 bench --locked -p ibex-adapter-surreal --bench person_crud \
+                -- --save-baseline "$revision" 2>&1 | tee "$report/$revision-person.log"
+              cargo +1.99.0 bench --locked -p ibex-adapter-surreal --bench resource_filter \
+                -- --save-baseline "$revision" 2>&1 | tee "$report/$revision-filter.log"
+              # Older baselines may not implement IBEX_BENCH_STRICT.
+              if grep -q 'failed its guard query' "$report/$revision-filter.log"; then
+                echo "::error::A filter workload failed; its timings are not valid."
+                exit 1
+              fi
+            )
+          }
+          run_suite baseline "$RUNNER_TEMP/ibex-baseline"
+          run_suite candidate "$GITHUB_WORKSPACE"
+      - name: Summarize timing changes (informational)
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("target/criterion")
+          lines = [
+              "# Benchmark comparison",
+              "",
+              "Mean-time ratios on a shared runner, not statistical regression verdicts.",
+              "Positive changes are slower. Differences of 20% or more need review.",
+              "Only trust results when the benchmark step succeeds.",
+              "",
+              "| Benchmark | Baseline (ms) | Candidate (ms) | Change |",
+              "| --- | ---: | ---: | ---: |",
+          ]
+          compared = 0
+          for candidate in sorted(root.glob("**/candidate/estimates.json")):
+              baseline = candidate.parent.parent / "baseline" / "estimates.json"
+              if not baseline.exists():
+                  continue
+              before = json.loads(baseline.read_text())["mean"]["point_estimate"]
+              after = json.loads(candidate.read_text())["mean"]["point_estimate"]
+              if before <= 0:
+                  continue
+              change = (after / before - 1) * 100
+              name = str(candidate.parent.parent.relative_to(root)).replace("|", r"\|")
+              note = " (review)" if change >= 20 else ""
+              lines.append(f"| {name} | {before / 1e6:.3f} | {after / 1e6:.3f} | {change:+.1f}%{note} |")
+              compared += 1
+          if not compared:
+              lines.append("\nNo comparable results. Inspect the benchmark logs.")
+          summary = "\n".join(lines) + "\n"
+          Path("benchmark-report").mkdir(exist_ok=True)
+          Path("benchmark-report/summary.md").write_text(summary)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              output.write(summary)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: benchmarks-${{ github.sha }}
+          path: |
+            benchmark-report/
+            target/criterion/
+          if-no-files-found: error
+          retention-days: 30
