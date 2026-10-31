@@ -1,11 +1,11 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{
+use ibex_app::command::{
     CreatePerson, DeletePerson, FindPersonsByName, GetPerson, ListPersons, UpdatePerson,
 };
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
-use oeuvre_core::{Name, PersonId, Store};
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
+use ibex_core::{Name, PersonId, Store};
 
 #[tokio::test]
 async fn person_crud_round_trip() {

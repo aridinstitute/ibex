@@ -1,9 +1,9 @@
 //! Real-adapter coverage for Task 04 linked publication entities.
 
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::command::{ImportBiblatex, ListResources};
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{ResourceKind, Store};
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::command::{ImportBiblatex, ListResources};
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{ResourceKind, Store};
 
 #[tokio::test]
 async fn shared_issue_and_series_survive_reopen() {
@@ -84,7 +84,7 @@ async fn shared_issue_and_series_survive_reopen() {
         loop {
             match SurrealStore::open(&path).await {
                 Ok(store) => break store,
-                Err(err) if err.message.contains("already locked") => {
+                Err(err) if err.is_in_use() => {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("reopen failed: {err}"),

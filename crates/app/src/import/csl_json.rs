@@ -1,11 +1,11 @@
 //! CSL-JSON (citeproc item) parsing into format-neutral drafts.
 //!
-//! No [`oeuvre_core::Store`] or [`crate::AppState`] dependency — person matching
+//! No [`ibex_core::Store`] or [`crate::AppState`] dependency — person matching
 //! and persistence stay in shared orchestration.
 
 use std::collections::BTreeMap;
 
-use oeuvre_core::{
+use ibex_core::{
     BibliographicDate, CreatorRole, DateCertainty, DatePrecision, DiagnosticSeverity,
     EntryProvenance, IMPORT_MAX_SOURCE_BYTES, IMPORT_PARSER_VERSION, Identifier, ImportDiagnostic,
     ImportDraft, ImportEntryDraft, ImportFormat, ImportTempId, Name, NewResource, NonEmptyStr,
@@ -47,10 +47,7 @@ pub fn parse_csl_json(source: &str) -> Result<ImportDraft, ParseError> {
             format: ImportFormat::CslJson,
             parser_version: IMPORT_PARSER_VERSION,
         },
-        source_fingerprint: Some(oeuvre_core::source_fingerprint(
-            ImportFormat::CslJson,
-            source,
-        )),
+        source_fingerprint: Some(ibex_core::source_fingerprint(ImportFormat::CslJson, source)),
         entries: Vec::new(),
         diagnostics: Vec::new(),
     };

@@ -1,10 +1,10 @@
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::command::{
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::command::{
     GetResource, GetResourceDetail, ImportBiblatex, ListPersons, ListResources,
     ListResourcesQueryPage,
 };
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{
     CreatorRole, CreatorSpec, ImportedResourceWrite, Name, NewResource, NewSeries, NonEmptyStr,
     Person, PersonId, ResourceKind, ResourceQuery, ResourceSort, Series, SeriesId, SortDirection,
     Store,
@@ -182,7 +182,7 @@ async fn import_persists_people_roles_order_and_survives_reopen() {
         loop {
             match SurrealStore::open(&path).await {
                 Ok(store) => break store,
-                Err(err) if err.message.contains("already locked") => {
+                Err(err) if err.is_in_use() => {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("reopen failed: {err}"),

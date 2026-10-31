@@ -16,10 +16,10 @@ repository = "https://github.com/kaden/oeuvre"
 authors = ["Kaden"]
 
 [workspace.dependencies]
-oeuvre-core = { path = "crates/core" }
-oeuvre-app = { path = "crates/app" }
-oeuvre-adapter-surreal = { path = "crates/adapter-surreal" }
-oeuvre-cli = { path = "crates/cli" }
+ibex-core = { path = "crates/core" }
+ibex-app = { path = "crates/app" }
+ibex-adapter-surreal = { path = "crates/adapter-surreal" }
+ibex-cli = { path = "crates/cli" }
 
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -30,7 +30,7 @@ tracing = "0.1"
 ulid = { version = "3", features = ["serde"] }
 time = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-surrealdb = { version = "3.3.4", default-features = false, features = ["kv-mem", "kv-surrealkv"] }
+surrealdb = { version = "=3.3.4", default-features = false, features = ["kv-mem", "kv-surrealkv"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 tempfile = "3"
 clap = { version = "4", features = ["derive", "env"] }

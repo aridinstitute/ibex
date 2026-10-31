@@ -1,13 +1,11 @@
 //! Real-adapter coverage for Task 05 read-time inheritance.
 
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::command::{
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::command::{
     CreateResource, GetResource, GetResourceDetail, ListResources, UpdateResource,
 };
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{
-    BibliographicDate, NewResource, NonEmptyStr, ResourceId, ResourceKind, UtcMillis,
-};
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{BibliographicDate, NewResource, NonEmptyStr, ResourceId, ResourceKind, UtcMillis};
 
 fn nes(s: &str) -> NonEmptyStr {
     NonEmptyStr::try_new(s).unwrap()
@@ -133,7 +131,7 @@ async fn parent_publisher_and_title_propagate_through_reopen_list_and_detail() {
         loop {
             match SurrealStore::open(&path).await {
                 Ok(store) => break store,
-                Err(err) if err.message.contains("already locked") => {
+                Err(err) if err.is_in_use() => {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("reopen failed: {err}"),

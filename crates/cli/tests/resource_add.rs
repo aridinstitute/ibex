@@ -1,10 +1,10 @@
-use std::process::Command;
+mod common;
 
 #[test]
 fn add_resource_with_creator_and_labels_then_show_it() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ovr"))
+        common::ibex()
             .arg("--data")
             .arg(dir.path())
             .args(args)

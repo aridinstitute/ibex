@@ -1,11 +1,11 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{
+use ibex_app::command::{
     CreateResource, CreateTag, GetResourceDetail, ListResourcesQueryPage, ListTags,
 };
-use oeuvre_app::testing::MemoryStore;
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{NewResource, NonEmptyStr, ResourceFilter, ResourceKind, ResourceQuery, Store};
+use ibex_app::testing::MemoryStore;
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{NewResource, NonEmptyStr, ResourceFilter, ResourceKind, ResourceQuery, Store};
 
 fn book(title: &str) -> NewResource {
     NewResource {

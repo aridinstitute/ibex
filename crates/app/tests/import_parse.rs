@@ -1,7 +1,7 @@
 //! Parser tests with no database or application state.
 
-use oeuvre_app::import::parse_biblatex;
-use oeuvre_core::{ImportFormat, ResourceKind, import_codes};
+use ibex_app::import::parse_biblatex;
+use ibex_core::{ImportFormat, ResourceKind, import_codes};
 
 #[test]
 fn parse_biblatex_maps_a_book_without_app_state() {
@@ -50,7 +50,7 @@ fn parse_biblatex_strips_bom_and_records_skipped_entries() {
         draft.diagnostics.iter().any(|d| {
             d.entry_key.as_deref() == Some("skip")
                 && d.code == import_codes::UNSUPPORTED_TYPE
-                && d.severity == oeuvre_core::DiagnosticSeverity::Error
+                && d.severity == ibex_core::DiagnosticSeverity::Error
         }),
         "expected unsupported-type diagnostic: {:?}",
         draft.diagnostics
@@ -71,7 +71,7 @@ fn parse_biblatex_rejects_cycles_and_oversized_sources() {
 
     let huge = format!(
         "@book{{x,title={{X}}}}{}",
-        " ".repeat(oeuvre_core::IMPORT_MAX_SOURCE_BYTES)
+        " ".repeat(ibex_core::IMPORT_MAX_SOURCE_BYTES)
     );
     let err = parse_biblatex(&huge).expect_err("too large");
     assert_eq!(err.code, import_codes::SOURCE_TOO_LARGE);
@@ -160,7 +160,7 @@ fn parse_preserves_notes_particles_pages_and_optional_date_warnings() {
     );
     assert!(
         draft.diagnostics.iter().any(|d| {
-            d.severity == oeuvre_core::DiagnosticSeverity::Warning
+            d.severity == ibex_core::DiagnosticSeverity::Warning
                 && (d.message.contains("and others") || d.field.as_deref() == Some("date"))
         }),
         "{:?}",

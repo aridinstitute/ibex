@@ -6,7 +6,7 @@ use crate::command::{
 use crate::{AppState, Command, Outcome};
 use std::time::Duration;
 
-use oeuvre_core::{
+use ibex_core::{
     BibliographicDate, CreatorRole, CreatorSpec, DateCertainty, DatePrecision, Identifier, Name,
     NewResource, NonEmptyStr, Pages, Resource, ResourceFilter, ResourceId, ResourceKind,
     ResourceQuery, UtcMillis,
@@ -458,7 +458,7 @@ async fn lookup_at(input: &str, books: &str, works: &str) -> Result<Lookup, Stri
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(12))
         .user_agent(concat!(
-            "Oeuvre/",
+            "Ibex/",
             env!("CARGO_PKG_VERSION"),
             " (metadata lookup)"
         ))
@@ -656,7 +656,7 @@ mod tests {
         let fetched = crossref(&work, "10.1000/paper").unwrap();
         let new = fetched.resource;
         assert_eq!(
-            new.pages.as_ref().map(oeuvre_core::Pages::as_str),
+            new.pages.as_ref().map(ibex_core::Pages::as_str),
             Some("S10-S20")
         );
         assert_eq!(new.article_number.as_deref(), Some("e123"));
@@ -800,7 +800,7 @@ mod tests {
         let original = openlibrary(&serde_json::json!({"title":"My title"}), "9780306406157")
             .unwrap()
             .resource;
-        let mut record = Resource::try_new(oeuvre_core::ResourceId::generate(), original).unwrap();
+        let mut record = Resource::try_new(ibex_core::ResourceId::generate(), original).unwrap();
         record.publisher = Some("Local press".into());
         let fetched = openlibrary(&serde_json::json!({"title":"Remote title", "publishers":[{"name":"Remote press"}], "number_of_pages":42}), "9780306406157").unwrap().resource;
         let merged = fill_gaps(&record, fetched);
@@ -814,7 +814,7 @@ mod tests {
     fn refresh_adds_new_short_title_and_keywords_without_removing_local_ones() {
         let mut original = empty_resource("My title", ResourceKind::Book).unwrap();
         original.keywords = vec!["Local".into(), "Biology".into()];
-        let record = Resource::try_new(oeuvre_core::ResourceId::generate(), original).unwrap();
+        let record = Resource::try_new(ibex_core::ResourceId::generate(), original).unwrap();
         let fetched = crossref(
             &serde_json::json!({
                 "title":["Remote"], "type":"book", "short-title":["Short"],
@@ -835,7 +835,7 @@ mod tests {
 
     #[test]
     fn refresh_keeps_local_authors_and_adds_missing_editor_role() {
-        use oeuvre_core::{CreatorRole, CreatorSpec, PersonId};
+        use ibex_core::{CreatorRole, CreatorSpec, PersonId};
         let local_author = PersonId::generate();
         let mut original = empty_resource("My title", ResourceKind::Book).unwrap();
         original.creators = vec![CreatorSpec {
@@ -843,7 +843,7 @@ mod tests {
             role: CreatorRole::Author,
             credited_as: None,
         }];
-        let record = Resource::try_new(oeuvre_core::ResourceId::generate(), original).unwrap();
+        let record = Resource::try_new(ibex_core::ResourceId::generate(), original).unwrap();
         let mut fetched = empty_resource("Remote title", ResourceKind::Book).unwrap();
         fetched.creators = vec![
             CreatorSpec {
@@ -912,7 +912,7 @@ pub async fn link_journal(
     journal: NewResource,
     article: &mut NewResource,
 ) -> Result<(), String> {
-    if article.parent_id.is_some() || article.kind != oeuvre_core::ResourceKind::JournalArticle {
+    if article.parent_id.is_some() || article.kind != ibex_core::ResourceKind::JournalArticle {
         return Ok(());
     }
     // Title filtering would hide conflicting ISSN matches under a different title.

@@ -2,11 +2,11 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
-use oeuvre_app::command::{
+use ibex_app::command::{
     CreateCollection, DeleteCollection, ListCollectionForest, UpdateCollection,
 };
-use oeuvre_app::{AppState, Command, Outcome};
-use oeuvre_core::{CollectionId, CollectionTreeNode, CollectionUpdate, NonEmptyStr};
+use ibex_app::{AppState, Command, Outcome};
+use ibex_core::{CollectionId, CollectionTreeNode, CollectionUpdate, NonEmptyStr};
 
 #[derive(Debug, Args)]
 pub struct CollectionCmd {
@@ -193,7 +193,7 @@ fn find_with_parents(
     node: &CollectionTreeNode,
     id: CollectionId,
     parent: Option<CollectionId>,
-    found: &mut Option<oeuvre_core::Collection>,
+    found: &mut Option<ibex_core::Collection>,
     parents: &mut Vec<CollectionId>,
 ) {
     if node.collection.id == id {

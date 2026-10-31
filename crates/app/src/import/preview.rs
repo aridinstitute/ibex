@@ -1,9 +1,9 @@
 //! Build an import preview: proposed creates/reuses and unresolved conflicts.
 //!
-//! Preview never writes. Callers apply [`oeuvre_core::ImportChoices`] at save;
+//! Preview never writes. Callers apply [`ibex_core::ImportChoices`] at save;
 //! save revalidates every decision.
 
-use oeuvre_core::{
+use ibex_core::{
     ContainerPreview, CreatorPreview, EntryPreview, EntryProposal, ImportConflict, ImportDraft,
     ImportPreview, PersonCandidate, PersonMatchPreview, SeriesPreview, import_codes,
     source_fingerprint,
@@ -156,7 +156,7 @@ pub async fn preview_draft(
 }
 
 fn preview_container(
-    entry: &oeuvre_core::ImportEntryDraft,
+    entry: &ibex_core::ImportEntryDraft,
     index: &mut ImportEntityIndex,
     conflicts: &mut Vec<ImportConflict>,
 ) -> Result<ContainerPreview, CommandError> {

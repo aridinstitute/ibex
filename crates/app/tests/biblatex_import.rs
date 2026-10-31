@@ -1,9 +1,9 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{GetResource, ImportBiblatex};
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::utc_year_from_millis;
+use ibex_app::command::{GetResource, ImportBiblatex};
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::utc_year_from_millis;
 
 #[tokio::test]
 async fn imports_a_book_through_the_application_command() {
@@ -125,7 +125,7 @@ async fn imports_a_mixed_batch_and_reports_skips_without_losing_fields() {
     else {
         panic!("get");
     };
-    assert_eq!(chapter.kind, oeuvre_core::ResourceKind::BookSection);
+    assert_eq!(chapter.kind, ibex_core::ResourceKind::BookSection);
     assert_eq!(chapter.metadata.venue.as_deref(), Some("Collected Essays"));
     let data = serde_json::to_value(chapter.to_new()).unwrap();
     for (key, expected) in [
@@ -164,12 +164,12 @@ async fn imports_a_mixed_batch_and_reports_skips_without_losing_fields() {
     );
     assert_eq!(
         chapter.published.as_ref().unwrap().precision(),
-        oeuvre_core::DatePrecision::Day
+        ibex_core::DatePrecision::Day
     );
     assert!(chapter.original_date.is_some());
     assert_eq!(
         chapter.original_date.as_ref().unwrap().precision(),
-        oeuvre_core::DatePrecision::Year
+        ibex_core::DatePrecision::Year
     );
     assert!(chapter.event_date.is_some());
     assert!(chapter.accessed.is_some());
@@ -203,7 +203,7 @@ async fn imports_a_mixed_batch_and_reports_skips_without_losing_fields() {
     assert_eq!(imports.len(), 1);
     assert_eq!(
         imports[0].get("import.imported_count"),
-        Some(&oeuvre_app::FieldValue::from(4u64))
+        Some(&ibex_app::FieldValue::from(4u64))
     );
 }
 
@@ -226,10 +226,10 @@ async fn invalid_syntax_duplicate_keys_and_reference_cycles_write_nothing() {
                     choices: Default::default(),
                 }))
                 .await,
-            Err(oeuvre_app::CommandError::Invalid(_))
+            Err(ibex_app::CommandError::Invalid(_))
         ));
         let Outcome::CountResources(counts) = state
-            .execute(Command::CountResources(oeuvre_app::command::CountResources))
+            .execute(Command::CountResources(ibex_app::command::CountResources))
             .await
             .unwrap()
         else {
@@ -238,7 +238,7 @@ async fn invalid_syntax_duplicate_keys_and_reference_cycles_write_nothing() {
         assert_eq!(counts.all_items, 0);
         let events = sink.take();
         assert_eq!(events[0].command(), "import_biblatex");
-        assert_eq!(events[0].status(), oeuvre_app::Status::Error);
+        assert_eq!(events[0].status(), ibex_app::Status::Error);
     }
 }
 
@@ -262,7 +262,7 @@ async fn rejects_deep_reference_chains_even_when_parents_appear_first() {
                 choices: Default::default(),
             }))
             .await,
-        Err(oeuvre_app::CommandError::Invalid(_))
+        Err(ibex_app::CommandError::Invalid(_))
     ));
 }
 
@@ -272,10 +272,18 @@ async fn preserves_custom_fields_named_like_internal_reference_markers() {
         .surface(Surface::Test)
         .sink(MemorySink::new())
         .build();
-    let Outcome::ImportBiblatex(report) = state.execute(Command::ImportBiblatex(ImportBiblatex {
-        source_text: "@book{one,title={Book},oeuvre_crossref={custom},oeuvre_import_crossref={also custom}}".into(),
-        choices: Default::default(),
-    })).await.unwrap() else { panic!("import"); };
+    let Outcome::ImportBiblatex(report) = state
+        .execute(Command::ImportBiblatex(ImportBiblatex {
+            source_text:
+                "@book{one,title={Book},ibex_crossref={custom},ibex_import_crossref={also custom}}"
+                    .into(),
+            choices: Default::default(),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("import");
+    };
     let Outcome::GetResource(resource) = state
         .execute(Command::GetResource(GetResource {
             id: report.imported[0].resource_id,
@@ -289,7 +297,7 @@ async fn preserves_custom_fields_named_like_internal_reference_markers() {
         resource
             .metadata
             .source_fields
-            .get("oeuvre_crossref")
+            .get("ibex_crossref")
             .map(String::as_str),
         Some("custom")
     );
@@ -297,7 +305,7 @@ async fn preserves_custom_fields_named_like_internal_reference_markers() {
         resource
             .metadata
             .source_fields
-            .get("oeuvre_import_crossref")
+            .get("ibex_import_crossref")
             .map(String::as_str),
         Some("also custom")
     );

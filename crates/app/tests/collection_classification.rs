@@ -1,12 +1,12 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{
+use ibex_app::command::{
     CreateCollection, CreateResource, GetResourceDetail, RenameCollection,
     SetCollectionClassification,
 };
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
-use oeuvre_core::{
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
+use ibex_core::{
     Collection, CollectionId, NewResource, NonEmptyStr, ResourceKind, keyword_suggestions,
 };
 
@@ -131,8 +131,8 @@ async fn set_classification_emits_one_annotated_event() {
 
 #[tokio::test]
 async fn update_collection_is_one_command_and_rolls_back_later_parent_failure() {
-    use oeuvre_app::command::UpdateCollection;
-    use oeuvre_core::CollectionUpdate;
+    use ibex_app::command::UpdateCollection;
+    use ibex_core::CollectionUpdate;
     let (state, sink) = state();
     let a = create(&state, "A").await;
     let b = create(&state, "B").await;
@@ -173,7 +173,7 @@ async fn update_collection_is_one_command_and_rolls_back_later_parent_failure() 
     assert_eq!(events[0].status(), Status::Error);
     let Outcome::ListCollectionForest(forest) = state
         .execute(Command::ListCollectionForest(
-            oeuvre_app::command::ListCollectionForest,
+            ibex_app::command::ListCollectionForest,
         ))
         .await
         .unwrap()

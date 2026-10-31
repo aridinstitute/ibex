@@ -2,12 +2,12 @@
 
 //! Task 06: preview, conflict choices, retry idempotency, partial reports.
 
-use oeuvre_app::command::{
+use ibex_app::command::{
     CreatePerson, DeletePerson, GetResource, ImportBiblatex, ListResources, PreviewBiblatex,
 };
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{EntryChoice, ImportChoices, PersonChoice, import_codes};
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{EntryChoice, ImportChoices, PersonChoice, import_codes};
 
 fn app() -> AppState {
     AppState::builder(MemoryStore::new())
@@ -16,7 +16,7 @@ fn app() -> AppState {
         .build()
 }
 
-async fn import(state: &AppState, source: &str) -> oeuvre_core::ImportReport {
+async fn import(state: &AppState, source: &str) -> ibex_core::ImportReport {
     let Outcome::ImportBiblatex(report) = state
         .execute(Command::ImportBiblatex(ImportBiblatex {
             source_text: source.into(),
@@ -34,7 +34,7 @@ async fn import_with_choices(
     state: &AppState,
     source: &str,
     choices: ImportChoices,
-) -> oeuvre_core::ImportReport {
+) -> ibex_core::ImportReport {
     let Outcome::ImportBiblatex(report) = state
         .execute(Command::ImportBiblatex(ImportBiblatex {
             source_text: source.into(),
@@ -169,7 +169,7 @@ async fn ambiguous_people_remain_distinct_until_explicit_choice() {
     let state = app();
     let Outcome::CreatePerson(p1) = state
         .execute(Command::CreatePerson(CreatePerson {
-            name: oeuvre_core::Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            name: ibex_core::Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
             aliases: vec![],
         }))
         .await
@@ -179,7 +179,7 @@ async fn ambiguous_people_remain_distinct_until_explicit_choice() {
     };
     let Outcome::CreatePerson(p2) = state
         .execute(Command::CreatePerson(CreatePerson {
-            name: oeuvre_core::Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            name: ibex_core::Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
             aliases: vec![],
         }))
         .await
@@ -249,7 +249,7 @@ async fn stale_preview_person_choice_is_rejected() {
     let state = app();
     let Outcome::CreatePerson(p1) = state
         .execute(Command::CreatePerson(CreatePerson {
-            name: oeuvre_core::Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            name: ibex_core::Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
             aliases: vec![],
         }))
         .await
@@ -259,7 +259,7 @@ async fn stale_preview_person_choice_is_rejected() {
     };
     let _ = state
         .execute(Command::CreatePerson(CreatePerson {
-            name: oeuvre_core::Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            name: ibex_core::Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
             aliases: vec![],
         }))
         .await
@@ -411,7 +411,7 @@ async fn preview_lists_matches_and_conflicts_without_writing() {
     assert!(preview.needs_review());
     assert!(matches!(
         preview.entries[0].proposal,
-        oeuvre_core::EntryProposal::PublicationDuplicate { .. }
+        ibex_core::EntryProposal::PublicationDuplicate { .. }
     ));
     assert_eq!(resource_count(&state).await, before);
 }

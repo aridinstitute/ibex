@@ -1347,7 +1347,7 @@ mod tests {
         let resource = Resource::from_stored(
             ResourceId::generate(),
             ResourceKind::Journal,
-            title("Oeuvre Journal"),
+            title("Ibex Journal"),
             vec![],
             None,
             None,

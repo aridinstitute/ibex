@@ -1,9 +1,9 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{CreateResource, GetResource, GetResourceDetail, UpdateResource};
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, FieldValue, Outcome, Surface};
-use oeuvre_core::NewResource;
+use ibex_app::command::{CreateResource, GetResource, GetResourceDetail, UpdateResource};
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, FieldValue, Outcome, Surface};
+use ibex_core::NewResource;
 use serde_json::json;
 
 #[tokio::test]

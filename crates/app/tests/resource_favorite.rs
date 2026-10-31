@@ -1,11 +1,11 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{
+use ibex_app::command::{
     CountResources, CreateResource, GetResource, ListResourcesQueryPage, SetResourceFavorite,
 };
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
-use oeuvre_core::{
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
+use ibex_core::{
     NewResource, NonEmptyStr, ResourceFilter, ResourceId, ResourceKind, ResourceQuery,
 };
 
@@ -140,12 +140,10 @@ async fn favorite_toggles_filters_and_counts_with_one_event() {
     let mut edit = got.to_new();
     edit.title = NonEmptyStr::try_new("Still starred").unwrap();
     let Outcome::UpdateResource(updated) = state
-        .execute(Command::UpdateResource(
-            oeuvre_app::command::UpdateResource {
-                id: a.id,
-                new: edit,
-            },
-        ))
+        .execute(Command::UpdateResource(ibex_app::command::UpdateResource {
+            id: a.id,
+            new: edit,
+        }))
         .await
         .unwrap()
     else {

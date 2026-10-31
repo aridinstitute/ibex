@@ -35,7 +35,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Focusable as _, *};
 
-use oeuvre_core::{
+use ibex_core::{
     Collection, CollectionId, CollectionTreeNode, EntryChoice, EntryProposal, ImportChoices,
     NonEmptyStr, ParentRule, Person, PersonChoice as ImportPersonChoice, PersonId,
     PersonMatchPreview, PublishedRange, Resource, ResourceCounts, ResourceDetail, ResourceFilter,
@@ -71,14 +71,14 @@ use crate::tags::{TagChoice, TagDelegate};
 use crate::theme_editor::{ThemeEditor, ThemeEditorEvent};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::popover::Popover;
-use oeuvre_app::command::ImportReport;
+use ibex_app::command::ImportReport;
 
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
 /// enough that the demo library spans several pages.
 pub const PAGE_SIZE: u32 = 50;
 
 /// Skip entries that still need review; create new people for ambiguous names.
-fn safe_skip_choices(preview: &oeuvre_core::ImportPreview) -> ImportChoices {
+fn safe_skip_choices(preview: &ibex_core::ImportPreview) -> ImportChoices {
     let mut choices = ImportChoices::default();
     for entry in &preview.entries {
         if !entry.needs_review() {
@@ -100,7 +100,7 @@ fn safe_skip_choices(preview: &oeuvre_core::ImportPreview) -> ImportChoices {
 }
 
 /// Import publication duplicates explicitly; create new people when ambiguous.
-fn intentional_duplicate_choices(preview: &oeuvre_core::ImportPreview) -> ImportChoices {
+fn intentional_duplicate_choices(preview: &ibex_core::ImportPreview) -> ImportChoices {
     let mut choices = ImportChoices::default();
     for entry in &preview.entries {
         if matches!(entry.proposal, EntryProposal::PublicationDuplicate { .. }) {
@@ -114,7 +114,7 @@ fn intentional_duplicate_choices(preview: &oeuvre_core::ImportPreview) -> Import
             if entry
                 .conflicts
                 .iter()
-                .any(|c| c.code != oeuvre_core::import_codes::AMBIGUOUS_CREATOR)
+                .any(|c| c.code != ibex_core::import_codes::AMBIGUOUS_CREATOR)
             {
                 choices
                     .entries
@@ -798,7 +798,7 @@ async fn listing_page(
                 rows: page
                     .rows
                     .into_iter()
-                    .map(|summary| oeuvre_core::ResourceGridRow {
+                    .map(|summary| ibex_core::ResourceGridRow {
                         summary,
                         has_children: false,
                     })
@@ -7132,8 +7132,8 @@ struct JevState {
 /// Only fields that can change the classification input; collection/tag,
 /// favorite, and other bibliographic changes do not discard valid predictions.
 fn classification_input_changed(
-    before: &oeuvre_core::NewResource,
-    after: &oeuvre_core::NewResource,
+    before: &ibex_core::NewResource,
+    after: &ibex_core::NewResource,
 ) -> bool {
     before.title != after.title
         || before.kind != after.kind
@@ -7265,27 +7265,27 @@ mod palette_persistence_tests {
     use crate::db::DbWorker;
     use gpui_kit::component::{WindowExt as _, table::TableState};
     use gpui_kit::{AppContext as _, Focusable as _, KeyBinding};
-    use oeuvre_core::{NonEmptyStr, ResourceId};
+    use ibex_core::{NonEmptyStr, ResourceId};
 
     #[gpui_kit::test]
     fn shift_arrows_extend_shrink_and_clamp_resource_selection(cx: &mut gpui_kit::TestAppContext) {
         use gpui_kit::test::TestWindowExt as _;
         let dir = tempfile::tempdir().unwrap();
         cx.executor().allow_parking();
-        let store = oeuvre_app::testing::MemoryStore::new();
+        let store = ibex_app::testing::MemoryStore::new();
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(oeuvre_app::seed::seed_demo_library(&store, 8))
+            .block_on(ibex_app::seed::seed_demo_library(&store, 8))
             .unwrap();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(store)
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let first = worker
             .list_grid_page_blocking(
-                oeuvre_core::ResourceGridParent::Roots,
-                oeuvre_core::ResourceQuery::newest_first(),
+                ibex_core::ResourceGridParent::Roots,
+                ibex_core::ResourceQuery::newest_first(),
                 0,
                 50,
             )
@@ -7433,20 +7433,20 @@ mod palette_persistence_tests {
         use gpui_kit::test::TestWindowExt as _;
         let dir = tempfile::tempdir().unwrap();
         cx.executor().allow_parking();
-        let store = oeuvre_app::testing::MemoryStore::new();
+        let store = ibex_app::testing::MemoryStore::new();
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(oeuvre_app::seed::seed_demo_library(&store, 8))
+            .block_on(ibex_app::seed::seed_demo_library(&store, 8))
             .unwrap();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(store)
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let first = worker
             .list_grid_page_blocking(
-                oeuvre_core::ResourceGridParent::Roots,
-                oeuvre_core::ResourceQuery::newest_first(),
+                ibex_core::ResourceGridParent::Roots,
+                ibex_core::ResourceQuery::newest_first(),
                 0,
                 50,
             )
@@ -7544,13 +7544,11 @@ mod palette_persistence_tests {
     }
     #[tokio::test]
     async fn bulk_palette_preserves_memberships_and_reports_partial_failure() {
-        let store = oeuvre_app::testing::MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 2)
-            .await
-            .unwrap();
+        let store = ibex_app::testing::MemoryStore::new();
+        ibex_app::seed::seed_demo_library(&store, 2).await.unwrap();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(store)
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let ids: Vec<_> = worker
@@ -7584,13 +7582,11 @@ mod palette_persistence_tests {
     }
     #[tokio::test]
     async fn palette_adds_tags_without_replacing_existing_memberships_or_fields() {
-        let store = oeuvre_app::testing::MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 2)
-            .await
-            .unwrap();
+        let store = ibex_app::testing::MemoryStore::new();
+        ibex_app::seed::seed_demo_library(&store, 2).await.unwrap();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(store)
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let id = worker.list_page(None, 1).await.unwrap().rows[0].id;
@@ -7611,13 +7607,11 @@ mod palette_persistence_tests {
 
     #[tokio::test]
     async fn palette_adds_collections_idempotently_and_preserves_later_edits() {
-        let store = oeuvre_app::testing::MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 2)
-            .await
-            .unwrap();
+        let store = ibex_app::testing::MemoryStore::new();
+        ibex_app::seed::seed_demo_library(&store, 2).await.unwrap();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(store)
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let id = worker.list_page(None, 1).await.unwrap().rows[0].id;
@@ -7661,13 +7655,11 @@ mod palette_persistence_tests {
 
     #[tokio::test]
     async fn palette_removes_only_unchecked_memberships_and_keeps_intervening_additions() {
-        let store = oeuvre_app::testing::MemoryStore::new();
-        oeuvre_app::seed::seed_demo_library(&store, 2)
-            .await
-            .unwrap();
+        let store = ibex_app::testing::MemoryStore::new();
+        ibex_app::seed::seed_demo_library(&store, 2).await.unwrap();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(store)
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let id = worker.list_page(None, 1).await.unwrap().rows[0].id;
@@ -7733,16 +7725,16 @@ mod palette_persistence_tests {
         let dir = tempfile::tempdir().unwrap();
         cx.executor().allow_parking();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(ibex_app::testing::MemoryStore::new())
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let first = worker
             .list_grid_page_blocking(
-                oeuvre_core::ResourceGridParent::Roots,
-                oeuvre_core::ResourceQuery {
+                ibex_core::ResourceGridParent::Roots,
+                ibex_core::ResourceQuery {
                     sort: None,
-                    filter: oeuvre_core::ResourceFilter::none(),
+                    filter: ibex_core::ResourceFilter::none(),
                 },
                 0,
                 50,
@@ -7906,16 +7898,16 @@ mod palette_persistence_tests {
         use gpui_kit::component::ThemeMode;
         cx.executor().allow_parking();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(ibex_app::testing::MemoryStore::new())
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let first = worker
             .list_grid_page_blocking(
-                oeuvre_core::ResourceGridParent::Roots,
-                oeuvre_core::ResourceQuery {
+                ibex_core::ResourceGridParent::Roots,
+                ibex_core::ResourceQuery {
                     sort: None,
-                    filter: oeuvre_core::ResourceFilter::none(),
+                    filter: ibex_core::ResourceFilter::none(),
                 },
                 0,
                 50,
@@ -8196,16 +8188,16 @@ mod panel_width_tests {
         // The production DbWorker completes requests on its own OS thread.
         cx.executor().allow_parking();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(ibex_app::testing::MemoryStore::new())
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let first = worker
             .list_grid_page_blocking(
-                oeuvre_core::ResourceGridParent::Roots,
-                oeuvre_core::ResourceQuery {
+                ibex_core::ResourceGridParent::Roots,
+                ibex_core::ResourceQuery {
                     sort: None,
-                    filter: oeuvre_core::ResourceFilter::none(),
+                    filter: ibex_core::ResourceFilter::none(),
                 },
                 0,
                 50,
@@ -8438,7 +8430,7 @@ mod sort_cycle_tests {
     };
     use gpui_kit::component::ThemeColor;
     use gpui_kit::{px, rgb, white};
-    use oeuvre_core::{Name, Person, PersonId, ResourceSort, SortDirection, UtcMillis};
+    use ibex_core::{Name, Person, PersonId, ResourceSort, SortDirection, UtcMillis};
 
     #[test]
     fn one_header_cycles_ascending_descending_then_reverts() {
@@ -8617,7 +8609,7 @@ mod detail_prefetch_tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
     use super::{DETAIL_CACHE_CAPACITY, DetailCache, PREFETCH_RADIUS, prefetch_window};
-    use oeuvre_core::{NonEmptyStr, ResourceDetail, ResourceId, ResourceKind, UtcMillis};
+    use ibex_core::{NonEmptyStr, ResourceDetail, ResourceId, ResourceKind, UtcMillis};
 
     /// A detail whose title is the only varying field, enough to prove
     /// which entry a cache read returns.
@@ -8755,7 +8747,7 @@ mod parent_options_tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
     use super::{ParentItem, SearchableListItem, parent_options};
-    use oeuvre_core::{NonEmptyStr, ResourceId, ResourceKind, ResourceSummary, UtcMillis};
+    use ibex_core::{NonEmptyStr, ResourceId, ResourceKind, ResourceSummary, UtcMillis};
 
     fn summary(title: &str) -> ResourceSummary {
         ResourceSummary {
@@ -8830,8 +8822,8 @@ mod biblatex_gui_tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, KeyBinding, TestAppContext};
-    use oeuvre_app::testing::MemoryStore;
-    use oeuvre_core::{Resource, Store as _};
+    use ibex_app::testing::MemoryStore;
+    use ibex_core::{Resource, Store as _};
 
     struct Fixture {
         handle: AnyWindowHandle,
@@ -8846,16 +8838,16 @@ mod biblatex_gui_tests {
         cx.executor().allow_parking();
         let store = MemoryStore::new();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(store.clone())
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(store.clone())
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let first = worker
             .list_grid_page_blocking(
-                oeuvre_core::ResourceGridParent::Roots,
-                oeuvre_core::ResourceQuery {
+                ibex_core::ResourceGridParent::Roots,
+                ibex_core::ResourceQuery {
                     sort: None,
-                    filter: oeuvre_core::ResourceFilter::none(),
+                    filter: ibex_core::ResourceFilter::none(),
                 },
                 0,
                 50,
@@ -9162,22 +9154,22 @@ mod resource_grid_tests {
 
     #[test]
     fn collapsed_grid_does_not_show_children_as_roots() {
-        let store = oeuvre_app::testing::MemoryStore::new();
+        let store = ibex_app::testing::MemoryStore::new();
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(oeuvre_app::seed::seed_demo_library(&store, 20))
+            .block_on(ibex_app::seed::seed_demo_library(&store, 20))
             .unwrap();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(store)
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let first = worker
             .list_grid_page_blocking(
-                oeuvre_core::ResourceGridParent::Roots,
-                oeuvre_core::ResourceQuery {
+                ibex_core::ResourceGridParent::Roots,
+                ibex_core::ResourceQuery {
                     sort: None,
-                    filter: oeuvre_core::ResourceFilter::none(),
+                    filter: ibex_core::ResourceFilter::none(),
                 },
                 0,
                 50,
@@ -9213,12 +9205,10 @@ mod nested_grid_interaction_tests {
     fn pointer_disclosure_loads_children_and_keyboard_collapses(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.executor().allow_parking();
-        let store = oeuvre_app::testing::MemoryStore::new();
+        let store = ibex_app::testing::MemoryStore::new();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            use oeuvre_core::Store as _;
-            oeuvre_app::seed::seed_demo_library(&store, 20)
-                .await
-                .unwrap();
+            use ibex_core::Store as _;
+            ibex_app::seed::seed_demo_library(&store, 20).await.unwrap();
             let chapter = store
                 .list_resources()
                 .await
@@ -9232,8 +9222,8 @@ mod nested_grid_interaction_tests {
             }
         });
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(store)
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let query = ResourceQuery {
@@ -9326,14 +9316,14 @@ mod nested_grid_interaction_tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         cx.executor().allow_parking();
-        let store = oeuvre_app::testing::MemoryStore::new();
+        let store = ibex_app::testing::MemoryStore::new();
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(oeuvre_app::seed::seed_demo_library(&store, 20))
+            .block_on(ibex_app::seed::seed_demo_library(&store, 20))
             .unwrap();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(store)
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let total = worker.list_page_blocking(None, 50).unwrap().rows.len();
@@ -9410,7 +9400,7 @@ mod cached_grid_interaction_tests {
     use super::{DbWorker, LibraryApp, LibraryDelegate, Settings, TableState};
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, TestAppContext};
-    use oeuvre_core::{
+    use ibex_core::{
         NonEmptyStr, ResourceGridPage, ResourceGridRow, ResourceId, ResourceKind, ResourceSummary,
         UtcMillis,
     };
@@ -9445,8 +9435,8 @@ mod cached_grid_interaction_tests {
         let child_id = child.summary.id;
         let other_id = other.summary.id;
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(ibex_app::testing::MemoryStore::new())
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let (handle, app) = cx.update(|cx| {
@@ -9532,8 +9522,8 @@ mod cached_grid_interaction_tests {
         let id = other.summary.id;
         let parent_id = parent.summary.id;
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(ibex_app::testing::MemoryStore::new())
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let mut delegate = LibraryDelegate::new(
@@ -9568,8 +9558,8 @@ mod cached_grid_interaction_tests {
         let parent = row("Retry this book", true);
         let id = parent.summary.id;
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(ibex_app::testing::MemoryStore::new())
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let (handle, app) = cx.update(|cx| {
@@ -9645,8 +9635,8 @@ mod cached_grid_interaction_tests {
         let dir = tempfile::tempdir().unwrap();
         cx.executor().allow_parking();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(ibex_app::testing::MemoryStore::new())
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let (handle, app) = cx.update(|cx| {
@@ -9689,13 +9679,13 @@ mod cached_grid_interaction_tests {
     fn sidebar_sections_toggle_independently_without_clearing_filter(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.executor().allow_parking();
-        let store = oeuvre_app::testing::MemoryStore::new();
+        let store = ibex_app::testing::MemoryStore::new();
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(oeuvre_app::seed::seed_demo_library(&store, 8))
+            .block_on(ibex_app::seed::seed_demo_library(&store, 8))
             .unwrap();
         let (tags, forest) = tokio::runtime::Runtime::new().unwrap().block_on(async {
-            use oeuvre_core::Store as _;
+            use ibex_core::Store as _;
             (
                 store.list_tags().await.unwrap(),
                 store.list_collection_forest().await.unwrap(),
@@ -9704,14 +9694,14 @@ mod cached_grid_interaction_tests {
         let tag = tags.into_iter().next().unwrap();
         let first_tag = tag.id;
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(store)
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let first = worker
             .list_grid_page_blocking(
-                oeuvre_core::ResourceGridParent::Roots,
-                oeuvre_core::ResourceQuery::newest_first(),
+                ibex_core::ResourceGridParent::Roots,
+                ibex_core::ResourceQuery::newest_first(),
                 0,
                 50,
             )
@@ -9750,7 +9740,7 @@ mod cached_grid_interaction_tests {
         });
         cx.run_until_parked();
         app.update(cx, |app, cx| {
-            app.counts = Some(oeuvre_core::ResourceCounts {
+            app.counts = Some(ibex_core::ResourceCounts {
                 all_items: 1,
                 by_kind: [(ResourceKind::Book, 1)].into(),
                 by_tag: [(first_tag, 1)].into(),
@@ -9816,7 +9806,7 @@ mod sidebar_navigation_tests {
         AnyWindowHandle, AppContext as _, Bounds, Entity, TestAppContext, WindowBounds,
         WindowOptions, px, size,
     };
-    use oeuvre_core::{ResourceGridPage, ResourceKind};
+    use ibex_core::{ResourceGridPage, ResourceKind};
 
     fn open_sidebar(
         cx: &mut TestAppContext,
@@ -9824,8 +9814,8 @@ mod sidebar_navigation_tests {
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(ibex_app::testing::MemoryStore::new())
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let (handle, app) = cx.update(|cx| {
@@ -9914,12 +9904,12 @@ mod sidebar_navigation_tests {
 
     fn collection(
         name: &str,
-        children: Vec<oeuvre_core::CollectionTreeNode>,
-    ) -> oeuvre_core::CollectionTreeNode {
-        oeuvre_core::CollectionTreeNode {
-            collection: oeuvre_core::Collection::try_new(
-                oeuvre_core::CollectionId::generate(),
-                oeuvre_core::NonEmptyStr::try_new(name).unwrap(),
+        children: Vec<ibex_core::CollectionTreeNode>,
+    ) -> ibex_core::CollectionTreeNode {
+        ibex_core::CollectionTreeNode {
+            collection: ibex_core::Collection::try_new(
+                ibex_core::CollectionId::generate(),
+                ibex_core::NonEmptyStr::try_new(name).unwrap(),
             ),
             children,
         }
@@ -10024,7 +10014,7 @@ mod sidebar_navigation_tests {
     fn sidebar_kind_counts_hide_empty_kinds_but_keep_the_selected_kind(cx: &mut TestAppContext) {
         let (handle, app, _dir) = open_sidebar(cx);
         app.update(cx, |app, cx| {
-            app.counts = Some(oeuvre_core::ResourceCounts {
+            app.counts = Some(ibex_core::ResourceCounts {
                 all_items: 5,
                 by_kind: [(ResourceKind::Book, 3), (ResourceKind::JournalArticle, 2)].into(),
                 ..Default::default()
@@ -10073,7 +10063,7 @@ mod favorite_shortcut_tests {
     use super::{DbWorker, DetailFetch, LibraryApp, LibraryDelegate, Settings, TableState};
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, TestAppContext};
-    use oeuvre_core::{ResourceGridParent, ResourceQuery};
+    use ibex_core::{ResourceGridParent, ResourceQuery};
 
     fn fixture(
         cx: &mut TestAppContext,
@@ -10085,15 +10075,13 @@ mod favorite_shortcut_tests {
     ) {
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
-        let store = oeuvre_app::testing::MemoryStore::new();
+        let store = ibex_app::testing::MemoryStore::new();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            oeuvre_app::seed::seed_demo_library(&store, 20)
-                .await
-                .unwrap();
+            ibex_app::seed::seed_demo_library(&store, 20).await.unwrap();
         });
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(store)
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let first = worker
@@ -10384,7 +10372,7 @@ mod classification_tests {
     use gpui_kit::component::WindowExt as _;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, TestAppContext};
-    use oeuvre_core::{
+    use ibex_core::{
         Collection, CollectionId, NonEmptyStr, ResourceGridParent, ResourceId, ResourceKind,
         ResourceQuery,
     };
@@ -10440,8 +10428,8 @@ mod classification_tests {
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
         let worker = DbWorker::spawn(
-            oeuvre_app::AppState::builder(oeuvre_app::testing::MemoryStore::new())
-                .surface(oeuvre_app::Surface::Test)
+            ibex_app::AppState::builder(ibex_app::testing::MemoryStore::new())
+                .surface(ibex_app::Surface::Test)
                 .build(),
         );
         let rt = tokio::runtime::Runtime::new().unwrap();

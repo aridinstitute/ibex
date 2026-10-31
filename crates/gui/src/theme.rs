@@ -1,4 +1,4 @@
-//! Oeuvre's light and dark palettes: the kit's neutral surfaces with the
+//! Ibex's light and dark palettes: the kit's neutral surfaces with the
 //! configurable accents over the kit's neutral surfaces.
 
 use crate::settings::{ThemeColorTarget, ThemeSettings};

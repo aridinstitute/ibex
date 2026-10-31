@@ -6,11 +6,11 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use oeuvre_app::command::{GetResource, ImportBiblatex, ImportCslJson, ListPersons, ListResources};
-use oeuvre_app::import::{ImportHooks, parse_biblatex, parse_csl_json, save_draft_with_hooks};
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{ImportFormat, ImportProgress, ResourceKind, import_codes};
+use ibex_app::command::{GetResource, ImportBiblatex, ImportCslJson, ListPersons, ListResources};
+use ibex_app::import::{ImportHooks, parse_biblatex, parse_csl_json, save_draft_with_hooks};
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{ImportFormat, ImportProgress, ResourceKind, import_codes};
 
 fn app_with(store: MemoryStore) -> AppState {
     AppState::builder(store)
@@ -103,7 +103,7 @@ fn parse_csl_json_maps_book_and_article_without_store() {
 
 #[test]
 fn parse_csl_json_rejects_oversized_sources_and_bad_json() {
-    let huge = format!("[{}]", " ".repeat(oeuvre_core::IMPORT_MAX_SOURCE_BYTES));
+    let huge = format!("[{}]", " ".repeat(ibex_core::IMPORT_MAX_SOURCE_BYTES));
     let err = parse_csl_json(&huge).expect_err("too large");
     assert_eq!(err.code, import_codes::SOURCE_TOO_LARGE);
 
@@ -129,10 +129,10 @@ async fn equivalent_biblatex_and_csl_json_produce_equivalent_domain_graphs() {
 
     let bib_state = app();
     let csl_state = app();
-    let bib_report = oeuvre_app::import::save_draft(&bib_state, bib_draft)
+    let bib_report = ibex_app::import::save_draft(&bib_state, bib_draft)
         .await
         .expect("save bib");
-    let csl_report = oeuvre_app::import::save_draft(&csl_state, csl_draft)
+    let csl_report = ibex_app::import::save_draft(&csl_state, csl_draft)
         .await
         .expect("save csl");
     assert_eq!(bib_report.imported.len(), 2);

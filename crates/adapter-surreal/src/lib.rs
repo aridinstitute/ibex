@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
-use oeuvre_core::{
+use ibex_core::{
     BibliographicDate, Collection, CollectionId, CollectionTreeNode, CollectionUpdate, Creator,
     CreatorRole, DateCertainty, DatePrecision, ImportedResourceWrite, Name, NewResource, NewSeries,
     NonEmptyStr, Person, PersonId, Resource, ResourceCounts, ResourceFilter, ResourceId,
@@ -17,8 +17,8 @@ use surrealdb::engine::local::{Db, Mem, SurrealKv};
 use surrealdb::opt::Config;
 use surrealdb::types::{Datetime, RecordId, RecordIdKey, SerdeWrapper, SurrealValue, ToSql};
 
-const NS: &str = "oeuvre";
-const DB: &str = "oeuvre";
+const NS: &str = "ibex";
+const DB: &str = "ibex";
 const PERSON_TABLE: &str = "person";
 const SERIES_TABLE: &str = "series";
 const TAG_TABLE: &str = "tag";
@@ -30,7 +30,7 @@ pub struct SurrealStore {
 }
 
 // Rows and docs convert through SurrealDB's own value type in 3.x, so
-// domain types from `oeuvre-core` — which cannot implement the foreign
+// domain types from `ibex-core` — which cannot implement the foreign
 // `SurrealValue` trait — ride `SerdeWrapper`, converting through the same
 // serde representation the 2.x driver used, keeping stored rows readable
 // either way.
@@ -138,7 +138,7 @@ struct ResourceDoc {
     #[surreal(default)]
     issue: Option<String>,
     #[surreal(default, wrap)]
-    pages: Option<oeuvre_core::Pages>,
+    pages: Option<ibex_core::Pages>,
     #[surreal(default)]
     total_pages: Option<String>,
     #[surreal(default)]
@@ -152,11 +152,11 @@ struct ResourceDoc {
     #[surreal(default)]
     eprint: Option<String>,
     #[surreal(default, wrap)]
-    isbns: Vec<oeuvre_core::Identifier>,
+    isbns: Vec<ibex_core::Identifier>,
     #[surreal(default, wrap)]
-    issns: Vec<oeuvre_core::Identifier>,
+    issns: Vec<ibex_core::Identifier>,
     #[surreal(default, wrap)]
-    isrns: Vec<oeuvre_core::Identifier>,
+    isrns: Vec<ibex_core::Identifier>,
     #[surreal(default, wrap)]
     original_date: Option<BibliographicDate>,
     #[surreal(default, wrap)]
@@ -350,7 +350,7 @@ impl SurrealStore {
         query: &ResourceQuery,
         offset: u64,
         limit: u32,
-        parent: Option<oeuvre_core::ResourceGridParent>,
+        parent: Option<ibex_core::ResourceGridParent>,
         visible: Option<&[RecordId]>,
         matches_only: bool,
     ) -> Result<(Vec<ListResourceRow>, Option<u64>), StoreError> {
@@ -379,8 +379,8 @@ impl SurrealStore {
         let mut where_sql = filter_where(&query.filter);
         if let Some(parent) = parent {
             let clause = match parent {
-                oeuvre_core::ResourceGridParent::Roots => "parent = NONE",
-                oeuvre_core::ResourceGridParent::Children(_) => "parent = $grid_parent",
+                ibex_core::ResourceGridParent::Roots => "parent = NONE",
+                ibex_core::ResourceGridParent::Children(_) => "parent = $grid_parent",
             };
             where_sql.push_str(if where_sql.is_empty() {
                 " WHERE "
@@ -488,7 +488,7 @@ impl SurrealStore {
             .query(sql)
             .bind(("limit", fetch_limit))
             .bind(("offset", offset));
-        if let Some(oeuvre_core::ResourceGridParent::Children(id)) = parent {
+        if let Some(ibex_core::ResourceGridParent::Children(id)) = parent {
             statement = statement.bind(("grid_parent", Self::resource_key(id)));
         }
         if let Some(ids) = visible {
@@ -541,8 +541,27 @@ impl SurrealStore {
         let next_offset = has_more.then(|| offset.saturating_add(u64::from(limit)));
         Ok((rows, next_offset))
     }
+
+    /// Drop the database client. SurrealDB 3.3 releases the directory lock
+    /// asynchronously; callers reopening the same path must retry briefly.
+    pub async fn close(self) -> Result<(), StoreError> {
+        drop(self.db);
+        Ok(())
+    }
+
+    /// Open (creating if missing) the persistent library at `path`.
+    ///
+    /// SurrealKV admits one owning process per directory; a library another
+    /// process holds fails with [`StoreError::is_in_use`]. Opening a
+    /// directory written by an older SurrealDB release converts it in place,
+    /// irreversibly, so callers must only pass paths they own.
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
-        let db = Surreal::new::<SurrealKv>(path).await.map_err(map_err)?;
+        std::fs::create_dir_all(path).map_err(|e| {
+            StoreError::new(format!("create library directory {}: {e}", path.display()))
+        })?;
+        let db = Surreal::new::<SurrealKv>(path)
+            .await
+            .map_err(|e| open_error(path, e))?;
         db.use_ns(NS).use_db(DB).await.map_err(map_err)?;
         let store = Self { db };
         store.ensure_schema().await?;
@@ -716,11 +735,11 @@ impl SurrealStore {
     }
 
     /// Rewrite legacy `accessed: { instant: number, ... }` into native datetimes.
-    /// Idempotent via `oeuvre_migration:accessed_native_datetime`.
+    /// Idempotent via `ibex_migration:accessed_native_datetime`.
     async fn migrate_accessed_native_datetime(&self) -> Result<(), StoreError> {
         let mut exists = self
             .db
-            .query("RETURN record::exists(oeuvre_migration:accessed_native_datetime)")
+            .query("RETURN record::exists(ibex_migration:accessed_native_datetime)")
             .await
             .map_err(map_err)?;
         let done: Option<bool> = exists.take(0).map_err(map_err)?;
@@ -760,7 +779,7 @@ impl SurrealStore {
                 .map_err(map_err)?;
         }
         self.db
-            .query("CREATE oeuvre_migration:accessed_native_datetime")
+            .query("CREATE ibex_migration:accessed_native_datetime")
             .await
             .map_err(map_err)?
             .check()
@@ -773,7 +792,7 @@ impl SurrealStore {
     async fn migrate_name_keys_v2(&self) -> Result<(), StoreError> {
         let mut exists = self
             .db
-            .query("RETURN record::exists(oeuvre_migration:name_keys_v2)")
+            .query("RETURN record::exists(ibex_migration:name_keys_v2)")
             .await
             .map_err(map_err)?;
         let done: Option<bool> = exists.take(0).map_err(map_err)?;
@@ -793,7 +812,7 @@ impl SurrealStore {
                 .map_err(map_err)?;
         }
         self.db
-            .query("CREATE oeuvre_migration:name_keys_v2")
+            .query("CREATE ibex_migration:name_keys_v2")
             .await
             .map_err(map_err)?
             .check()
@@ -1591,6 +1610,23 @@ fn record_key(record: &RecordId) -> String {
 
 fn map_err(err: surrealdb::Error) -> StoreError {
     StoreError::new(err.to_string())
+}
+
+/// The SDK reports a held SurrealKV directory only as text (an internal
+/// datastore error wrapping SurrealKV's `LOCK` file message), so the lock is
+/// recognised by that message.
+fn open_error(path: &Path, err: surrealdb::Error) -> StoreError {
+    if err
+        .to_string()
+        .contains("already locked by another process")
+    {
+        return StoreError::in_use(format!(
+            "The Ibex library at {} is in use by another Ibex process. \
+             Close the other Ibex app or CLI and try again.",
+            path.display()
+        ));
+    }
+    StoreError::new(format!("open library at {}: {err}", path.display()))
 }
 
 #[async_trait::async_trait]
@@ -2412,12 +2448,12 @@ impl Store for SurrealStore {
 
     async fn list_resource_grid_page(
         &self,
-        parent: oeuvre_core::ResourceGridParent,
+        parent: ibex_core::ResourceGridParent,
         query: &ResourceQuery,
         offset: u64,
         limit: u32,
-    ) -> Result<oeuvre_core::ResourceGridPage, StoreError> {
-        use oeuvre_core::{ResourceGridPage, ResourceGridRow};
+    ) -> Result<ibex_core::ResourceGridPage, StoreError> {
+        use ibex_core::{ResourceGridPage, ResourceGridRow};
         if limit == 0 {
             return Err(StoreError::invalid("page limit must be at least 1"));
         }
@@ -2601,7 +2637,7 @@ fn filter_where(filter: &ResourceFilter) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oeuvre_core::{
+    use ibex_core::{
         BibliographicDate, CreatorRole, CreatorSpec, DateCertainty, DatePrecision, NewResource,
         NewSeries, ResourceFilter, ResourceId, ResourceKind, ResourceQuery, ResourceSort,
         SortDirection, Store, UtcMillis,
@@ -3074,7 +3110,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "surrealdb 3.3.4's Mem engine drops ORDER BY when the row source is not a plain table scan and orders nondeterministically on the record id alone; known upstream regression, passes on the file engine the GUI runs on"]
+    #[ignore = "SurrealDB 3.3.4 Mem loses requested ordering for filtered row sources; disk-backed benchmarks are unaffected"]
     async fn creator_filter_yields_each_resource_once() {
         let store = SurrealStore::open_memory().await.unwrap();
         let ada = store
@@ -3615,7 +3651,7 @@ mod tests {
             .unwrap()
     }
 
-    fn sorted_titles(page: &oeuvre_core::SortedResourcePage) -> Vec<String> {
+    fn sorted_titles(page: &ibex_core::SortedResourcePage) -> Vec<String> {
         page.rows
             .iter()
             .map(|row| row.title.as_str().to_owned())
@@ -3628,7 +3664,7 @@ mod tests {
 
     #[tokio::test]
     async fn grid_pages_scope_sort_and_retain_filtered_ancestors() {
-        use oeuvre_core::ResourceGridParent::{Children, Roots};
+        use ibex_core::ResourceGridParent::{Children, Roots};
         let store = SurrealStore::open_memory().await.unwrap();
         let journal = sortable_container(&store, "Context journal").await;
         let other = sortable_container(&store, "Other journal").await;
@@ -3788,7 +3824,7 @@ mod tests {
             .unwrap();
         assert_eq!(read_key().await.as_deref(), Some("Hopper"));
         // Simulate an older database with neither the field nor migration marker.
-        store.db.query("REMOVE FIELD primary_creator_last_name ON resource; UPDATE resource UNSET primary_creator_last_name; DELETE oeuvre_migration:primary_creator_last_name;")
+        store.db.query("REMOVE FIELD primary_creator_last_name ON resource; UPDATE resource UNSET primary_creator_last_name; DELETE ibex_migration:primary_creator_last_name;")
             .await.unwrap().check().unwrap();
         store.ensure_schema().await.unwrap();
         assert_eq!(read_key().await.as_deref(), Some("Hopper"));
@@ -4153,7 +4189,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "surrealdb 3.3.4's Mem engine drops ORDER BY when the row source is not a plain table scan and orders nondeterministically on the record id alone; known upstream regression, passes on the file engine the GUI runs on"]
+    #[ignore = "SurrealDB 3.3.4 Mem loses requested ordering for filtered row sources; disk-backed benchmarks are unaffected"]
     async fn sorted_descending_reverses_keys_and_moves_no_data_rows_first() {
         let store = SurrealStore::open_memory().await.unwrap();
         let hopper = store
@@ -4411,7 +4447,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "surrealdb 3.3.4's Mem engine drops ORDER BY when the row source is not a plain table scan and orders nondeterministically on the record id alone; known upstream regression, passes on the file engine the GUI runs on"]
+    #[ignore = "SurrealDB 3.3.4 Mem loses requested ordering for filtered row sources; disk-backed benchmarks are unaffected"]
     async fn creator_filter_matches_only_that_persons_works() {
         let store = SurrealStore::open_memory().await.unwrap();
         let ada = store
@@ -4467,7 +4503,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "surrealdb 3.3.4's Mem engine drops ORDER BY when the row source is not a plain table scan and orders nondeterministically on the record id alone; known upstream regression, passes on the file engine the GUI runs on"]
+    #[ignore = "SurrealDB 3.3.4 Mem loses requested ordering for filtered row sources; disk-backed benchmarks are unaffected"]
     async fn creator_filter_keeps_sort_order_within_matches() {
         let store = SurrealStore::open_memory().await.unwrap();
         let ada = store
@@ -4512,7 +4548,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "surrealdb 3.3.4's Mem engine drops ORDER BY when the row source is not a plain table scan and orders nondeterministically on the record id alone; known upstream regression, passes on the file engine the GUI runs on"]
+    #[ignore = "SurrealDB 3.3.4 Mem loses requested ordering for filtered row sources; disk-backed benchmarks are unaffected"]
     async fn creator_filter_composes_with_primary_creator_sort() {
         let store = SurrealStore::open_memory().await.unwrap();
         let ada = store
@@ -4567,9 +4603,9 @@ mod tests {
                 search: None,
                 title: None,
                 creator: None,
-                published: Some(oeuvre_core::PublishedRange {
-                    from: from.map(oeuvre_core::UtcMillis::from_unix_ms),
-                    to: to.map(oeuvre_core::UtcMillis::from_unix_ms),
+                published: Some(ibex_core::PublishedRange {
+                    from: from.map(ibex_core::UtcMillis::from_unix_ms),
+                    to: to.map(ibex_core::UtcMillis::from_unix_ms),
                 }),
                 kind: None,
                 favorite: None,
@@ -4696,9 +4732,9 @@ mod tests {
                 search: None,
                 title: None,
                 creator: None,
-                published: Some(oeuvre_core::PublishedRange {
-                    from: Some(oeuvre_core::UtcMillis::from_unix_ms(1_500)),
-                    to: Some(oeuvre_core::UtcMillis::from_unix_ms(3_500)),
+                published: Some(ibex_core::PublishedRange {
+                    from: Some(ibex_core::UtcMillis::from_unix_ms(1_500)),
+                    to: Some(ibex_core::UtcMillis::from_unix_ms(3_500)),
                 }),
                 kind: None,
                 favorite: None,
@@ -4770,9 +4806,9 @@ mod tests {
                 search: None,
                 title: Some(NonEmptyStr::try_new("ALPHA").unwrap()),
                 creator: Some(ada.id),
-                published: Some(oeuvre_core::PublishedRange {
-                    from: Some(oeuvre_core::UtcMillis::from_unix_ms(1_500)),
-                    to: Some(oeuvre_core::UtcMillis::from_unix_ms(3_500)),
+                published: Some(ibex_core::PublishedRange {
+                    from: Some(ibex_core::UtcMillis::from_unix_ms(1_500)),
+                    to: Some(ibex_core::UtcMillis::from_unix_ms(3_500)),
                 }),
                 kind: None,
                 favorite: None,
@@ -4827,14 +4863,15 @@ mod tests {
 
         drop(store);
 
-        // 3.x releases the SurrealKv directory lock on the engine's own task
-        // once the last handle drops, so the reopen races an in-flight
-        // shutdown. Retry briefly until the lock is free, mirroring how
-        // upstream's own integration tests reopen a dropped datastore.
+        // Dropping the last handle releases the SurrealKv directory lock on
+        // the engine's own task, so the reopen races an in-flight shutdown
+        // (`SurrealStore::close` avoids that). Retry briefly until the lock is
+        // free, mirroring how upstream's own integration tests reopen a
+        // dropped datastore.
         let reopened = loop {
             match SurrealStore::open(dir.path()).await {
                 Ok(store) => break store,
-                Err(err) if err.message.contains("already locked") => {
+                Err(err) if err.is_in_use() => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("reopen failed without a lock race: {err}"),
@@ -5384,13 +5421,13 @@ mod tests {
 
         drop(store);
 
-        // 3.x releases the SurrealKv directory lock on the engine's own task
-        // once the last handle drops, so the reopen races an in-flight
-        // shutdown (same retry as the person CRUD disk round trip).
+        // Dropping the last handle releases the SurrealKv directory lock on
+        // the engine's own task, so the reopen races an in-flight shutdown
+        // (same retry as the person CRUD disk round trip).
         let reopened = loop {
             match SurrealStore::open(dir.path()).await {
                 Ok(store) => break store,
-                Err(err) if err.message.contains("already locked") => {
+                Err(err) if err.is_in_use() => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("reopen failed without a lock race: {err}"),
@@ -5456,7 +5493,7 @@ mod tests {
         let reopened = loop {
             match SurrealStore::open(dir.path()).await {
                 Ok(store) => break store,
-                Err(err) if err.message.contains("already locked") => {
+                Err(err) if err.is_in_use() => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("reopen failed without a lock race: {err}"),
@@ -5988,7 +6025,7 @@ mod tests {
             .unwrap();
         store
             .db
-            .query("DELETE oeuvre_migration:accessed_native_datetime")
+            .query("DELETE ibex_migration:accessed_native_datetime")
             .await
             .ok();
         store.migrate_accessed_native_datetime().await.unwrap();

@@ -1,5 +1,5 @@
 //! Retained sibling pages. Visible positions are snapshots, never resource identity.
-use oeuvre_core::{ResourceGridPage, ResourceGridRow, ResourceId, ResourceSummary};
+use ibex_core::{ResourceGridPage, ResourceGridRow, ResourceId, ResourceSummary};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
@@ -125,7 +125,7 @@ impl ResourceGrid {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oeuvre_core::{NonEmptyStr, ResourceKind, UtcMillis};
+    use ibex_core::{NonEmptyStr, ResourceKind, UtcMillis};
 
     fn row(title: &str, has_children: bool) -> ResourceGridRow {
         ResourceGridRow {

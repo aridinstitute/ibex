@@ -1,9 +1,9 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{CreatePerson, CreateResource, GetResource, UpdateResource};
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
-use oeuvre_core::{
+use ibex_app::command::{CreatePerson, CreateResource, GetResource, UpdateResource};
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
+use ibex_core::{
     CreatorRole, CreatorSpec, Name, NewResource, NonEmptyStr, PersonId, ResourceId, ResourceKind,
 };
 
@@ -356,7 +356,7 @@ async fn update_retype_with_parent_rechecks_parent_kind() {
         .execute(Command::CreateResource(CreateResource {
             new: NewResource {
                 kind: ResourceKind::Journal,
-                title: NonEmptyStr::try_new("Oeuvre Journal").unwrap(),
+                title: NonEmptyStr::try_new("Ibex Journal").unwrap(),
                 creators: vec![],
                 publisher: None,
                 published: None,

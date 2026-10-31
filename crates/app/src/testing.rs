@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
-use oeuvre_core::{
+use ibex_core::{
     BibliographicDate, Collection, CollectionId, CollectionTreeNode, Creator, CreatorRole,
     ImportedResourceWrite, Name, NameKey, NewResource, NewSeries, NonEmptyStr, Person, PersonId,
     Resource, ResourceCounts, ResourceFilter, ResourceId, ResourceKind, ResourceMetadata,
@@ -84,16 +84,16 @@ struct ResourceRow {
     place: Option<String>,
     volume: Option<String>,
     issue: Option<String>,
-    pages: Option<oeuvre_core::Pages>,
+    pages: Option<ibex_core::Pages>,
     total_pages: Option<String>,
     article_number: Option<String>,
     edition: Option<String>,
     doi: Option<String>,
     url: Option<String>,
     eprint: Option<String>,
-    isbns: Vec<oeuvre_core::Identifier>,
-    issns: Vec<oeuvre_core::Identifier>,
-    isrns: Vec<oeuvre_core::Identifier>,
+    isbns: Vec<ibex_core::Identifier>,
+    issns: Vec<ibex_core::Identifier>,
+    isrns: Vec<ibex_core::Identifier>,
     original_date: Option<BibliographicDate>,
     event_date: Option<BibliographicDate>,
     language: Option<String>,
@@ -376,7 +376,7 @@ impl MemoryStore {
             let mut ancestor_buf: Vec<Resource> = Vec::new();
             let mut next = child.parent_id;
             while let Some(parent_id) = next {
-                if ancestor_buf.len() >= oeuvre_core::INHERITANCE_MAX_DEPTH {
+                if ancestor_buf.len() >= ibex_core::INHERITANCE_MAX_DEPTH {
                     return Err(StoreError::invalid("inheritance depth exceeded"));
                 }
                 let Some(parent_row) = resources.get(&parent_id) else {
@@ -816,12 +816,12 @@ impl Store for MemoryStore {
     }
     async fn update_collection(
         &self,
-        update: oeuvre_core::CollectionUpdate,
+        update: ibex_core::CollectionUpdate,
     ) -> Result<Collection, StoreError> {
         let mut collections = self.collections.lock().expect("MemoryStore lock");
         let mut edges = self.collection_child_of.lock().expect("MemoryStore lock");
         let ids = collections.keys().copied().collect();
-        let next = oeuvre_core::collection_update_edges(&update, &ids, &edges)?;
+        let next = ibex_core::collection_update_edges(&update, &ids, &edges)?;
         let collection = collections
             .get_mut(&update.id)
             .expect("validated collection");
@@ -1447,12 +1447,12 @@ impl Store for MemoryStore {
 
     async fn list_resource_grid_page(
         &self,
-        parent: oeuvre_core::ResourceGridParent,
+        parent: ibex_core::ResourceGridParent,
         query: &ResourceQuery,
         offset: u64,
         limit: u32,
-    ) -> Result<oeuvre_core::ResourceGridPage, StoreError> {
-        use oeuvre_core::{ResourceGridPage, ResourceGridParent, ResourceGridRow};
+    ) -> Result<ibex_core::ResourceGridPage, StoreError> {
+        use ibex_core::{ResourceGridPage, ResourceGridParent, ResourceGridRow};
         if limit == 0 {
             return Err(StoreError::invalid("page limit must be at least 1"));
         }
@@ -1632,7 +1632,7 @@ impl Store for StubStore {
 
     async fn update_collection(
         &self,
-        _update: oeuvre_core::CollectionUpdate,
+        _update: ibex_core::CollectionUpdate,
     ) -> Result<Collection, StoreError> {
         Err(unsupported("update_collection"))
     }

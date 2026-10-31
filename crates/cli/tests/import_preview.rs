@@ -1,4 +1,4 @@
-use std::process::Command;
+mod common;
 
 #[test]
 fn dry_run_previews_biblatex_and_csl_json_without_writing() {
@@ -8,7 +8,7 @@ fn dry_run_previews_biblatex_and_csl_json_without_writing() {
     let csl = dir.path().join("refs.json");
     std::fs::write(&csl, r#"[{"id":"b","type":"book","title":"Second Book","author":[{"family":"Hopper","given":"Grace"}]}]"#).unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_ovr"))
+        common::ibex()
             .arg("--data")
             .arg(dir.path())
             .args(args)

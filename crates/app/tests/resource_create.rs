@@ -1,11 +1,11 @@
 #![cfg(feature = "testing")]
 
-use oeuvre_app::command::{
+use ibex_app::command::{
     CreatePerson, CreateResource, CreateSeries, GetResource, ListResources, UpdateResource,
 };
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
-use oeuvre_core::{
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
+use ibex_core::{
     BibliographicDate, CreatorRole, CreatorSpec, Name, NewResource, NewSeries, NonEmptyStr,
     PersonId, ResourceId, ResourceKind, UtcMillis,
 };
@@ -76,7 +76,7 @@ fn book_new(author_id: PersonId, title: &str) -> NewResource {
 
 #[tokio::test]
 async fn imported_metadata_round_trips_through_commands() {
-    use oeuvre_core::ResourceMetadata;
+    use ibex_core::ResourceMetadata;
     use std::collections::BTreeMap;
 
     let state = AppState::builder(MemoryStore::new())

@@ -1,8 +1,8 @@
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::command::ListResourceGridPage;
-use oeuvre_app::testing::{MemorySink, StubStore};
-use oeuvre_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
-use oeuvre_core::{
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::command::ListResourceGridPage;
+use ibex_app::testing::{MemorySink, StubStore};
+use ibex_app::{AppState, Command, CommandError, FieldValue, Outcome, Status, Surface};
+use ibex_core::{
     BibliographicDate, CreatorRole, CreatorSpec, Name, NewResource, NonEmptyStr, PublishedRange,
     ResourceFilter, ResourceGridParent, ResourceId, ResourceKind, ResourceQuery, ResourceSort,
     SortDirection, Store, UtcMillis,
@@ -350,7 +350,7 @@ async fn expansion_returns_all_children_and_marks_only_non_leaves() {
     );
 }
 
-/// Run with `cargo test -p oeuvre-adapter-surreal --release --test resource_grid grid_loading_timings -- --ignored --nocapture`.
+/// Run with `cargo test -p ibex-adapter-surreal --release --test resource_grid grid_loading_timings -- --ignored --nocapture`.
 /// Measures fully materialized pages, excluding fixture creation and store opening.
 #[tokio::test]
 #[ignore = "opt-in loading performance comparison"]

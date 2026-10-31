@@ -49,8 +49,8 @@ BEGIN TRANSACTION;
   DEFINE INDEX IF NOT EXISTS resource_primary_creator_last_name ON resource FIELDS primary_creator_last_name;
 
 -- Track completion separately: creator-less resources legitimately have no key.
-  IF !record::exists(oeuvre_migration:primary_creator_last_name) {
+  IF !record::exists(ibex_migration:primary_creator_last_name) {
     UPDATE resource SET primary_creator_last_name = NONE;
-    CREATE oeuvre_migration:primary_creator_last_name;
+    CREATE ibex_migration:primary_creator_last_name;
   };
 COMMIT TRANSACTION;

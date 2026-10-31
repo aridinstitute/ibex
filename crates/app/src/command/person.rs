@@ -1,4 +1,4 @@
-use oeuvre_core::{Name, Person, PersonId, StoreError};
+use ibex_core::{Name, Person, PersonId, StoreError};
 
 use crate::event::{self, Event};
 use crate::{AppState, CommandError, Handler, Outcome};

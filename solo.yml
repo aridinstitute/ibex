@@ -1,9 +1,9 @@
 # Visit https://soloterm.com to learn more
-name: oeuvre
+name: ibex
 icon: null
 processes:
   Desktop:
-    command: cargo run -p oeuvre-gui -- --memory
+    command: cargo run -p ibex-gui
     working_dir: null
     auto_start: true
     auto_restart: false

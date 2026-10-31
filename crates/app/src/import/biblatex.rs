@@ -1,11 +1,11 @@
 //! BibLaTeX syntax parsing, reference inheritance, and field mapping.
 //!
-//! No [`oeuvre_core::Store`] or [`crate::AppState`] dependency.
+//! No [`ibex_core::Store`] or [`crate::AppState`] dependency.
 
 use std::collections::HashMap;
 
 use biblatex::{Bibliography, ChunksExt, Date, DateValue, Entry, EntryType, RetrievalError};
-use oeuvre_core::{
+use ibex_core::{
     BibliographicDate, CreatorRole, DateCertainty, DatePrecision, DiagnosticSeverity,
     EntryProvenance, IMPORT_MAX_SOURCE_BYTES, IMPORT_PARSER_VERSION, Identifier, ImportDiagnostic,
     ImportDraft, ImportEntryDraft, ImportFormat, ImportTempId, Name, NewResource, NonEmptyStr,
@@ -48,7 +48,7 @@ pub fn parse_biblatex(source: &str) -> Result<ImportDraft, ParseError> {
             format: ImportFormat::Biblatex,
             parser_version: IMPORT_PARSER_VERSION,
         },
-        source_fingerprint: Some(oeuvre_core::source_fingerprint(
+        source_fingerprint: Some(ibex_core::source_fingerprint(
             ImportFormat::Biblatex,
             source,
         )),
@@ -578,7 +578,7 @@ fn parse_bibliography(source: &str) -> Result<(Bibliography, Bibliography), Pars
     };
     let raw = biblatex::RawBibliography::parse(source).map_err(syntax)?;
     // Temporary field names must not collide with arbitrary user source fields.
-    let mut prefix = "oeuvre_import_".to_owned();
+    let mut prefix = "ibex_import_".to_owned();
     while raw.entries.iter().any(|entry| {
         entry
             .v

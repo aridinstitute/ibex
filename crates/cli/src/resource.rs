@@ -2,12 +2,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use std::io::Write;
 
-use oeuvre_app::command::{
+use ibex_app::command::{
     CreateResource, GetResource, GetResourceDetail, ListResourceGridPage, ListResourcesPage,
     ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
 };
-use oeuvre_app::{AppState, Command, Outcome};
-use oeuvre_core::{
+use ibex_app::{AppState, Command, Outcome};
+use ibex_core::{
     BibliographicDate, CollectionId, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId,
     PublishedRange, Resource, ResourceFilter, ResourceGridPage, ResourceGridParent,
     ResourceGridRow, ResourceId, ResourceKind, ResourceQuery, ResourceSort, ResourceSummary,
@@ -273,7 +273,11 @@ impl UpdateArgs {
 /// Rows per query-page fetch while walking a filtered listing.
 const QUERY_PAGE: u32 = 500;
 
-pub async fn run(state: &AppState, cmd: ResourceCmd) -> Result<()> {
+pub async fn run(
+    state: &AppState,
+    cmd: ResourceCmd,
+    config: &ibex_app::config::ConfigFile,
+) -> Result<()> {
     match cmd.action {
         ResourceAction::List(args) => list(state, args).await,
         ResourceAction::Show { id } => show(state, &id).await,
@@ -282,26 +286,34 @@ pub async fn run(state: &AppState, cmd: ResourceCmd) -> Result<()> {
             fetch(state, &identifier, update.as_deref()).await
         }
         ResourceAction::Update(args) => update(state, args).await,
-        ResourceAction::Classify { id, engine, apply } => classify(state, &id, engine, apply).await,
+        ResourceAction::Classify { id, engine, apply } => {
+            classify(state, config, &id, engine, apply).await
+        }
     }
 }
 
-async fn classify(state: &AppState, id: &str, engine: ClassifyEngine, apply: bool) -> Result<()> {
+async fn classify(
+    state: &AppState,
+    config: &ibex_app::config::ConfigFile,
+    id: &str,
+    engine: ClassifyEngine,
+    apply: bool,
+) -> Result<()> {
     let id = ResourceId::parse(id).context("invalid resource id")?;
-    let mut suggestions: Vec<(oeuvre_core::Collection, Option<f32>)> = Vec::new();
+    let mut suggestions: Vec<(ibex_core::Collection, Option<f32>)> = Vec::new();
     if engine != ClassifyEngine::Keywords {
-        let config = crate::config::load()?;
+        let config = config.load()?;
         let key = config.get("openrouter_api_key").and_then(toml::Value::as_str)
             .filter(|key| !key.trim().is_empty())
-            .context("Set an OpenRouter API key with `ovr config set openrouter-api-key` before Jev classification")?;
+            .context("Set an OpenRouter API key with `ibex config set openrouter-api-key` before Jev classification")?;
         let model = config
             .get("jev_model")
             .and_then(toml::Value::as_str)
-            .unwrap_or(oeuvre_app::jev::DEFAULT_JEV_MODEL);
-        let endpoint = std::env::var("OEUVRE_JEV_URL")
-            .unwrap_or_else(|_| oeuvre_app::jev::DECISIONS_URL.to_owned());
+            .unwrap_or(ibex_app::jev::DEFAULT_JEV_MODEL);
+        let endpoint = std::env::var("IBEX_JEV_URL")
+            .unwrap_or_else(|_| ibex_app::jev::DECISIONS_URL.to_owned());
         validate_jev_endpoint(&endpoint)?;
-        let picks = oeuvre_app::classification::suggest_jev(state, id, key, model, &endpoint)
+        let picks = ibex_app::classification::suggest_jev(state, id, key, model, &endpoint)
             .await
             .map_err(|message| anyhow!(message))?;
         suggestions.extend(
@@ -311,7 +323,7 @@ async fn classify(state: &AppState, id: &str, engine: ClassifyEngine, apply: boo
         );
     }
     if engine != ClassifyEngine::Jev {
-        for collection in oeuvre_app::classification::suggest_keywords(state, id).await? {
+        for collection in ibex_app::classification::suggest_keywords(state, id).await? {
             if !suggestions
                 .iter()
                 .any(|(existing, _)| existing.id == collection.id)
@@ -329,7 +341,7 @@ async fn classify(state: &AppState, id: &str, engine: ClassifyEngine, apply: boo
             .iter()
             .map(|(collection, _)| collection.clone())
             .collect::<Vec<_>>();
-        oeuvre_app::classification::apply_suggestions(state, id, &collections).await?;
+        ibex_app::classification::apply_suggestions(state, id, &collections).await?;
     }
     for (collection, probability) in suggestions {
         if let Some(probability) = probability {
@@ -369,8 +381,8 @@ fn validate_jev_endpoint(endpoint: &str) -> Result<()> {
                         .is_ok_and(|address| address.is_loopback())
             }));
     if !safe {
-        return Err(oeuvre_app::CommandError::Invalid(
-            "OEUVRE_JEV_URL must use HTTPS, or HTTP with a loopback host (127.0.0.1, ::1, localhost)"
+        return Err(ibex_app::CommandError::Invalid(
+            "IBEX_JEV_URL must use HTTPS, or HTTP with a loopback host (127.0.0.1, ::1, localhost)"
                 .to_owned(),
         )
         .into());
@@ -382,7 +394,7 @@ async fn fetch(state: &AppState, identifier: &str, update: Option<&str>) -> Resu
     let target = update
         .map(|id| ResourceId::parse(id).context("invalid --update resource id"))
         .transpose()?;
-    let resource = oeuvre_app::metadata::fetch(state, identifier, target)
+    let resource = ibex_app::metadata::fetch(state, identifier, target)
         .await
         .map_err(|message| anyhow!(message))?;
     println!(
@@ -997,7 +1009,7 @@ fn format_summary_row(row: &ResourceSummary) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oeuvre_core::{
+    use ibex_core::{
         CreatorRole, CreatorSpec, NonEmptyStr, PersonId, ResourceId, ResourceKind, UtcMillis,
     };
 
@@ -1028,12 +1040,12 @@ mod tests {
             "Quantum bibliometrics",
             "Ada; Grace",
             Some("2024"),
-            Some("Oeuvre Journal"),
+            Some("Ibex Journal"),
         );
         assert_eq!(
             format_summary_row(&row),
             format!(
-                "{}  journalArticle  Quantum bibliometrics  Ada; Grace  (2024)  in Oeuvre Journal",
+                "{}  journalArticle  Quantum bibliometrics  Ada; Grace  (2024)  in Ibex Journal",
                 row.id
             )
         );
@@ -1161,8 +1173,8 @@ mod tests {
         ] {
             let err = validate_jev_endpoint(endpoint).expect_err(endpoint);
             assert!(
-                err.downcast_ref::<oeuvre_app::CommandError>()
-                    .is_some_and(|cmd| cmd.kind() == oeuvre_app::ErrorKind::Invalid),
+                err.downcast_ref::<ibex_app::CommandError>()
+                    .is_some_and(|cmd| cmd.kind() == ibex_app::ErrorKind::Invalid),
                 "{endpoint}"
             );
         }

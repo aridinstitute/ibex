@@ -7,7 +7,7 @@
 use gpui_kit::SharedString;
 use gpui_kit::component::searchable_list::SearchableListItem;
 
-use oeuvre_core::{
+use ibex_core::{
     BibliographicDate, CollectionId, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId,
     Resource, ResourceId, ResourceKind, SeriesId, TagId, UtcMillis, utc_year_from_millis,
 };
@@ -256,7 +256,7 @@ mod tests {
         EditDraft, KindItem, SearchableListItem, build_create, build_update,
         creators_from_person_ids, empty_create_draft, kind_items, prefill_draft,
     };
-    use oeuvre_core::{
+    use ibex_core::{
         BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId, Resource,
         ResourceId, ResourceKind, SeriesId, UtcMillis,
     };

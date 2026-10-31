@@ -1,4 +1,4 @@
-use oeuvre_core::{NewSeries, Series, StoreError};
+use ibex_core::{NewSeries, Series, StoreError};
 
 use crate::event::{self, Event};
 use crate::{AppState, CommandError, Handler, Outcome};

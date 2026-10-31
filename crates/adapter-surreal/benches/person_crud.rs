@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_app::testing::MemoryStore;
-use oeuvre_core::{Name, PersonId, Store};
+use ibex_adapter_surreal::SurrealStore;
+use ibex_app::testing::MemoryStore;
+use ibex_core::{Name, PersonId, Store};
 use std::hint::black_box;
 use tokio::runtime::Runtime;
 

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
-use oeuvre_app::command::{CreatePerson, DeletePerson, GetPerson, ListPersons, UpdatePerson};
-use oeuvre_app::{AppState, Command, Outcome};
-use oeuvre_core::{Person, PersonId};
+use ibex_app::command::{CreatePerson, DeletePerson, GetPerson, ListPersons, UpdatePerson};
+use ibex_app::{AppState, Command, Outcome};
+use ibex_core::{Person, PersonId};
 
 use crate::name::NameFlags;
 

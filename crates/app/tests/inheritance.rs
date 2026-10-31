@@ -3,12 +3,12 @@
 //! Task 05: read-time inheritance — allowlist, overrides, parent updates,
 //! non-inherited fields, and predictable failures.
 
-use oeuvre_app::command::{
+use ibex_app::command::{
     CreateResource, GetResource, GetResourceDetail, ListResources, UpdateResource,
 };
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, CommandError, Outcome, Surface};
-use oeuvre_core::{
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, CommandError, Outcome, Surface};
+use ibex_core::{
     BibliographicDate, CreatorRole, CreatorSpec, Identifier, Name, NewResource, NonEmptyStr, Pages,
     PersonId, ResourceId, ResourceKind, UtcMillis,
 };
@@ -67,7 +67,7 @@ fn bare(kind: ResourceKind, title: &str, parent_id: Option<ResourceId>) -> NewRe
     }
 }
 
-async fn create(state: &AppState, new: NewResource) -> oeuvre_core::Resource {
+async fn create(state: &AppState, new: NewResource) -> ibex_core::Resource {
     let Outcome::CreateResource(r) = state
         .execute(Command::CreateResource(CreateResource { new }))
         .await
@@ -78,7 +78,7 @@ async fn create(state: &AppState, new: NewResource) -> oeuvre_core::Resource {
     r
 }
 
-async fn detail(state: &AppState, id: ResourceId) -> oeuvre_core::ResourceDetail {
+async fn detail(state: &AppState, id: ResourceId) -> ibex_core::ResourceDetail {
     let Outcome::GetResourceDetail(d) = state
         .execute(Command::GetResourceDetail(GetResourceDetail { id }))
         .await
@@ -89,7 +89,7 @@ async fn detail(state: &AppState, id: ResourceId) -> oeuvre_core::ResourceDetail
     d
 }
 
-async fn raw(state: &AppState, id: ResourceId) -> oeuvre_core::Resource {
+async fn raw(state: &AppState, id: ResourceId) -> ibex_core::Resource {
     let Outcome::GetResource(r) = state
         .execute(Command::GetResource(GetResource { id }))
         .await
@@ -100,7 +100,7 @@ async fn raw(state: &AppState, id: ResourceId) -> oeuvre_core::Resource {
     r
 }
 
-async fn list(state: &AppState) -> Vec<oeuvre_core::ResourceSummary> {
+async fn list(state: &AppState) -> Vec<ibex_core::ResourceSummary> {
     let Outcome::ListResources(rows) = state
         .execute(Command::ListResources(ListResources))
         .await
@@ -114,7 +114,7 @@ async fn list(state: &AppState) -> Vec<oeuvre_core::ResourceSummary> {
 async fn person(state: &AppState, last: &str) -> PersonId {
     let name = Name::try_new(None::<&str>, Some(last), None::<&str>).unwrap();
     let Outcome::CreatePerson(p) = state
-        .execute(Command::CreatePerson(oeuvre_app::command::CreatePerson {
+        .execute(Command::CreatePerson(ibex_app::command::CreatePerson {
             name,
             aliases: vec![],
         }))

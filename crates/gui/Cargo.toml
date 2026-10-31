@@ -1,6 +1,6 @@
 [package]
-name = "oeuvre-gui"
-description = "Oeuvre library GUI (ovr-gui, GPUI)"
+name = "ibex-gui"
+description = "Ibex library GUI (ibex-gui, GPUI)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,16 +8,15 @@ authors.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "ovr-gui"
+name = "ibex-gui"
 path = "src/main.rs"
 
 [dependencies]
-oeuvre-app = { workspace = true }
-oeuvre-adapter-surreal = { workspace = true }
-oeuvre-core = { workspace = true }
+ibex-app = { workspace = true }
+ibex-adapter-surreal = { workspace = true }
+ibex-core = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
-dirs = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 tokio = { workspace = true }
@@ -29,11 +28,11 @@ time = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 base64 = "0.22"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSImage", "NSBitmapImageRep", "NSFontDescriptor", "objc2-core-foundation"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSImage", "NSBitmapImageRep", "NSFontDescriptor", "objc2-core-foundation"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData", "NSDictionary", "NSString"] }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
-oeuvre-app = { workspace = true, features = ["testing"] }
+ibex-app = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
 tokio = { workspace = true }

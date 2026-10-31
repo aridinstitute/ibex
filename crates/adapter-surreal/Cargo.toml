@@ -1,6 +1,6 @@
 [package]
-name = "oeuvre-adapter-surreal"
-description = "SurrealDB storage adapter for Oeuvre"
+name = "ibex-adapter-surreal"
+description = "SurrealDB storage adapter for Ibex"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-oeuvre-core = { workspace = true }
+ibex-core = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 surrealdb = { workspace = true }
@@ -16,7 +16,7 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
-oeuvre-app = { workspace = true, features = ["testing"] }
+ibex-app = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
 tokio = { workspace = true }
 

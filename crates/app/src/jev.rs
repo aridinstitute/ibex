@@ -4,7 +4,7 @@
 //! as a bearer token and never appears in errors or logs.
 use std::{collections::HashMap, time::Duration};
 
-use oeuvre_core::{Collection, CollectionId, ResourceDetail};
+use ibex_core::{Collection, CollectionId, ResourceDetail};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -40,7 +40,7 @@ pub async fn classify_at(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent(concat!(
-            "Oeuvre/",
+            "Ibex/",
             env!("CARGO_PKG_VERSION"),
             " (jev classification)"
         ))
@@ -84,7 +84,7 @@ fn byline(detail: &ResourceDetail) -> Option<String> {
     detail
         .creators
         .iter()
-        .find(|group| group.role == oeuvre_core::CreatorRole::Author)
+        .find(|group| group.role == ibex_core::CreatorRole::Author)
         .or_else(|| detail.creators.first())
         .map(|group| group.names.join(", "))
 }
@@ -163,7 +163,7 @@ fn parse_answers(body: &Value, candidates: &[Collection]) -> Result<JevSuggestio
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use oeuvre_core::{
+    use ibex_core::{
         CreatorRole, DetailCreators, NonEmptyStr, ResourceId, ResourceKind, UtcMillis,
     };
 

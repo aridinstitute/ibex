@@ -1,5 +1,5 @@
-use oeuvre_adapter_surreal::SurrealStore;
-use oeuvre_core::{BibliographicDate, NewResource, NonEmptyStr, ResourceKind, Store, UtcMillis};
+use ibex_adapter_surreal::SurrealStore;
+use ibex_core::{BibliographicDate, NewResource, NonEmptyStr, ResourceKind, Store, UtcMillis};
 
 fn example() -> NewResource {
     NewResource {
@@ -21,7 +21,7 @@ fn example() -> NewResource {
         place: Some("London".into()),
         volume: Some("II".into()),
         issue: Some("4".into()),
-        pages: Some(oeuvre_core::Pages::parse("10–20").unwrap()),
+        pages: Some(ibex_core::Pages::parse("10–20").unwrap()),
         total_pages: Some("xii+250".into()),
         article_number: Some("e123".into()),
         edition: Some("Second".into()),
@@ -29,11 +29,11 @@ fn example() -> NewResource {
         url: Some("https://example.org/companion".into()),
         eprint: Some("arXiv:1234.5678".into()),
         isbns: vec![
-            oeuvre_core::Identifier::from("978-0-306-40615-7"),
-            oeuvre_core::Identifier::from("0-306-40615-2"),
+            ibex_core::Identifier::from("978-0-306-40615-7"),
+            ibex_core::Identifier::from("0-306-40615-2"),
         ],
-        issns: vec![oeuvre_core::Identifier::from("1234-5678")],
-        isrns: vec![oeuvre_core::Identifier::from("EXAMPLE-REPORT-1")],
+        issns: vec![ibex_core::Identifier::from("1234-5678")],
+        isrns: vec![ibex_core::Identifier::from("EXAMPLE-REPORT-1")],
         original_date: Some(
             BibliographicDate::try_new(
                 UtcMillis::from_unix_ms(0),
@@ -88,7 +88,7 @@ async fn bibliographic_fields_survive_storage_updates_and_reopen() {
         loop {
             match SurrealStore::open(&path).await {
                 Ok(store) => break store,
-                Err(err) if err.message.contains("already locked") => {
+                Err(err) if err.is_in_use() => {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(err) => panic!("reopen failed: {err}"),

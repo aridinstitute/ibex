@@ -5,7 +5,7 @@ use std::borrow::Cow;
 
 use gpui_kit::assets::{Assets, IconName, icon_assets};
 use gpui_kit::{AssetSource, Hsla, Result, SharedString, rgb};
-use oeuvre_core::ResourceKind;
+use ibex_core::ResourceKind;
 
 // Every icon `kind_icon` returns must be listed here, or it renders blank:
 // only the component defaults are embedded otherwise.

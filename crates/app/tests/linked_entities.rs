@@ -4,12 +4,12 @@
 
 use std::collections::HashMap;
 
-use oeuvre_app::command::{GetResource, GetResourceDetail, ImportBiblatex, ListResources};
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, Outcome, Surface};
-use oeuvre_core::{ResourceId, ResourceKind};
+use ibex_app::command::{GetResource, GetResourceDetail, ImportBiblatex, ListResources};
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, Outcome, Surface};
+use ibex_core::{ResourceId, ResourceKind};
 
-async fn import(source: &str) -> (AppState, oeuvre_core::ImportReport) {
+async fn import(source: &str) -> (AppState, ibex_core::ImportReport) {
     let state = AppState::builder(MemoryStore::new())
         .surface(Surface::Test)
         .sink(MemorySink::new())
@@ -27,7 +27,7 @@ async fn import(source: &str) -> (AppState, oeuvre_core::ImportReport) {
     (state, report)
 }
 
-async fn resource(state: &AppState, id: ResourceId) -> oeuvre_core::Resource {
+async fn resource(state: &AppState, id: ResourceId) -> ibex_core::Resource {
     let Outcome::GetResource(r) = state
         .execute(Command::GetResource(GetResource { id }))
         .await
@@ -38,7 +38,7 @@ async fn resource(state: &AppState, id: ResourceId) -> oeuvre_core::Resource {
     r
 }
 
-async fn all_resources(state: &AppState) -> Vec<oeuvre_core::ResourceSummary> {
+async fn all_resources(state: &AppState) -> Vec<ibex_core::ResourceSummary> {
     let Outcome::ListResources(rows) = state
         .execute(Command::ListResources(ListResources))
         .await
@@ -208,7 +208,7 @@ async fn parent_before_child_and_child_before_parent_are_equivalent() {
 
     async fn shape(
         state: &AppState,
-        report: &oeuvre_core::ImportReport,
+        report: &ibex_core::ImportReport,
     ) -> (ResourceKind, Option<(Option<String>, Option<String>)>) {
         let paper_id = report
             .imported

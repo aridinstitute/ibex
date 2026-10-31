@@ -2,15 +2,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
-use oeuvre_app::command::{ImportBiblatex, ImportCslJson, PreviewBiblatex, PreviewCslJson};
-use oeuvre_app::{AppState, Command, CommandError, Outcome};
-use oeuvre_core::{
+use ibex_app::command::{ImportBiblatex, ImportCslJson, PreviewBiblatex, PreviewCslJson};
+use ibex_app::{AppState, Command, CommandError, Outcome};
+use ibex_core::{
     AssignedTarget, CollectionId, EntryChoice, EntryProposal, ExistingIdOrName,
     IMPORT_MAX_SOURCE_BYTES, ImportAssignments, ImportChoices, ImportIssue, ImportPreview,
     ImportReport, NonEmptyStr, PersonChoice, PersonMatchPreview, StoreError, TagId, import_codes,
 };
 
-/// Bibliography source formats `ovr import` reads.
+/// Bibliography source formats `ibex import` reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ImportFormatArg {
     /// BibLaTeX / BibTeX (`.bib`).
@@ -345,9 +345,9 @@ pub fn format_report(report: &ImportReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oeuvre_adapter_surreal::SurrealStore;
-    use oeuvre_app::Surface;
-    use oeuvre_app::command::{CreateCollection, GetResource};
+    use ibex_adapter_surreal::SurrealStore;
+    use ibex_app::Surface;
+    use ibex_app::command::{CreateCollection, GetResource};
 
     fn args(path: &str) -> ImportArgs {
         ImportArgs {
@@ -364,7 +364,7 @@ mod tests {
 
     fn temp_file(name: &str, body: &str) -> PathBuf {
         let unique = CollectionId::generate();
-        let dir = std::env::temp_dir().join(format!("ovr-import-{unique}"));
+        let dir = std::env::temp_dir().join(format!("ibex-import-{unique}"));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, body).unwrap();

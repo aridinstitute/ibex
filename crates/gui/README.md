@@ -1,9 +1,16 @@
 # GUI settings
 
-The GUI reads `config.toml` from the OS application-data directory under
-`oeuvre` (on macOS: `~/Library/Application Support/oeuvre/config.toml`).
-This location does not change when opening a library with `--data`.
-The file is created on the first settings save.
+The GUI reads `~/.ibex/config.toml`, the same file the `ibex` CLI uses
+(`IBEX_CONFIG_DIR` moves the directory). This location does not change when
+opening a library with `--data`. The file is created on the first settings
+save; saves rewrite only the GUI's keys and keep the CLI's.
+
+The library opens from the platform data directory (macOS:
+`~/Library/Application Support/Ibex/database`) or from `--data` / `IBEX_DATA`;
+see the top-level README for every path. If the library cannot open (for
+example, another Ibex process holds it), the GUI shows the error instead of
+starting with an empty library. `--memory` opens a demo library that is never
+saved.
 
 ## Theme colors
 

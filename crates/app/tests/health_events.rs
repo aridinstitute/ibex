@@ -5,12 +5,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
-use oeuvre_app::command::Health;
-use oeuvre_app::testing::{MemorySink, StubStore};
-use oeuvre_app::{
+use ibex_app::command::Health;
+use ibex_app::testing::{MemorySink, StubStore};
+use ibex_app::{
     AppState, Command, CommandError, FieldValue, Outcome, Status, Store, StoreError, StoreHealth,
 };
-use oeuvre_core::{
+use ibex_core::{
     Collection, CollectionId, CollectionTreeNode, ImportedResourceWrite, Name, NewResource,
     NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceId, Series, SeriesId, Tag, TagId,
 };
@@ -152,7 +152,7 @@ impl Store for HangStore {
 
     async fn update_collection(
         &self,
-        _update: oeuvre_core::CollectionUpdate,
+        _update: ibex_core::CollectionUpdate,
     ) -> Result<Collection, StoreError> {
         std::future::pending().await
     }
@@ -215,7 +215,7 @@ impl Store for HangStore {
         std::future::pending().await
     }
 
-    async fn list_resources(&self) -> Result<Vec<oeuvre_core::ResourceSummary>, StoreError> {
+    async fn list_resources(&self) -> Result<Vec<ibex_core::ResourceSummary>, StoreError> {
         std::future::pending().await
     }
 
@@ -223,7 +223,7 @@ impl Store for HangStore {
         &self,
         _before: Option<ResourceId>,
         _limit: u32,
-    ) -> Result<oeuvre_core::ResourcePage, StoreError> {
+    ) -> Result<ibex_core::ResourcePage, StoreError> {
         std::future::pending().await
     }
 }

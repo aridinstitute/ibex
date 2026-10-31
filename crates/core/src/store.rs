@@ -370,6 +370,7 @@ enum StoreErrorKind {
     Other,
     NotFound,
     Invalid,
+    InUse,
 }
 
 /// Failure from a store operation.
@@ -408,6 +409,19 @@ impl StoreError {
 
     pub fn is_invalid(&self) -> bool {
         self.kind == StoreErrorKind::Invalid
+    }
+
+    /// The store is held by another process (an embedded datastore admits
+    /// one owner at a time).
+    pub fn in_use(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: StoreErrorKind::InUse,
+        }
+    }
+
+    pub fn is_in_use(&self) -> bool {
+        self.kind == StoreErrorKind::InUse
     }
 }
 

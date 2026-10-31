@@ -6,7 +6,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use oeuvre_core::{CreatorRole, ResourceDetail, format_published_label, format_recorded_date};
+use ibex_core::{CreatorRole, ResourceDetail, format_published_label, format_recorded_date};
 
 use crate::kind::{kind_color, kind_label, kind_symbol};
 
@@ -376,7 +376,7 @@ mod tests {
     // No `use super::*`: the glob would re-import gpui's `test` proc
     // macro (via the module's `gpui_kit::*`), hijacking `#[test]`.
     use super::{byline, field_rows, role_label};
-    use oeuvre_core::{
+    use ibex_core::{
         BibliographicDate, CreatorRole, DetailCreators, NonEmptyStr, ResourceDetail, ResourceId,
         ResourceKind, UtcMillis,
     };
@@ -645,7 +645,7 @@ mod tests {
         let mut detail = journal_article();
         detail.doi = Some("10.1000/example".into());
         detail.url = Some("https://example.org".into());
-        detail.pages = Some(oeuvre_core::Pages::parse("10–20").unwrap());
+        detail.pages = Some(ibex_core::Pages::parse("10–20").unwrap());
         detail.isbns = vec!["978-0-306-40615-7".into()];
         detail.keywords = vec!["history".into(), "computing".into()];
         detail.abstract_text = Some("A summary".into());
@@ -740,12 +740,12 @@ mod tests {
         // Tags render as a caller-supplied hashtag value, not a text row.
         let mut with_tags = journal_article();
         with_tags.tags = vec![
-            oeuvre_core::Tag::try_new(
-                oeuvre_core::TagId::generate(),
+            ibex_core::Tag::try_new(
+                ibex_core::TagId::generate(),
                 NonEmptyStr::try_new("epistemology").unwrap(),
             ),
-            oeuvre_core::Tag::try_new(
-                oeuvre_core::TagId::generate(),
+            ibex_core::Tag::try_new(
+                ibex_core::TagId::generate(),
                 NonEmptyStr::try_new("methods").unwrap(),
             ),
         ];

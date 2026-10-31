@@ -12,7 +12,7 @@ use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, IndexPath, Sizable as _, h_flex};
 use gpui_kit::*;
 
-use oeuvre_core::{
+use ibex_core::{
     CreatorSpec, Name, NameError, Person, PersonId, Resource, ResourceId, ResourceKind,
 };
 
@@ -447,7 +447,7 @@ mod tests {
     use gpui_kit::component::searchable_list::{
         SearchableListDelegate as _, SearchableListItem as _,
     };
-    use oeuvre_core::{Name, Person, PersonId};
+    use ibex_core::{Name, Person, PersonId};
 
     #[test]
     fn author_search_offers_create_only_for_a_new_nonblank_name() {

@@ -4,16 +4,27 @@ Guidance for AI agents and contributors working in this repository.
 
 ## Project
 
-Oeuvre is a citation manager built for speed and agentic research (CLI + MCP). It is a Rust workspace:
+Ibex is a citation manager built for speed and agentic research (CLI + MCP). It is a Rust workspace:
 
 | Crate | Path | Role |
 |-------|------|------|
-| `oeuvre-core` | `crates/core` | Domain types and storage traits |
-| `oeuvre-app` | `crates/app` | AppState, commands, and wide-event logging |
-| `oeuvre-adapter-surreal` | `crates/adapter-surreal` | SurrealDB storage adapter |
-| `oeuvre-cli` | `crates/cli` | `ovr` CLI (clap) |
+| `ibex-core` | `crates/core` | Domain types and storage traits |
+| `ibex-app` | `crates/app` | AppState, commands, and wide-event logging |
+| `ibex-adapter-surreal` | `crates/adapter-surreal` | SurrealDB storage adapter |
+| `ibex-cli` | `crates/cli` | `ibex` CLI (clap) |
 
 See `README.md` and `docs/` for product context.
+
+## Data, config, and tests
+
+- Paths come from `ibex_app::paths` (library, backups, `~/.ibex/config.toml`);
+  the shared config is read and written through `ibex_app::config`. Do not add
+  other path or config logic to the clients.
+- Tests must never touch the real home: pass `--data` and `IBEX_CONFIG_DIR`
+  temp dirs (CLI tests use `tests/common::ibex()`), or `--memory`.
+- Never point this SurrealDB 3.3.4 build at a database written by SurrealDB 4.0;
+  the formats are incompatible. Use the matching SurrealDB version to export or
+  migrate data before changing versions.
 
 ## Git: branches
 
@@ -55,7 +66,7 @@ Only create commits when the user asks. Never amend pushed history or skip hooks
 ## Working style
 
 - Prefer small, reviewable changes scoped to the request.
-- Match existing Rust workspace layout and naming (`oeuvre-*` crates under `crates/`).
+- Match existing Rust workspace layout and naming (`ibex-*` crates under `crates/`).
 - Do not expand scope into unrelated refactors or drive-by docs.
 - Scope formatting to touched files; check the diff afterward and remove unrelated formatting changes (avoid `cargo fmt --all` for local UI edits).
 - Ask before destructive git operations (force push, hard reset).

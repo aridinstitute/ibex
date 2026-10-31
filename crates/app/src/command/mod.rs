@@ -16,7 +16,7 @@ pub use collection::{
     UpdateCollection,
 };
 pub use health::{Health, HealthReport};
-pub use oeuvre_core::{ImportChoices, ImportPreview, ImportReport};
+pub use ibex_core::{ImportChoices, ImportPreview, ImportReport};
 pub use person::{
     CreatePerson, DeletePerson, DeletedPerson, FindPersonsByName, GetPerson, ListPersons,
     UpdatePerson,
@@ -28,7 +28,7 @@ pub use resource::{
 pub use series::CreateSeries;
 pub use tag::{CreateTag, FindTagByText, GetTag, ListTags};
 
-use oeuvre_core::{
+use ibex_core::{
     Collection, CollectionTreeNode, Person, Resource, ResourceCounts, ResourceDetail,
     ResourceGridPage, ResourcePage, ResourceSummary, Series, SortedResourcePage, StoreError, Tag,
 };
@@ -36,7 +36,7 @@ use oeuvre_core::{
 use crate::AppState;
 use crate::event::Event;
 
-/// Every operation Oeuvre supports. Closed set; shells enumerate this.
+/// Every operation Ibex supports. Closed set; shells enumerate this.
 /// Variants carry already-validated domain inputs — parsing happens in the shell.
 #[derive(Debug, Clone)]
 pub enum Command {

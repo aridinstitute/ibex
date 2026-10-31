@@ -6,8 +6,8 @@
 //! than Surreal disk I/O.
 //!
 //! ```text
-//! rustup run stable cargo bench -p oeuvre-app --features testing --bench import_pipeline
-//! OEUVRE_IMPORT_BENCH_SIZES=50,200 rustup run stable cargo bench -p oeuvre-app --features testing --bench import_pipeline
+//! rustup run stable cargo bench -p ibex-app --features testing --bench import_pipeline
+//! IBEX_IMPORT_BENCH_SIZES=50,200 rustup run stable cargo bench -p ibex-app --features testing --bench import_pipeline
 //! ```
 //!
 //! Query counts and peak-RSS methodology live in the companion harness
@@ -17,10 +17,10 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use oeuvre_app::command::{ImportBiblatex, ImportCslJson};
-use oeuvre_app::import::{parse_biblatex, parse_csl_json};
-use oeuvre_app::testing::{MemorySink, MemoryStore};
-use oeuvre_app::{AppState, Command, Surface};
+use ibex_app::command::{ImportBiblatex, ImportCslJson};
+use ibex_app::import::{parse_biblatex, parse_csl_json};
+use ibex_app::testing::{MemorySink, MemoryStore};
+use ibex_app::{AppState, Command, Surface};
 use tokio::runtime::Runtime;
 
 const DEFAULT_SIZES: &[usize] = &[50, 200];
@@ -61,7 +61,7 @@ impl Scenario {
 }
 
 fn sizes() -> Vec<usize> {
-    match std::env::var("OEUVRE_IMPORT_BENCH_SIZES") {
+    match std::env::var("IBEX_IMPORT_BENCH_SIZES") {
         Ok(raw) => raw
             .split(',')
             .filter_map(|s| s.trim().parse().ok())
