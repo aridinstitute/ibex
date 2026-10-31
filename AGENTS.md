@@ -71,3 +71,6 @@ Only create commits when the user asks. Never amend pushed history or skip hooks
 - Treat `docs/user-guide.md` as user-authored: keep its template headings and shortcut table, and add explanatory prose only when explicitly requested.
 - Scope formatting to touched files; check the diff afterward and remove unrelated formatting changes (avoid `cargo fmt --all` for local UI edits).
 - Ask before destructive git operations (force push, hard reset).
+- Before adding complexity for a speculative or vanishingly unlikely race or security edge case, explain the concrete failure mode, likelihood, and complexity cost to the user and get their buy-in. Do not silently expand scope for theoretical robustness
+- Do not to worry about writing migrations or writing defensive code since we're pre-release. You don't have to worry about corrupting existing data. Instead of coding defensively or writing migrations, the goal is to come away with cleanest data model, architecture, and code even if that means rewriting big parts of the app.
+- Always reference the roadmap in [ROADMAP.md](ROADMAP.md) when making decisions about features, architecture, and design. Consider future features and how code for the current task can set up for future features, but do not add complexity or unnecessary checks (see above) just for those future features.
