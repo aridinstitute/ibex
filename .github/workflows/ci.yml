@@ -25,7 +25,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: '0'
-  CARGO_BUILD_JOBS: '2'
   CARGO_PROFILE_DEV_DEBUG: '0'
   CARGO_PROFILE_TEST_DEBUG: '0'
 
@@ -62,7 +61,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/rust
-      - name: Portable tests, Clippy, docs, and benchmark compilation
+      - name: Portable tests, Clippy, and docs
         env:
           RUSTDOCFLAGS: -D warnings
         run: |
@@ -70,7 +69,6 @@ jobs:
           cargo test --locked "${packages[@]}" --features ibex-app/testing
           cargo clippy --locked "${packages[@]}" --all-targets --features ibex-app/testing -- -D warnings
           cargo doc --locked "${packages[@]}" --no-deps
-          cargo bench --locked -p ibex-app -p ibex-adapter-surreal --features ibex-app/testing --no-run
       - name: GUI tests, Clippy, and docs
         if: runner.os == 'macOS'
         env:
@@ -79,13 +77,19 @@ jobs:
           cargo test --locked -p ibex-gui
           cargo clippy --locked -p ibex-gui --all-targets -- -D warnings
           cargo doc --locked -p ibex-gui --no-deps
+      # Optimized builds are slow; PRs skip them, and pushes to release/** and
+      # main (plus release tags, via workflow_call) still catch regressions.
+      - name: Benchmark compilation
+        if: github.event_name != 'pull_request'
+        run: cargo bench --locked -p ibex-app -p ibex-adapter-surreal --features ibex-app/testing --no-run
       - name: Optimized CLI build and smoke test
+        if: github.event_name != 'pull_request'
         run: |
           cargo build --locked --release -p ibex-cli
           target/release/ibex --version
           target/release/ibex --memory resource list
       - name: Optimized GUI build
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && github.event_name != 'pull_request'
         run: |
           cargo build --locked --release -p ibex-gui
           target/release/ibex-gui --version

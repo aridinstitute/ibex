@@ -25,7 +25,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: '0'
-  CARGO_BUILD_JOBS: '2'
   IBEX_BENCH_STRICT: '1'
 
 defaults:

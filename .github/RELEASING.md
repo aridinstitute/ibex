@@ -30,7 +30,9 @@ branch; final tags must point at a commit on `main`.
 | `performance.yml` | Nightly, manual (pick a baseline and `small`/`large`) | No; compares timings on one runner and uploads reports |
 | `release.yml` | `v*` tags | Creates a draft only |
 
-Clippy and rustdoc warnings fail CI. Coverage runs weekly or on manual
+Clippy and rustdoc warnings fail CI. Benchmark compilation and optimized
+builds run only on pushes to `release/**` and `main` and on release tags, not
+on PRs. Coverage runs weekly or on manual
 dispatch and is informational.
 
 ## GitHub settings
