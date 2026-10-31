@@ -58,14 +58,38 @@ jobs:
               { echo '::error::Release tags must point at a commit on main'; exit 1; }
           fi
 
-  checks:
-    name: Release checks
+  ci:
+    name: Require passing CI
     needs: validate
-    uses: ./.github/workflows/ci.yml
-
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Find a successful CI run for this exact source tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          tree_of() { gh api "repos/$REPO/git/commits/$1" --jq .tree.sha 2>/dev/null || true; }
+          want=$(tree_of "$SHA")
+          # PR runs record the PR head commit. Merging an up-to-date PR, or
+          # squashing an up-to-date release branch, yields the same tree, so the
+          # tested code is identical to what gets packaged.
+          for sha in $(gh api "repos/$REPO/actions/workflows/ci.yml/runs?status=success&per_page=50" \
+              --jq '[.workflow_runs[] | select(.event != "schedule") | .head_sha] | unique | .[]'); do
+            if [[ "$sha" == "$SHA" || "$(tree_of "$sha")" == "$want" ]]; then
+              echo "CI passed for commit $sha, which has this tag's source tree."
+              exit 0
+            fi
+          done
+          echo "::error::No successful CI run covers this commit. Run 'gh workflow run ci.yml --ref <branch>' and re-run this workflow once it passes."
+          exit 1
   build:
     name: Package (${{ matrix.target }})
-    needs: [validate, checks]
+    needs: [validate, ci]
     strategy:
       fail-fast: false
       matrix:
@@ -75,7 +99,7 @@ jobs:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: '0'
@@ -203,7 +227,7 @@ jobs:
 
   draft:
     name: Create draft release
-    needs: [validate, checks, build, provenance]
+    needs: [validate, ci, build, provenance]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

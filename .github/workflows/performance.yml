@@ -1,8 +1,8 @@
 name: Performance
 
+# Manual only: a scheduled run would use most of a private repository's
+# monthly Actions minutes.
 on:
-  schedule:
-    - cron: '43 3 * * *'
   workflow_dispatch:
     inputs:
       baseline:
@@ -35,7 +35,7 @@ jobs:
   benchmarks:
     name: Criterion comparison
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

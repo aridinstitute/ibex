@@ -3,15 +3,24 @@ name: CI
 on:
   pull_request:
     branches: [main, 'release/**']
+    paths: &code-paths
+      - '**'
+      - '!**.md'
+      - '!docs/**'
+      # Embedded in the GUI binary at compile time.
+      - 'docs/user-guide.md'
+  # PR runs already test the merge result, so only main (which seeds the
+  # shared cache) runs again after a merge.
   push:
-    branches: [main, 'release/**']
-  workflow_call:
+    branches: [main]
+    paths: *code-paths
   workflow_dispatch:
     inputs:
       coverage:
         description: Generate a non-blocking Linux coverage report
         type: boolean
         default: false
+  # Weekly dependency audit only; new advisories appear without code changes.
   schedule:
     - cron: '17 4 * * 1'
 
@@ -35,8 +44,9 @@ defaults:
 jobs:
   hygiene:
     name: Formatting and workflows
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -50,18 +60,22 @@ jobs:
 
   test:
     name: Test (${{ matrix.os }})
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - uses: ./.github/actions/rust
+      # macOS minutes cost 10x on private repositories, so the shared crates are
+      # checked on Linux only and macOS covers just the GUI.
       - name: Portable tests, Clippy, and docs
+        if: runner.os == 'Linux'
         env:
           RUSTDOCFLAGS: -D warnings
         run: |
@@ -77,19 +91,19 @@ jobs:
           cargo test --locked -p ibex-gui
           cargo clippy --locked -p ibex-gui --all-targets -- -D warnings
           cargo doc --locked -p ibex-gui --no-deps
-      # Optimized builds are slow; PRs skip them, and pushes to release/** and
-      # main (plus release tags, via workflow_call) still catch regressions.
+      # Optimized builds are slow, so only pushes to main run them; release
+      # packaging builds and smoke-tests the optimized binaries for every tag.
       - name: Benchmark compilation
-        if: github.event_name != 'pull_request'
+        if: runner.os == 'Linux' && github.event_name == 'push'
         run: cargo bench --locked -p ibex-app -p ibex-adapter-surreal --features ibex-app/testing --no-run
       - name: Optimized CLI build and smoke test
-        if: github.event_name != 'pull_request'
+        if: runner.os == 'Linux' && github.event_name == 'push'
         run: |
           cargo build --locked --release -p ibex-cli
           target/release/ibex --version
           target/release/ibex --memory resource list
       - name: Optimized GUI build
-        if: runner.os == 'macOS' && github.event_name != 'pull_request'
+        if: runner.os == 'macOS' && github.event_name == 'push'
         run: |
           cargo build --locked --release -p ibex-gui
           target/release/ibex-gui --version
@@ -97,7 +111,7 @@ jobs:
   dependencies:
     name: Dependency policy
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -110,10 +124,10 @@ jobs:
 
   coverage:
     name: Coverage report (informational)
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.coverage)
+    if: github.event_name == 'workflow_dispatch' && inputs.coverage
     continue-on-error: true
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -135,7 +149,7 @@ jobs:
 
   gate:
     name: CI gate
-    if: always()
+    if: always() && github.event_name != 'schedule'
     needs: [hygiene, test, dependencies]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
