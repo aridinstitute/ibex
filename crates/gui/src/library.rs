@@ -55,6 +55,7 @@ use crate::db::DbWorker;
 use crate::detail::{
     DetailFetch, DetailView, FIELD_LABEL_WIDTH, FIELD_TEXT_SIZE, PANEL_WIDTH, render_panel,
 };
+use crate::documentation::{DocumentationWindow, OpenDocumentation};
 use crate::edit::{
     EditDraft, KindItem, build_create, build_update, creators_from_person_ids, kind_items,
     prefill_draft,
@@ -6658,6 +6659,11 @@ impl Render for LibraryApp {
             .on_action(cx.listener(|this, _: &ImportBiblatexFile, window, cx| {
                 this.import_biblatex(window, cx);
             }))
+            .on_action(cx.listener(|_, _: &OpenDocumentation, window, cx| {
+                if let Err(error) = DocumentationWindow::open(cx) {
+                    window.push_notification(format!("Could not open documentation: {error}"), cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &ExtendResourceSelectionUp, _, cx| {
                 this.extend_resource_selection(-1, cx);
             }))
@@ -6905,6 +6911,28 @@ impl Render for LibraryApp {
                                                     )
                                                 }
                                             }),
+                                    )
+                                    .child(
+                                        Button::new("open-documentation")
+                                            .ghost()
+                                            .small()
+                                            .icon(symbol(
+                                                "questionmark.circle",
+                                                AssetIconName::CircleQuestionMark,
+                                            ))
+                                            .accessibility_label("Open documentation")
+                                            .tooltip("Open documentation (F1)")
+                                            .on_click(cx.listener(|_, _, window, cx| {
+                                                cx.stop_propagation();
+                                                if let Err(error) = DocumentationWindow::open(cx) {
+                                                    window.push_notification(
+                                                        format!(
+                                                            "Could not open documentation: {error}"
+                                                        ),
+                                                        cx,
+                                                    );
+                                                }
+                                            })),
                                     )
                                     .child(
                                         h_flex()
@@ -7889,6 +7917,47 @@ mod palette_persistence_tests {
             .unwrap();
         }
         assert!(!cx.did_prompt_for_paths());
+    }
+
+    #[gpui_kit::test]
+    fn documentation_toolbar_and_shortcut_share_one_window(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::test::TestWindowExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, app) = open_theme_fixture(cx, &dir);
+        cx.update(crate::bind_library_keys);
+        cx.update_window(handle, |_, window, cx| {
+            let focus = app.read(cx).table.focus_handle(cx);
+            window.focus(&focus, cx);
+            window.press("f1", cx);
+        })
+        .unwrap();
+        assert_eq!(cx.windows().len(), 2);
+        let documentation = cx
+            .windows()
+            .into_iter()
+            .find(|other| *other != handle)
+            .unwrap();
+        cx.update_window(documentation, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("open-documentation").label().as_deref(),
+                Some("Open documentation")
+            );
+            window.click("open-documentation", cx);
+        })
+        .unwrap();
+        let windows = cx.windows();
+        assert_eq!(windows.len(), 2);
+        cx.update_window(handle, |_, window, cx| {
+            let focus = app.read(cx).table.focus_handle(cx);
+            window.focus(&focus, cx);
+            window.press("f1", cx);
+        })
+        .unwrap();
+        assert_eq!(cx.windows(), windows);
     }
 
     fn open_theme_fixture(

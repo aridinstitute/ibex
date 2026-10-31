@@ -3,6 +3,7 @@ mod collections;
 mod command_palette;
 mod db;
 mod detail;
+mod documentation;
 mod edit;
 mod icons;
 mod import_dialog;
@@ -288,6 +289,11 @@ fn bind_library_keys(cx: &mut App) {
     // Letter keys skip Input so typing in cells/filters is undisturbed.
     cx.bind_keys([
         KeyBinding::new("cmd-k", OpenCommandPalette, Some("LibraryApp")),
+        KeyBinding::new(
+            "f1",
+            crate::documentation::OpenDocumentation,
+            Some("LibraryApp"),
+        ),
         KeyBinding::new("cmd-shift-i", ImportBiblatexFile, Some("LibraryApp")),
         KeyBinding::new("cmd-j", crate::library::ClassifyWithJev, Some("LibraryApp")),
         KeyBinding::new("]", ToggleDetailPanel, Some("LibraryApp && !Input")),

@@ -68,5 +68,6 @@ Only create commits when the user asks. Never amend pushed history or skip hooks
 - Prefer small, reviewable changes scoped to the request.
 - Match existing Rust workspace layout and naming (`ibex-*` crates under `crates/`).
 - Do not expand scope into unrelated refactors or drive-by docs.
+- Treat `docs/user-guide.md` as user-authored: keep its template headings and shortcut table, and add explanatory prose only when explicitly requested.
 - Scope formatting to touched files; check the diff afterward and remove unrelated formatting changes (avoid `cargo fmt --all` for local UI edits).
 - Ask before destructive git operations (force push, hard reset).

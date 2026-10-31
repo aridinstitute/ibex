@@ -22,6 +22,10 @@ cargo run -p ibex-cli -- --memory resource list
 cargo run -p ibex-gui -- --memory
 ```
 
+In the GUI, choose the **?** help button in the toolbar or press **F1** for the
+offline user guide. Its source is [`docs/user-guide.md`](docs/user-guide.md);
+edit that Markdown file and rebuild `ibex-gui` to update the embedded guide.
+
 ## Where Ibex keeps data
 
 Without `--memory`, both clients open the same persistent library (SurrealKV
