@@ -579,6 +579,266 @@ pub fn fill_gaps(record: &Resource, fetched: NewResource) -> NewResource {
     }
     current
 }
+pub async fn link_creators(
+    state: &AppState,
+    creators: Vec<(CreatorRole, Name)>,
+    new: &mut NewResource,
+) -> Result<(), String> {
+    for (role, name) in creators {
+        let found = state
+            .execute(Command::FindPersonsByName(FindPersonsByName {
+                name: name.clone(),
+            }))
+            .await
+            .map_err(|e| e.to_string())?;
+        let id = match found {
+            Outcome::FindPersonsByName(people) if !people.is_empty() => people[0].id,
+            Outcome::FindPersonsByName(_) => match state
+                .execute(Command::CreatePerson(CreatePerson {
+                    name,
+                    aliases: vec![],
+                }))
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                Outcome::CreatePerson(person) => person.id,
+                _ => return Err("unexpected outcome from create_person".into()),
+            },
+            _ => return Err("unexpected outcome from find_persons_by_name".into()),
+        };
+        if !new
+            .creators
+            .iter()
+            .any(|creator| creator.person_id == id && creator.role == role)
+        {
+            new.creators.push(CreatorSpec {
+                person_id: id,
+                role,
+                credited_as: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a Crossref journal to an existing container or create one before the article.
+/// Never replace a manually chosen parent or guess among ambiguous matches.
+pub async fn link_journal(
+    state: &AppState,
+    journal: NewResource,
+    article: &mut NewResource,
+) -> Result<(), String> {
+    if article.parent_id.is_some() || article.kind != ibex_core::ResourceKind::JournalArticle {
+        return Ok(());
+    }
+    // Title filtering would hide conflicting ISSN matches under a different title.
+    let query = ResourceQuery {
+        sort: None,
+        filter: ResourceFilter::by_kind(ResourceKind::Journal),
+    };
+    let mut journals = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = match state
+            .execute(Command::ListResourcesQueryPage(ListResourcesQueryPage {
+                query: query.clone(),
+                offset,
+                limit: 100,
+            }))
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Outcome::ListResourcesQueryPage(page) => page,
+            _ => return Err("unexpected outcome from list_resources_query_page".into()),
+        };
+        for row in page.rows {
+            match state
+                .execute(Command::GetResource(GetResource { id: row.id }))
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                Outcome::GetResource(resource) => journals.push(resource),
+                _ => return Err("unexpected outcome from get_resource".into()),
+            }
+        }
+        let Some(next_offset) = page.next_offset else {
+            break;
+        };
+        offset = next_offset;
+    }
+    let title = journal.title.as_str();
+    let by_title: Vec<_> = journals
+        .iter()
+        .filter(|r| r.title.as_str().trim().eq_ignore_ascii_case(title.trim()))
+        .collect();
+    let by_issn: Vec<_> = journals
+        .iter()
+        .filter(|r| {
+            r.issns.iter().any(|known| {
+                journal
+                    .issns
+                    .iter()
+                    .any(|incoming| known.lookup_key() == incoming.lookup_key())
+            })
+        })
+        .collect();
+    let matched = if journal.issns.is_empty() {
+        match by_title.as_slice() {
+            [] => None,
+            [one] => Some(*one),
+            _ => {
+                return Err(format!(
+                    "ambiguous journal title '{title}'; select a parent manually"
+                ));
+            }
+        }
+    } else {
+        match by_issn.as_slice() {
+            [one] if one.title.as_str().trim().eq_ignore_ascii_case(title.trim()) => Some(*one),
+            [one] => {
+                return Err(format!(
+                    "ISSN matches journal '{}' but Crossref calls it '{title}'",
+                    one.title.as_str()
+                ));
+            }
+            [] => match by_title.as_slice() {
+                [one] if one.issns.is_empty() => Some(*one),
+                [] => None,
+                _ => {
+                    return Err(format!(
+                        "ambiguous or conflicting journal '{title}'; select a parent manually"
+                    ));
+                }
+            },
+            _ => {
+                return Err(format!(
+                    "ambiguous ISSN for journal '{title}'; select a parent manually"
+                ));
+            }
+        }
+    };
+    article.parent_id = Some(if let Some(existing) = matched {
+        let mut enriched = existing.to_new();
+        let mut changed = false;
+        if enriched.issns.is_empty() && !journal.issns.is_empty() {
+            enriched.issns = journal.issns;
+            changed = true;
+        }
+        if enriched.short_title.is_none() && journal.short_title.is_some() {
+            enriched.short_title = journal.short_title;
+            changed = true;
+        }
+        if enriched.publisher.is_none() && journal.publisher.is_some() {
+            enriched.publisher = journal.publisher;
+            changed = true;
+        }
+        if changed {
+            state
+                .execute(Command::UpdateResource(UpdateResource {
+                    id: existing.id,
+                    new: enriched,
+                }))
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        existing.id
+    } else {
+        match state
+            .execute(Command::CreateResource(CreateResource { new: journal }))
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Outcome::CreateResource(resource) => resource.id,
+            _ => return Err("unexpected outcome from create_resource".into()),
+        }
+    });
+    Ok(())
+}
+
+/// Resolve an ISBN or DOI and store it, or fill only missing fields on `target`.
+pub async fn fetch(
+    state: &AppState,
+    identifier: &str,
+    target: Option<ResourceId>,
+) -> Result<Resource, String> {
+    fetch_at(
+        state,
+        identifier,
+        target,
+        "https://openlibrary.org/api/books",
+        "https://api.crossref.org/works",
+    )
+    .await
+}
+
+/// As `fetch`, with injectable provider URLs for deterministic HTTP tests.
+pub async fn fetch_at(
+    state: &AppState,
+    identifier: &str,
+    target: Option<ResourceId>,
+    books: &str,
+    works: &str,
+) -> Result<Resource, String> {
+    let existing = if let Some(id) = target {
+        match state
+            .execute(Command::GetResource(GetResource { id }))
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Outcome::GetResource(record) => Some(record),
+            _ => return Err("unexpected outcome from get_resource".into()),
+        }
+    } else {
+        None
+    };
+    let fetched = lookup_at(identifier, books, works).await?;
+    let mut new = fetched.resource;
+    let has_role = |role| {
+        existing.as_ref().is_some_and(|record: &Resource| {
+            record.creators.iter().any(|creator| creator.role == role)
+        })
+    };
+    let mut creators = Vec::new();
+    if !has_role(CreatorRole::Author) {
+        creators.extend(
+            fetched
+                .authors
+                .into_iter()
+                .map(|name| (CreatorRole::Author, name)),
+        );
+    }
+    if !has_role(CreatorRole::Editor) {
+        creators.extend(
+            fetched
+                .editors
+                .into_iter()
+                .map(|name| (CreatorRole::Editor, name)),
+        );
+    }
+    link_creators(state, creators, &mut new).await?;
+    if existing.as_ref().is_none_or(|r| r.parent_id.is_none())
+        && let Some(journal) = fetched.journal
+    {
+        link_journal(state, journal, &mut new).await?;
+    }
+    let outcome = if let Some(record) = existing {
+        state
+            .execute(Command::UpdateResource(UpdateResource {
+                id: record.id,
+                new: fill_gaps(&record, new),
+            }))
+            .await
+    } else {
+        state
+            .execute(Command::CreateResource(CreateResource { new }))
+            .await
+    }
+    .map_err(|e| e.to_string())?;
+    match outcome {
+        Outcome::CreateResource(resource) | Outcome::UpdateResource(resource) => Ok(resource),
+        _ => Err("unexpected outcome from identifier fetch".into()),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -861,265 +1121,5 @@ mod tests {
         assert_eq!(merged.creators.len(), 2);
         assert_eq!(merged.creators[0].person_id, local_author);
         assert_eq!(merged.creators[1].role, CreatorRole::Editor);
-    }
-}
-pub async fn link_creators(
-    state: &AppState,
-    creators: Vec<(CreatorRole, Name)>,
-    new: &mut NewResource,
-) -> Result<(), String> {
-    for (role, name) in creators {
-        let found = state
-            .execute(Command::FindPersonsByName(FindPersonsByName {
-                name: name.clone(),
-            }))
-            .await
-            .map_err(|e| e.to_string())?;
-        let id = match found {
-            Outcome::FindPersonsByName(people) if !people.is_empty() => people[0].id,
-            Outcome::FindPersonsByName(_) => match state
-                .execute(Command::CreatePerson(CreatePerson {
-                    name,
-                    aliases: vec![],
-                }))
-                .await
-                .map_err(|e| e.to_string())?
-            {
-                Outcome::CreatePerson(person) => person.id,
-                _ => return Err("unexpected outcome from create_person".into()),
-            },
-            _ => return Err("unexpected outcome from find_persons_by_name".into()),
-        };
-        if !new
-            .creators
-            .iter()
-            .any(|creator| creator.person_id == id && creator.role == role)
-        {
-            new.creators.push(CreatorSpec {
-                person_id: id,
-                role,
-                credited_as: None,
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Resolve a Crossref journal to an existing container or create one before the article.
-/// Never replace a manually chosen parent or guess among ambiguous matches.
-pub async fn link_journal(
-    state: &AppState,
-    journal: NewResource,
-    article: &mut NewResource,
-) -> Result<(), String> {
-    if article.parent_id.is_some() || article.kind != ibex_core::ResourceKind::JournalArticle {
-        return Ok(());
-    }
-    // Title filtering would hide conflicting ISSN matches under a different title.
-    let query = ResourceQuery {
-        sort: None,
-        filter: ResourceFilter::by_kind(ResourceKind::Journal),
-    };
-    let mut journals = Vec::new();
-    let mut offset = 0;
-    loop {
-        let page = match state
-            .execute(Command::ListResourcesQueryPage(ListResourcesQueryPage {
-                query: query.clone(),
-                offset,
-                limit: 100,
-            }))
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            Outcome::ListResourcesQueryPage(page) => page,
-            _ => return Err("unexpected outcome from list_resources_query_page".into()),
-        };
-        for row in page.rows {
-            match state
-                .execute(Command::GetResource(GetResource { id: row.id }))
-                .await
-                .map_err(|e| e.to_string())?
-            {
-                Outcome::GetResource(resource) => journals.push(resource),
-                _ => return Err("unexpected outcome from get_resource".into()),
-            }
-        }
-        let Some(next_offset) = page.next_offset else {
-            break;
-        };
-        offset = next_offset;
-    }
-    let title = journal.title.as_str();
-    let by_title: Vec<_> = journals
-        .iter()
-        .filter(|r| r.title.as_str().trim().eq_ignore_ascii_case(title.trim()))
-        .collect();
-    let by_issn: Vec<_> = journals
-        .iter()
-        .filter(|r| {
-            r.issns.iter().any(|known| {
-                journal
-                    .issns
-                    .iter()
-                    .any(|incoming| known.lookup_key() == incoming.lookup_key())
-            })
-        })
-        .collect();
-    let matched = if journal.issns.is_empty() {
-        match by_title.as_slice() {
-            [] => None,
-            [one] => Some(*one),
-            _ => {
-                return Err(format!(
-                    "ambiguous journal title '{title}'; select a parent manually"
-                ));
-            }
-        }
-    } else {
-        match by_issn.as_slice() {
-            [one] if one.title.as_str().trim().eq_ignore_ascii_case(title.trim()) => Some(*one),
-            [one] => {
-                return Err(format!(
-                    "ISSN matches journal '{}' but Crossref calls it '{title}'",
-                    one.title.as_str()
-                ));
-            }
-            [] => match by_title.as_slice() {
-                [one] if one.issns.is_empty() => Some(*one),
-                [] => None,
-                _ => {
-                    return Err(format!(
-                        "ambiguous or conflicting journal '{title}'; select a parent manually"
-                    ));
-                }
-            },
-            _ => {
-                return Err(format!(
-                    "ambiguous ISSN for journal '{title}'; select a parent manually"
-                ));
-            }
-        }
-    };
-    article.parent_id = Some(if let Some(existing) = matched {
-        let mut enriched = existing.to_new();
-        let mut changed = false;
-        if enriched.issns.is_empty() && !journal.issns.is_empty() {
-            enriched.issns = journal.issns;
-            changed = true;
-        }
-        if enriched.short_title.is_none() && journal.short_title.is_some() {
-            enriched.short_title = journal.short_title;
-            changed = true;
-        }
-        if enriched.publisher.is_none() && journal.publisher.is_some() {
-            enriched.publisher = journal.publisher;
-            changed = true;
-        }
-        if changed {
-            state
-                .execute(Command::UpdateResource(UpdateResource {
-                    id: existing.id,
-                    new: enriched,
-                }))
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-        existing.id
-    } else {
-        match state
-            .execute(Command::CreateResource(CreateResource { new: journal }))
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            Outcome::CreateResource(resource) => resource.id,
-            _ => return Err("unexpected outcome from create_resource".into()),
-        }
-    });
-    Ok(())
-}
-
-/// Resolve an ISBN or DOI and store it, or fill only missing fields on `target`.
-pub async fn fetch(
-    state: &AppState,
-    identifier: &str,
-    target: Option<ResourceId>,
-) -> Result<Resource, String> {
-    fetch_at(
-        state,
-        identifier,
-        target,
-        "https://openlibrary.org/api/books",
-        "https://api.crossref.org/works",
-    )
-    .await
-}
-
-/// As `fetch`, with injectable provider URLs for deterministic HTTP tests.
-pub async fn fetch_at(
-    state: &AppState,
-    identifier: &str,
-    target: Option<ResourceId>,
-    books: &str,
-    works: &str,
-) -> Result<Resource, String> {
-    let existing = if let Some(id) = target {
-        match state
-            .execute(Command::GetResource(GetResource { id }))
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            Outcome::GetResource(record) => Some(record),
-            _ => return Err("unexpected outcome from get_resource".into()),
-        }
-    } else {
-        None
-    };
-    let fetched = lookup_at(identifier, books, works).await?;
-    let mut new = fetched.resource;
-    let has_role = |role| {
-        existing.as_ref().is_some_and(|record: &Resource| {
-            record.creators.iter().any(|creator| creator.role == role)
-        })
-    };
-    let mut creators = Vec::new();
-    if !has_role(CreatorRole::Author) {
-        creators.extend(
-            fetched
-                .authors
-                .into_iter()
-                .map(|name| (CreatorRole::Author, name)),
-        );
-    }
-    if !has_role(CreatorRole::Editor) {
-        creators.extend(
-            fetched
-                .editors
-                .into_iter()
-                .map(|name| (CreatorRole::Editor, name)),
-        );
-    }
-    link_creators(state, creators, &mut new).await?;
-    if existing.as_ref().is_none_or(|r| r.parent_id.is_none()) {
-        if let Some(journal) = fetched.journal {
-            link_journal(state, journal, &mut new).await?;
-        }
-    }
-    let outcome = if let Some(record) = existing {
-        state
-            .execute(Command::UpdateResource(UpdateResource {
-                id: record.id,
-                new: fill_gaps(&record, new),
-            }))
-            .await
-    } else {
-        state
-            .execute(Command::CreateResource(CreateResource { new }))
-            .await
-    }
-    .map_err(|e| e.to_string())?;
-    match outcome {
-        Outcome::CreateResource(resource) | Outcome::UpdateResource(resource) => Ok(resource),
-        _ => Err("unexpected outcome from identifier fetch".into()),
     }
 }

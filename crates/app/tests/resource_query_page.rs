@@ -359,7 +359,7 @@ async fn unsorted_query_walks_newest_first_by_id() {
     }
     // `sort: None` is the default listing order — newest first by id — and
     // ids settle same-millisecond ties, so the expectation follows the ids.
-    created.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+    created.sort_by_key(|a| std::cmp::Reverse(a.as_ulid()));
 
     let first = store
         .list_resources_query_page(&newest_first(), 0, 2)
@@ -571,7 +571,7 @@ async fn date_sorts_order_by_the_record_keeping_stamps() {
         .await
         .expect("create first");
     std::thread::sleep(std::time::Duration::from_millis(3));
-    let second = store
+    let _second = store
         .create_resource(book(Some(grace), "Second"))
         .await
         .expect("create second");
@@ -770,7 +770,7 @@ async fn creator_filter_matches_only_that_persons_works() {
     // Co-authorship counts as much as sole authorship, and the matches
     // keep the newest-first order, so the expectation follows the ids.
     let mut expected = vec![shared, alpha];
-    expected.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+    expected.sort_by_key(|a| std::cmp::Reverse(a.as_ulid()));
     let page = store
         .list_resources_query_page(&by_creator(ada), 0, 10)
         .await
@@ -875,7 +875,7 @@ async fn published_range_filters_by_instant_not_label() {
     // Bounded: only the instants between the bounds; the newest-first
     // expectation follows the ids, since ids settle same-millisecond ties.
     let mut bounded_expected = vec![beta_id, charlie_id];
-    bounded_expected.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+    bounded_expected.sort_by_key(|a| std::cmp::Reverse(a.as_ulid()));
     let bounded = store
         .list_resources_query_page(&ranged(Some(1_500), Some(3_500)), 0, 10)
         .await
@@ -888,7 +888,7 @@ async fn published_range_filters_by_instant_not_label() {
 
     // Open "from": everything before the bound, never the undated row.
     let mut open_expected = vec![alpha_id, beta_id];
-    open_expected.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+    open_expected.sort_by_key(|a| std::cmp::Reverse(a.as_ulid()));
     let open_from = store
         .list_resources_query_page(&ranged(None, Some(2_500)), 0, 10)
         .await

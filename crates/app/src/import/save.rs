@@ -67,10 +67,10 @@ impl IdentityIndex {
     ) -> Option<(ResourceId, String)> {
         if let Some(doi) = entry.resource.doi.as_ref() {
             let key = normalize_doi(doi);
-            if let Some(ids) = self.by_doi.get(&key) {
-                if let Some(id) = ids.first() {
-                    return Some((*id, format!("publication DOI already in library ({doi})")));
-                }
+            if let Some(ids) = self.by_doi.get(&key)
+                && let Some(id) = ids.first()
+            {
+                return Some((*id, format!("publication DOI already in library ({doi})")));
             }
         }
         // ISBN identity applies to books only. Chapters often inherit a parent
@@ -78,13 +78,10 @@ impl IdentityIndex {
         if entry.kind() == ResourceKind::Book {
             for isbn in &entry.resource.isbns {
                 let key = isbn.lookup_key();
-                if let Some(ids) = self.by_isbn.get(key) {
-                    if let Some(id) = ids.first() {
-                        return Some((
-                            *id,
-                            format!("publication ISBN already in library ({isbn})"),
-                        ));
-                    }
+                if let Some(ids) = self.by_isbn.get(key)
+                    && let Some(id) = ids.first()
+                {
+                    return Some((*id, format!("publication ISBN already in library ({isbn})")));
                 }
             }
         }
@@ -227,34 +224,28 @@ pub(crate) async fn save_draft_inner(
         }
 
         // Source-entry idempotency: same fingerprint + citekey → reuse.
-        if let Some(fp) = fingerprint.as_ref() {
-            if let Some(id) = identity
+        if let Some(fp) = fingerprint.as_ref()
+            && let Some(id) = identity
                 .by_source_entry
                 .get(&(fp.clone(), entry_key.clone()))
                 .copied()
-            {
-                if !matches!(entry_choice, EntryChoice::IntentionalDuplicate) {
-                    index.by_citekey.insert(entry_key.clone(), id);
-                    if let Err(error) = plan.attach(state, id).await {
-                        if record_entry_error(
-                            &mut report,
-                            entry_key,
-                            error,
-                            &entry_keys[entry_pos + 1..],
-                        )? {
-                            report.assignments = plan.report();
-                            sync_event_counts(ev.as_deref_mut(), &report);
-                            return Ok(report);
-                        }
-                        continue;
-                    }
-                    report.reused.push(ImportedEntry {
-                        entry_key: entry_key.clone(),
-                        resource_id: id,
-                    });
-                    continue;
+            && !matches!(entry_choice, EntryChoice::IntentionalDuplicate)
+        {
+            index.by_citekey.insert(entry_key.clone(), id);
+            if let Err(error) = plan.attach(state, id).await {
+                if record_entry_error(&mut report, entry_key, error, &entry_keys[entry_pos + 1..])?
+                {
+                    report.assignments = plan.report();
+                    sync_event_counts(ev.as_deref_mut(), &report);
+                    return Ok(report);
                 }
+                continue;
             }
+            report.reused.push(ImportedEntry {
+                entry_key: entry_key.clone(),
+                resource_id: id,
+            });
+            continue;
         }
 
         // Publication duplicate from a different source.
@@ -418,7 +409,7 @@ pub(crate) async fn save_draft_inner(
                 series.insert(title, series_id);
             }
             Ok(EntrySave::Imported {
-                resource,
+                resource: Box::new(resource),
                 linked,
                 had_reference_fields,
                 had_xdata,
@@ -541,7 +532,7 @@ fn sync_event_counts(ev: Option<&mut Event>, report: &ImportReport) {
 
 enum EntrySave {
     Imported {
-        resource: Resource,
+        resource: Box<Resource>,
         linked: bool,
         had_reference_fields: bool,
         had_xdata: bool,
@@ -609,7 +600,7 @@ impl PersonLookupCache {
         }
         // Deduplicate people per key (primary + alias may share).
         for list in by_key.values_mut() {
-            list.sort_by(|a, b| a.id.to_string().cmp(&b.id.to_string()));
+            list.sort_by_key(|a| a.id.to_string());
             list.dedup_by(|a, b| a.id == b.id);
         }
         Ok(Self { by_key, by_id })

@@ -24,7 +24,7 @@ pub(crate) enum ContainerDecision {
     /// Use this already-known resource id (store or earlier in this import).
     Reuse(ResourceId),
     /// Create with the given planned resource (id pre-allocated).
-    Create(Resource),
+    Create(Box<Resource>),
     /// Ambiguous or conflicting match; do not attach a parent.
     Conflict(ImportIssue),
 }
@@ -244,18 +244,18 @@ fn match_journal(
         saw_issn = true;
         let key = issn.lookup_key();
         if let Some(id) = index.journals_by_issn.get(key) {
-            if let Some(existing_title) = index.journal_titles.get(id) {
-                if normalize_title(existing_title) != normalize_title(title) {
-                    return Ok(ContainerDecision::Conflict(
-                        ImportIssue::new(
-                            Some(entry_key.to_owned()),
-                            format!(
-                                "ISSN {key} matches journal '{existing_title}' but title is '{title}'"
-                            ),
-                        )
-                        .with_code(import_codes::CONFLICTING_CONTAINER),
-                    ));
-                }
+            if let Some(existing_title) = index.journal_titles.get(id)
+                && normalize_title(existing_title) != normalize_title(title)
+            {
+                return Ok(ContainerDecision::Conflict(
+                    ImportIssue::new(
+                        Some(entry_key.to_owned()),
+                        format!(
+                            "ISSN {key} matches journal '{existing_title}' but title is '{title}'"
+                        ),
+                    )
+                    .with_code(import_codes::CONFLICTING_CONTAINER),
+                ));
             }
             return Ok(ContainerDecision::Reuse(*id));
         }
@@ -269,7 +269,7 @@ fn match_journal(
             None,
         );
         new.issns = issns.to_vec();
-        return Ok(ContainerDecision::Create(plan_resource(new)?));
+        return Ok(ContainerDecision::Create(Box::new(plan_resource(new)?)));
     }
     let hits = index
         .journals_by_title
@@ -284,7 +284,7 @@ fn match_journal(
                 None,
             );
             new.issns = issns.to_vec();
-            Ok(ContainerDecision::Create(plan_resource(new)?))
+            Ok(ContainerDecision::Create(Box::new(plan_resource(new)?)))
         }
         [id] => Ok(ContainerDecision::Reuse(*id)),
         _ => Ok(ContainerDecision::Conflict(
@@ -308,18 +308,18 @@ fn match_book(
         saw_isbn = true;
         let key = isbn.lookup_key();
         if let Some(id) = index.books_by_isbn.get(key) {
-            if let Some(existing_title) = index.book_titles.get(id) {
-                if normalize_title(existing_title) != normalize_title(title) {
-                    return Ok(ContainerDecision::Conflict(
-                        ImportIssue::new(
-                            Some(entry_key.to_owned()),
-                            format!(
-                                "ISBN {key} matches book '{existing_title}' but title is '{title}'"
-                            ),
-                        )
-                        .with_code(import_codes::CONFLICTING_CONTAINER),
-                    ));
-                }
+            if let Some(existing_title) = index.book_titles.get(id)
+                && normalize_title(existing_title) != normalize_title(title)
+            {
+                return Ok(ContainerDecision::Conflict(
+                    ImportIssue::new(
+                        Some(entry_key.to_owned()),
+                        format!(
+                            "ISBN {key} matches book '{existing_title}' but title is '{title}'"
+                        ),
+                    )
+                    .with_code(import_codes::CONFLICTING_CONTAINER),
+                ));
             }
             return Ok(ContainerDecision::Reuse(*id));
         }
@@ -331,7 +331,7 @@ fn match_book(
             None,
         );
         new.isbns = isbns.to_vec();
-        return Ok(ContainerDecision::Create(plan_resource(new)?));
+        return Ok(ContainerDecision::Create(Box::new(plan_resource(new)?)));
     }
     let hits = index
         .books_by_title
@@ -346,7 +346,7 @@ fn match_book(
                 None,
             );
             new.isbns = isbns.to_vec();
-            Ok(ContainerDecision::Create(plan_resource(new)?))
+            Ok(ContainerDecision::Create(Box::new(plan_resource(new)?)))
         }
         [id] => Ok(ContainerDecision::Reuse(*id)),
         _ => Ok(ContainerDecision::Conflict(
@@ -386,7 +386,7 @@ fn match_or_create_issue(
     );
     new.volume = vol.map(str::to_owned);
     new.issue = num.map(str::to_owned);
-    Ok(ContainerDecision::Create(plan_resource(new)?))
+    Ok(ContainerDecision::Create(Box::new(plan_resource(new)?)))
 }
 
 /// Plan parent links for a child entry. Mutates `index` when creating planned entities.
@@ -460,7 +460,7 @@ pub(crate) fn plan_parent_for_entry(
                 ContainerDecision::Create(book) => {
                     index.register_planned_book(&book);
                     let id = book.id;
-                    planned.new_dependencies.push(book);
+                    planned.new_dependencies.push(*book);
                     planned.parent_id = Some(id);
                     planned.linked = true;
                 }
@@ -483,7 +483,7 @@ fn plan_article_under_journal(
         ContainerDecision::Create(journal) => {
             index.register_planned_journal(&journal);
             let id = journal.id;
-            planned.new_dependencies.push(journal);
+            planned.new_dependencies.push(*journal);
             id
         }
         ContainerDecision::Conflict(issue) => {
@@ -526,7 +526,7 @@ fn plan_article_under_journal(
         ContainerDecision::Create(issue) => {
             index.register_planned_issue(&issue);
             let id = issue.id;
-            planned.new_dependencies.push(issue);
+            planned.new_dependencies.push(*issue);
             planned.parent_id = Some(id);
             planned.linked = true;
         }

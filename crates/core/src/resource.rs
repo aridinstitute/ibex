@@ -446,7 +446,7 @@ impl SortDirection {
 /// additive predicates every returned row must satisfy.
 ///
 /// `sort: None` is the default listing order — newest-first by id, the
-/// same order [`Store::list_resources_page`] walks by cursor — while
+/// same order [`Store::list_resources_page`](crate::Store::list_resources_page) walks by cursor — while
 /// `Some((field, direction))` applies that field's order contract (see
 /// [`ResourceSort`]). Because this seam pages by offset, every order
 /// composes with every filter through one window contract.
@@ -563,7 +563,7 @@ impl PublishedRange {
 }
 
 /// One window of a queried library listing from
-/// [`Store::list_resources_query_page`]: `limit` rows at a 0-based offset
+/// [`Store::list_resources_query_page`](crate::Store::list_resources_query_page): `limit` rows at a 0-based offset
 /// into the ordered list. The database query owns the ordering.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SortedResourcePage {
@@ -1103,6 +1103,8 @@ impl Resource {
 
     /// Reassemble after loading a row + ordered edge projection.
     /// Assumes `creators` already sorted by `order`.
+    // Mirrors the stored row and edge projection without redesigning the adapter API.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_stored(
         id: ResourceId,
         kind: ResourceKind,

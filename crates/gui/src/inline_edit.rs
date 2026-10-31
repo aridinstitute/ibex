@@ -391,7 +391,7 @@ pub(crate) fn person_items(people: &[Person]) -> Vec<PersonItem> {
             choice: PersonChoice::Existing(person.id),
         })
         .collect();
-    items.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+    items.sort_by_key(|a| a.label.to_lowercase());
     items
 }
 

@@ -103,7 +103,7 @@ async fn pages_walk_the_library_newest_first() {
     // Creation order can tie within one ULID millisecond; the cursor contract
     // is id ordering, so derive expectations from the ids themselves.
     let mut expected = created;
-    expected.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+    expected.sort_by_key(|a| std::cmp::Reverse(a.as_ulid()));
 
     let mut walked = Vec::new();
     let mut before = None;

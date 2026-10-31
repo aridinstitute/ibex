@@ -2,8 +2,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use ibex_app::command::Health;
 use ibex_app::testing::{MemorySink, StubStore};
@@ -228,12 +227,6 @@ impl Store for HangStore {
     }
 }
 
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
 #[tokio::test]
 async fn dropped_execute_emits_cancelled() {
     let sink = MemorySink::new();
@@ -242,8 +235,7 @@ async fn dropped_execute_emits_cancelled() {
     let mut fut: Pin<Box<dyn Future<Output = Result<Outcome, CommandError>> + Send>> =
         Box::pin(state.execute(Command::Health(Health)));
 
-    let waker = Waker::from(Arc::new(NoopWaker));
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(Waker::noop());
     assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
 
     drop(fut);

@@ -552,34 +552,33 @@ impl MemoryStore {
                 let resource = resources
                     .get(id)
                     .expect("ids come from the resources map keys");
-                if let Some(kind) = filter.kind {
-                    if resource.kind != kind {
-                        return false;
-                    }
+                if let Some(kind) = filter.kind
+                    && resource.kind != kind
+                {
+                    return false;
                 }
-                if let Some(favorite) = filter.favorite {
-                    if resource.favorite != favorite {
-                        return false;
-                    }
+                if let Some(favorite) = filter.favorite
+                    && resource.favorite != favorite
+                {
+                    return false;
                 }
-                if let Some(tag) = filter.tag {
-                    if !resource.tag_ids.contains(&tag) {
-                        return false;
-                    }
+                if let Some(tag) = filter.tag
+                    && !resource.tag_ids.contains(&tag)
+                {
+                    return false;
                 }
-                if let Some(allowed) = by_collection.as_ref() {
-                    if !resource
+                if let Some(allowed) = by_collection.as_ref()
+                    && !resource
                         .collection_ids
                         .iter()
                         .any(|cid| allowed.contains(cid))
-                    {
-                        return false;
-                    }
+                {
+                    return false;
                 }
-                if let Some(needle) = needle.as_deref() {
-                    if !resource.title.as_str().to_lowercase().contains(needle) {
-                        return false;
-                    }
+                if let Some(needle) = needle.as_deref()
+                    && !resource.title.as_str().to_lowercase().contains(needle)
+                {
+                    return false;
                 }
                 if let Some(needle) = search.as_deref() {
                     let title_matches = resource.title.as_str().to_lowercase().contains(needle);
@@ -1400,7 +1399,7 @@ impl Store for MemoryStore {
                 .filter(|id| before.is_none_or(|b| id.as_ulid() < b.as_ulid()))
                 .collect()
         };
-        ids.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+        ids.sort_by_key(|a| std::cmp::Reverse(a.as_ulid()));
         ids.truncate(limit as usize + 1);
         let next_before = if ids.len() > limit as usize {
             ids.pop();
@@ -1429,7 +1428,7 @@ impl Store for MemoryStore {
                     .keys()
                     .copied()
                     .collect();
-                ids.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+                ids.sort_by_key(|a| std::cmp::Reverse(a.as_ulid()));
                 ids
             }
             Some((field, direction)) => self.sorted_ids(field, direction)?,
@@ -1467,7 +1466,7 @@ impl Store for MemoryStore {
         if let Some((field, direction)) = query.sort {
             ids = self.sorted_ids(field, direction)?;
         } else {
-            ids.sort_by(|a, b| b.as_ulid().cmp(&a.as_ulid()));
+            ids.sort_by_key(|a| std::cmp::Reverse(a.as_ulid()));
         }
         let mut visible: HashSet<_> = self
             .filter_ids(ids.clone(), &query.filter)?
@@ -1482,10 +1481,10 @@ impl Store for MemoryStore {
             .collect();
         let mut frontier: Vec<_> = visible.iter().copied().collect();
         while let Some(id) = frontier.pop() {
-            if let Some(Some(parent)) = parents.get(&id) {
-                if visible.insert(*parent) {
-                    frontier.push(*parent);
-                }
+            if let Some(Some(parent)) = parents.get(&id)
+                && visible.insert(*parent)
+            {
+                frontier.push(*parent);
             }
         }
         let parent_id = match parent {
