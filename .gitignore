@@ -1,7 +1,6 @@
 # Rust
 /target/
 **/*.rs.bk
-Cargo.lock
 
 # IDE / OS
 .idea/
@@ -15,3 +14,10 @@ Cargo.lock
 *.db
 *.surql
 /data/
+
+# Local agent tooling / notes
+/.agents/
+/docs/*
+!/docs/user-guide.md
+/skills-lock.json
+solo.yml

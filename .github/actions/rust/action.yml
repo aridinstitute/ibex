@@ -1,0 +1,21 @@
+name: Rust environment
+description: Install the release toolchain and restore bounded Rust build caches
+inputs:
+  cache-key:
+    description: Separate incompatible build profiles
+    default: check
+runs:
+  using: composite
+  steps:
+    - name: Install Rust
+      shell: bash
+      run: |
+        rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+        rustup override set 1.99.0
+        rustc --version --verbose
+        echo "IBEX_CONFIG_DIR=$RUNNER_TEMP/ibex-config" >> "$GITHUB_ENV"
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        key: ${{ inputs.cache-key }}
+        cache-on-failure: true
+        save-if: ${{ github.event_name != 'pull_request' }}

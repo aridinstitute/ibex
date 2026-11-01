@@ -1,19 +1,18 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use oeuvre_core::Store;
+use ibex_core::Store;
 use tracing::Instrument;
 
 use crate::command::{self, Call, CommandError, Outcome};
-use crate::event::{
-    self, EventSink, ExecutionId, JsonLinesSink, Status, Event,
-};
+use crate::event::{self, Event, EventSink, ExecutionId, JsonLinesSink, Status};
 
 /// Which shell is driving. Stamped on every wide event as `surface`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Surface {
     Cli,
+    Gui,
     Mcp,
     Test,
 }
@@ -22,6 +21,7 @@ impl Surface {
     pub fn as_str(self) -> &'static str {
         match self {
             Surface::Cli => "cli",
+            Surface::Gui => "gui",
             Surface::Mcp => "mcp",
             Surface::Test => "test",
         }
@@ -128,7 +128,7 @@ struct EmitGuard<'a> {
 
 impl<'a> EmitGuard<'a> {
     fn open(inner: &'a Inner, command: &'static str, request_id: Option<String>) -> Self {
-        let mut event = Event::new(ExecutionId::new_v7(), command);
+        let mut event = Event::new(ExecutionId::generate(), command);
         event.set(event::SURFACE, inner.surface);
         event.set(event::APP_VERSION, inner.version);
         if let Some(id) = request_id {

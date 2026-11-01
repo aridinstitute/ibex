@@ -3,8 +3,17 @@ mod sink;
 
 pub(crate) use keys::Key;
 pub(crate) use keys::{
-    APP_UPTIME_MS, APP_VERSION, DURATION_US, ERROR_KIND, ERROR_MESSAGE, REQUEST_ID, STATUS,
-    STORE_BACKEND, STORE_LATENCY_US, STORE_OK, SURFACE,
+    APP_UPTIME_MS, APP_VERSION, COLLECTION_FOREST_ROOTS, COLLECTION_ID, COLLECTION_JEV_ENABLED,
+    COLLECTION_KEYWORD_COUNT, COLLECTION_NAME, COLLECTION_PARENT_ID, DURATION_US, ERROR_KIND,
+    ERROR_MESSAGE, IMPORT_ASSIGNED_COLLECTION_COUNT, IMPORT_ASSIGNED_TAG_COUNT, IMPORT_ENTRY_KEY,
+    IMPORT_IMPORTED_COUNT, IMPORT_SKIPPED_COUNT, IMPORT_WARNING_COUNT, PERSON_DISPLAY, PERSON_ID,
+    REQUEST_ID, RESOURCE_CHANGED_FIELDS, RESOURCE_FAVORITE, RESOURCE_FILTER_COLLECTION,
+    RESOURCE_FILTER_CREATOR, RESOURCE_FILTER_FAVORITE, RESOURCE_FILTER_KIND,
+    RESOURCE_FILTER_PUBLISHED_FROM, RESOURCE_FILTER_PUBLISHED_TO, RESOURCE_FILTER_SEARCH,
+    RESOURCE_FILTER_TAG, RESOURCE_FILTER_TITLE, RESOURCE_GRID_HAS_MORE, RESOURCE_GRID_PARENT,
+    RESOURCE_GRID_ROWS, RESOURCE_ID, RESOURCE_KIND, RESOURCE_PAGE_LIMIT, RESOURCE_PAGE_OFFSET,
+    RESOURCE_PARENT_ID, RESOURCE_SORT_DIRECTION, RESOURCE_SORT_FIELD, RESOURCE_TITLE, SERIES_ID,
+    SERIES_TITLE, STATUS, STORE_BACKEND, STORE_LATENCY_US, STORE_OK, SURFACE, TAG_ID, TAG_TEXT,
 };
 pub use sink::JsonLinesSink;
 
@@ -13,13 +22,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::Surface;
 
-/// UUIDv7: time-ordered, so execution ids sort with wall-clock time.
+/// ULID: time-ordered, so execution ids sort with wall-clock time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
-pub struct ExecutionId(uuid::Uuid);
+pub struct ExecutionId(ulid::Ulid);
 
 impl ExecutionId {
-    pub(crate) fn new_v7() -> Self {
-        Self(uuid::Uuid::now_v7())
+    pub(crate) fn generate() -> Self {
+        Self(ulid::Ulid::generate())
     }
 }
 
@@ -149,10 +158,7 @@ impl Event {
             status,
             duration: elapsed,
             ts_unix_ms: self.ts_unix_ms,
-            fields: deduped
-                .into_iter()
-                .map(|(k, v)| (k.as_str(), v))
-                .collect(),
+            fields: deduped.into_iter().map(|(k, v)| (k.as_str(), v)).collect(),
         }
     }
 }
@@ -218,7 +224,13 @@ impl serde::Serialize for FinishedEvent {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
 
-        let base = ["ts_unix_ms", "execution_id", "command", "status", "duration_us"];
+        let base = [
+            "ts_unix_ms",
+            "execution_id",
+            "command",
+            "status",
+            "duration_us",
+        ];
         let mut map = serializer.serialize_map(Some(base.len() + self.fields.len()))?;
         map.serialize_entry("ts_unix_ms", &self.ts_unix_ms)?;
         map.serialize_entry("execution_id", &self.id)?;

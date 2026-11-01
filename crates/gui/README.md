@@ -1,0 +1,51 @@
+# GUI settings
+
+The GUI reads `~/.ibex/config.toml`, the same file the `ibex` CLI uses
+(`IBEX_CONFIG_DIR` moves the directory). This location does not change when
+opening a library with `--data`. The file is created on the first settings
+save; saves rewrite only the GUI's keys and keep the CLI's.
+
+The library opens from the platform data directory (macOS:
+`~/Library/Application Support/Ibex/database`) or from `--data` / `IBEX_DATA`;
+see the top-level README for every path. If the library cannot open (for
+example, another Ibex process holds it), the GUI shows the error instead of
+starting with an empty library. `--memory` opens a demo library that is never
+saved.
+
+## Theme colors
+
+```toml
+[theme.light]
+accent = "#0064FF"
+secondary = "#D9DDE5"
+
+[theme.dark]
+accent = "#0A84FF"
+secondary = "#262C35"
+```
+
+- `accent` colors buttons, links, focus borders, selection tints, and a soft
+  glow in the window's top-right corner that fades out before the middle.
+- `secondary` sets the background gradient's bottom-left end corner exactly; the
+  wash runs from a neutral top-right to it: **neutral → secondary**.
+- Colors use `#RRGGBB`, case-insensitive, without transparency.
+- Omit `accent` to use system blue; omit `secondary` to use the neutral
+  endpoint. Invalid hex values fall back to those defaults without
+  discarding other preferences.
+
+Click the toolbar's color dot to open a popover with **Accent** and **Secondary**
+tabs. Choose a swatch or enter a hex color. Each tab keeps its draft while you
+switch between them, and the window previews both colors together. **Save**
+persists both colors in one operation for the active light/dark appearance only.
+**Cancel**, **Escape**, or clicking outside discards unsaved previews. A save
+error keeps the popover open so you can retry or cancel.
+
+For direct hex entry, open the command palette with **⌘K** and choose **Set accent
+color…** or **Set secondary color…**. These commands save the entered color for
+the active appearance when you press **Enter** or click **Save**.
+
+The sun/moon button switches light/dark mode without clearing custom colors.
+Legacy `[theme]` accent/secondary values are read as light-mode preferences only;
+dark mode starts with its own defaults. The next settings save writes the split
+`[theme.light]` and `[theme.dark]` tables.
+Manual TOML changes are read when the app next starts.
