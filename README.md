@@ -69,7 +69,7 @@ Only one Ibex process can use a library at a time.
 
 ## Contributing
 
-We’re not accepting pull requests right now, but you’re welcome to [open an issue](https://github.com/oeuvre/ibex/issues) with questions or suggestions.
+We’re not accepting pull requests right now, but you’re welcome to [open an issue](https://github.com/aridinstitute/ibex/issues) with questions or suggestions.
 
 ## License
 
