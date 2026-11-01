@@ -4534,7 +4534,7 @@ name = "ibex-gui"
 version = "0.1.0-rc.1"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "gpui-kit",
  "ibex-adapter-surreal",
