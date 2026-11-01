@@ -26,7 +26,7 @@ serde_json = { workspace = true }
 time = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-base64 = "0.22"
+base64 = "0.23"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSImage", "NSBitmapImageRep", "NSFontDescriptor", "objc2-core-foundation"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSData", "NSDictionary", "NSString"] }
