@@ -13,11 +13,13 @@
 .env.*
 *.db
 *.surql
+!crates/adapter-surreal/tests/fixtures/legacy_creator_sort.surql
 /data/
 
 # Local agent tooling / notes
 /.agents/
 /docs/*
 !/docs/user-guide.md
+!/docs/surrealdb-4-benchmarks.md
 /skills-lock.json
 solo.yml

@@ -14,6 +14,12 @@
 //! cargo bench -p ibex-adapter-surreal --bench resource_filter
 //! IBEX_BENCH_SIZES=1000,5000,100000 cargo bench -p ibex-adapter-surreal --bench resource_filter
 //! ```
+//! For a seed-only smoke test (no Criterion query measurements):
+//!
+//! ```text
+//! IBEX_BENCH_SEED_ONLY=1 IBEX_BENCH_SIZES=100,500,1000 cargo bench -p ibex-adapter-surreal --bench resource_filter
+//! ```
+//!
 //!
 //! Seeding is measured once per size with a wall clock and then reused by
 //! every query case: 100k `create_resource` calls inside criterion's
@@ -165,6 +171,19 @@ fn bench_resource_filter(c: &mut Criterion) {
         eprintln!(
             "resource_filter: seeded {n} rows in {seed_elapsed:?} ({rows_per_sec:.0} rows/s)"
         );
+
+        // A quick seed-only check avoids running the query suite while investigating writes.
+        if std::env::var_os("IBEX_BENCH_SEED_ONLY").is_some() {
+            let counts = rt
+                .block_on(store.resource_counts())
+                .expect("resource counts");
+            assert_eq!(
+                counts.all_items as usize,
+                n + 3,
+                "seeded rows plus containers"
+            );
+            continue;
+        }
 
         // Any person authors seeded rows, so the creator case never
         // measures an empty edge walk.

@@ -383,7 +383,7 @@ mod tests {
 
     struct DetailPanel(ResourceDetail, gpui_kit::FocusHandle, Vec<&'static str>);
 
-    fn press_key(cx: &mut gpui_kit::VisualTestContext, key: &str) {
+    fn press_key(cx: &mut gpui_kit::VisualTestContext, key: &'static str) {
         let keystroke = gpui_kit::Keystroke::parse(key).unwrap();
         cx.simulate_event(gpui_kit::KeyDownEvent {
             keystroke: keystroke.clone(),

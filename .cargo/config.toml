@@ -1,0 +1,3 @@
+[env]
+# SurrealDB 4.0 debug queries overflow the default test-thread stack on macOS.
+RUST_MIN_STACK = "16777216"

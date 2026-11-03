@@ -209,6 +209,9 @@ struct ResourceDoc {
     date_added: Option<i64>,
     #[surreal(default)]
     date_edited: Option<i64>,
+    /// Indexed projection maintained by adapter writes, never per-edge triggers.
+    #[surreal(default)]
+    primary_creator_last_name: Option<String>,
 }
 
 /// Persisted access date: native datetime plus precision metadata.
@@ -1254,6 +1257,7 @@ impl SurrealStore {
             favorite: Some(resource.favorite),
             date_added: Some(resource.date_added.as_unix_ms()),
             date_edited: Some(resource.date_edited.as_unix_ms()),
+            primary_creator_last_name: None,
         }
     }
 
@@ -1306,6 +1310,85 @@ impl SurrealStore {
         Ok(creators)
     }
 
+    async fn creator_sort_key(
+        txn: &surrealdb::method::Transaction<Db>,
+        person: RecordId,
+        credited_as: Option<&str>,
+    ) -> Result<Option<String>, StoreError> {
+        if let Some(credited) = credited_as {
+            return Ok(credited.split_whitespace().next_back().map(str::to_owned));
+        }
+        let doc: Option<PersonDoc> = txn.select(person).await.map_err(map_err)?;
+        Ok(doc.and_then(|doc| {
+            doc.name
+                .last()
+                .or_else(|| doc.name.first())
+                .map(str::to_owned)
+        }))
+    }
+
+    async fn resource_doc_for_write(
+        txn: &surrealdb::method::Transaction<Db>,
+        resource: &Resource,
+    ) -> Result<ResourceDoc, StoreError> {
+        let mut doc = Self::resource_doc_from(resource);
+        if let Some(first) = resource.creators.first() {
+            doc.primary_creator_last_name = Self::creator_sort_key(
+                txn,
+                Self::person_key(first.person_id),
+                first.credited_as.as_ref().map(|s| s.as_str()),
+            )
+            .await?;
+        }
+        Ok(doc)
+    }
+
+    /// Name changes refresh each affected resource once in the same transaction.
+    /// Ordinary resource writes store the key directly with their content.
+    async fn refresh_creator_sort_keys(
+        txn: &surrealdb::method::Transaction<Db>,
+        resources: Vec<RecordId>,
+    ) -> Result<(), StoreError> {
+        for resource in resources {
+            let mut response = txn.query(
+                "SELECT in, role, order, credited_as FROM $resource<-created ORDER BY order LIMIT 1"
+            ).bind(("resource", resource.clone())).await.map_err(map_err)?;
+            let rows: Vec<CreatedEdgeRow> = response.take(0).map_err(map_err)?;
+            let key = match rows.first() {
+                Some(first) => {
+                    Self::creator_sort_key(txn, first.person.clone(), first.credited_as.as_deref())
+                        .await?
+                }
+                None => None,
+            };
+            txn.query("UPDATE ONLY $resource SET primary_creator_last_name = $key RETURN NONE")
+                .bind(("resource", resource))
+                .bind(("key", key))
+                .await
+                .map_err(map_err)?
+                .check()
+                .map_err(map_err)?;
+        }
+        Ok(())
+    }
+
+    async fn person_resource_ids(
+        txn: &surrealdb::method::Transaction<Db>,
+        id: PersonId,
+    ) -> Result<Vec<RecordId>, StoreError> {
+        let mut response = txn
+            .query("SELECT VALUE out FROM $person->created")
+            .bind(("person", Self::person_key(id)))
+            .await
+            .map_err(map_err)?;
+        let resources: Vec<RecordId> = response.take(0).map_err(map_err)?;
+        // Multiple roles can link the same person and resource; refresh it once.
+        let mut seen = HashSet::new();
+        Ok(resources
+            .into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .collect())
+    }
     /// RELATE one `created` edge per creator with role / order / credited_as.
     /// Callers own the surrounding SDK transaction; statement errors are
     /// surfaced via [`IndexedResults::check`] so a failed edge cannot report success.
@@ -1341,24 +1424,18 @@ impl SurrealStore {
         id: ResourceId,
         creators: &[Creator],
     ) -> Result<(), StoreError> {
-        for creator in creators {
-            let credited = creator.credited_as.as_ref().map(|s| s.as_str().to_owned());
-            self.db
-                .query(
-                    "RELATE $from -> created -> $to \
-                     SET role = $role, order = $order, credited_as = $credited",
-                )
-                .bind(("from", Self::person_key(creator.person_id)))
-                .bind(("to", Self::resource_key(id)))
-                .bind(("role", SerdeWrapper(creator.role)))
-                .bind(("order", creator.order))
-                .bind(("credited", credited))
-                .await
-                .map_err(map_err)?
-                .check()
-                .map_err(map_err)?;
+        let txn = self.db.clone().begin().await.map_err(map_err)?;
+        match Self::relate_creators_in_txn(&txn, id, creators).await {
+            Ok(()) => {
+                Self::refresh_creator_sort_keys(&txn, vec![Self::resource_key(id)]).await?;
+                let _ = txn.commit().await.map_err(map_err)?;
+                Ok(())
+            }
+            Err(err) => {
+                let _ = txn.cancel().await;
+                Err(err)
+            }
         }
-        Ok(())
     }
 
     /// Project page rows into summary rows: creator labels from the created
@@ -1680,29 +1757,58 @@ impl Store for SurrealStore {
         name: Name,
         aliases: Vec<Name>,
     ) -> Result<Person, StoreError> {
-        let _existing = self.get_person(id).await?;
+        let existing = self.get_person(id).await?;
         let person = Person::try_new(id, name, aliases)?;
-        let updated: Option<PersonDoc> = self
-            .db
-            .update(Self::person_key(id))
-            .content(Self::doc_from_person(&person))
-            .await
-            .map_err(map_err)?;
-        match updated {
-            Some(_) => Ok(person),
-            None => Err(StoreError::not_found(format!("person {id}"))),
+        let txn = self.db.clone().begin().await.map_err(map_err)?;
+        let persist = async {
+            let updated: Option<PersonDoc> = txn
+                .update(Self::person_key(id))
+                .content(Self::doc_from_person(&person))
+                .await
+                .map_err(map_err)?;
+            if updated.is_none() {
+                return Err(StoreError::not_found(format!("person {id}")));
+            }
+            if existing.name != person.name {
+                let resources = Self::person_resource_ids(&txn, id).await?;
+                Self::refresh_creator_sort_keys(&txn, resources).await?;
+            }
+            Ok(())
+        }
+        .await;
+        match persist {
+            Ok(()) => {
+                let _ = txn.commit().await.map_err(map_err)?;
+                Ok(person)
+            }
+            Err(err) => {
+                let _ = txn.cancel().await;
+                Err(err)
+            }
         }
     }
 
     async fn delete_person(&self, id: PersonId) -> Result<(), StoreError> {
-        let deleted: Option<PersonDoc> = self
-            .db
-            .delete(Self::person_key(id))
-            .await
-            .map_err(map_err)?;
-        match deleted {
-            Some(_) => Ok(()),
-            None => Err(StoreError::not_found(format!("person {id}"))),
+        let txn = self.db.clone().begin().await.map_err(map_err)?;
+        let persist = async {
+            let resources = Self::person_resource_ids(&txn, id).await?;
+            let deleted: Option<PersonDoc> =
+                txn.delete(Self::person_key(id)).await.map_err(map_err)?;
+            if deleted.is_none() {
+                return Err(StoreError::not_found(format!("person {id}")));
+            }
+            Self::refresh_creator_sort_keys(&txn, resources).await
+        }
+        .await;
+        match persist {
+            Ok(()) => {
+                let _ = txn.commit().await.map_err(map_err)?;
+                Ok(())
+            }
+            Err(err) => {
+                let _ = txn.cancel().await;
+                Err(err)
+            }
         }
     }
 
@@ -2096,7 +2202,7 @@ impl Store for SurrealStore {
         let persist = async {
             let created: Option<ResourceDoc> = txn
                 .create(Self::resource_key(id))
-                .content(Self::resource_doc_from(&resource))
+                .content(Self::resource_doc_for_write(&txn, &resource).await?)
                 .await
                 .map_err(map_err)?;
             if created.is_none() {
@@ -2173,7 +2279,7 @@ impl Store for SurrealStore {
             }
             let created: Option<ResourceDoc> = txn
                 .create(Self::resource_key(id))
-                .content(Self::resource_doc_from(&resource))
+                .content(Self::resource_doc_for_write(&txn, &resource).await?)
                 .await
                 .map_err(map_err)?;
             if created.is_none() {
@@ -2227,7 +2333,7 @@ impl Store for SurrealStore {
         let persist = async {
             let updated: Option<ResourceDoc> = txn
                 .update(Self::resource_key(id))
-                .content(Self::resource_doc_from(&resource))
+                .content(Self::resource_doc_for_write(&txn, &resource).await?)
                 .await
                 .map_err(map_err)?;
             if updated.is_none() {
@@ -3118,7 +3224,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "SurrealDB 3.3.4 Mem loses requested ordering for filtered row sources; disk-backed benchmarks are unaffected"]
     async fn creator_filter_yields_each_resource_once() {
         let store = SurrealStore::open_memory().await.unwrap();
         let ada = store
@@ -3775,7 +3880,15 @@ mod tests {
             )
             .await
             .unwrap();
-        let resource = sortable_resource(&store, vec![(person.id, None)], "Algorithms", None).await;
+        let other = store
+            .create_person(
+                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let mut resource =
+            sortable_resource(&store, vec![(person.id, None)], "Algorithms", None).await;
         let read_key = || async {
             let mut response = store
                 .db
@@ -3795,67 +3908,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(read_key().await.as_deref(), Some("Byron"));
-        store
-            .db
-            .query("UPDATE created SET credited_as = 'A. King' WHERE out = $resource")
-            .bind(("resource", SurrealStore::resource_key(resource.id)))
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        assert_eq!(read_key().await.as_deref(), Some("King"));
-        // Reordering an existing edge changes which creator supplies the key.
-        let other = store
-            .create_person(
-                Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
-                vec![],
-            )
-            .await
-            .unwrap();
-        store
-            .db
-            .query("RELATE $person->created->$resource SET order = 1, role = 'author'")
-            .bind(("person", SurrealStore::person_key(other.id)))
-            .bind(("resource", SurrealStore::resource_key(resource.id)))
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        assert_eq!(read_key().await.as_deref(), Some("King"));
-        store
-            .db
-            .query("UPDATE created SET order = 2 WHERE out = $resource AND credited_as = 'A. King'")
-            .bind(("resource", SurrealStore::resource_key(resource.id)))
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        assert_eq!(read_key().await.as_deref(), Some("Hopper"));
-        // Simulate an older database with neither the field nor migration marker.
-        store.db.query("REMOVE FIELD primary_creator_last_name ON resource; UPDATE resource UNSET primary_creator_last_name; DELETE ibex_migration:primary_creator_last_name;")
-            .await.unwrap().check().unwrap();
-        store.ensure_schema().await.unwrap();
-        assert_eq!(read_key().await.as_deref(), Some("Hopper"));
-        // Refreshing sort metadata must not mark the resource as edited.
-        let detail = store.get_resource(resource.id).await.unwrap();
-        assert_eq!(detail.date_edited, resource.date_edited);
-        store
-            .db
-            .query("DELETE created WHERE out = $resource")
-            .bind(("resource", SurrealStore::resource_key(resource.id)))
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        assert_eq!(read_key().await, None);
+        // Derived sort maintenance must not make a bibliography look edited.
         assert_eq!(
-            store
-                .get_resource(resource.id)
+            store.get_resource(resource.id).await.unwrap().date_edited,
+            resource.date_edited
+        );
+        let mut new = resource.to_new();
+        new.creators[0].credited_as = Some(NonEmptyStr::try_new("A. King").unwrap());
+        new.creators.push(CreatorSpec {
+            person_id: other.id,
+            role: CreatorRole::Author,
+            credited_as: None,
+        });
+        store.update_resource(resource.id, new).await.unwrap();
+        assert_eq!(read_key().await.as_deref(), Some("King"));
+        let mut new = store.get_resource(resource.id).await.unwrap().to_new();
+        new.creators.swap(0, 1);
+        store.update_resource(resource.id, new).await.unwrap();
+        assert_eq!(read_key().await.as_deref(), Some("Hopper"));
+        let mut new = store.get_resource(resource.id).await.unwrap().to_new();
+        new.creators.clear();
+        store.update_resource(resource.id, new).await.unwrap();
+        assert_eq!(read_key().await, None);
+        resource = store.get_resource(resource.id).await.unwrap();
+        assert_eq!(resource.title.as_str(), "Algorithms");
+    }
+
+    #[tokio::test]
+    async fn creator_sort_refresh_does_not_use_per_edge_or_person_events() {
+        let store = SurrealStore::open_memory().await.unwrap();
+        for table in ["created", "person"] {
+            let mut response = store
+                .db
+                .query(format!("INFO FOR TABLE {table}"))
                 .await
-                .unwrap()
-                .title
-                .as_str(),
-            "Algorithms"
+                .unwrap();
+            let info: Option<surrealdb::types::Value> = response.take(0).unwrap();
+            let Some(surrealdb::types::Value::Object(info)) = info else {
+                panic!("table info");
+            };
+            let Some(surrealdb::types::Value::Object(events)) = info.get("events") else {
+                panic!("events");
+            };
+            assert!(
+                events.is_empty(),
+                "sort refresh must happen once at the adapter write boundary"
+            );
+        }
+        let mut response = store.db.query("INFO FOR TABLE resource").await.unwrap();
+        let info: Option<surrealdb::types::Value> = response.take(0).unwrap();
+        let Some(surrealdb::types::Value::Object(info)) = info else {
+            panic!("table info");
+        };
+        let Some(surrealdb::types::Value::Object(fields)) = info.get("fields") else {
+            panic!("fields");
+        };
+        let definition = fields
+            .get("primary_creator_last_name")
+            .expect("stored sort field");
+        assert!(
+            !definition.to_sql().contains(" VALUE "),
+            "resource writes must not query creator edges implicitly"
         );
     }
 
@@ -4197,7 +4310,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "SurrealDB 3.3.4 Mem loses requested ordering for filtered row sources; disk-backed benchmarks are unaffected"]
     async fn sorted_descending_reverses_keys_and_moves_no_data_rows_first() {
         let store = SurrealStore::open_memory().await.unwrap();
         let hopper = store
@@ -4455,7 +4567,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "SurrealDB 3.3.4 Mem loses requested ordering for filtered row sources; disk-backed benchmarks are unaffected"]
     async fn creator_filter_matches_only_that_persons_works() {
         let store = SurrealStore::open_memory().await.unwrap();
         let ada = store
@@ -4511,7 +4622,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "SurrealDB 3.3.4 Mem loses requested ordering for filtered row sources; disk-backed benchmarks are unaffected"]
     async fn creator_filter_keeps_sort_order_within_matches() {
         let store = SurrealStore::open_memory().await.unwrap();
         let ada = store
@@ -4556,7 +4666,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "SurrealDB 3.3.4 Mem loses requested ordering for filtered row sources; disk-backed benchmarks are unaffected"]
     async fn creator_filter_composes_with_primary_creator_sort() {
         let store = SurrealStore::open_memory().await.unwrap();
         let ada = store
@@ -6051,5 +6160,42 @@ mod tests {
         let loaded = store.get_resource(id).await.unwrap();
         assert!(loaded.accessed.is_some());
         assert!(!loaded.accessed.as_ref().unwrap().claims_exact_time());
+    }
+
+    /// Isolate sort-key trigger overhead without running Criterion workloads.
+    #[test]
+    #[ignore = "manual seed diagnostic; removes sort-key events in disposable stores"]
+    fn seed_sort_event_probe() {
+        let n: usize = std::env::var("IBEX_BENCH_SIZES")
+            .unwrap_or_else(|_| "1000".into())
+            .parse()
+            .expect("one resource count");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_stack_size(10 * 1024 * 1024)
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            for events in [true, false] {
+                let store = SurrealStore::open_memory().await.unwrap();
+                if events {
+                    store
+                        .db
+                        .query(include_str!("../tests/fixtures/legacy_creator_sort.surql"))
+                        .await
+                        .unwrap()
+                        .check()
+                        .unwrap();
+                }
+                let started = std::time::Instant::now();
+                ibex_app::seed::seed_demo_library(&store, n).await.unwrap();
+                let elapsed = started.elapsed();
+                assert_eq!(
+                    store.resource_counts().await.unwrap().all_items as usize,
+                    n + 3
+                );
+                eprintln!("seed_sort_event_probe: n={n} events={events} elapsed={elapsed:?}");
+            }
+        });
     }
 }

@@ -977,7 +977,7 @@ impl TableDelegate for LibraryDelegate {
                 MouseButton::Left,
                 cx.listener(move |table, event: &MouseDownEvent, window, cx| {
                     if table.delegate().inline.is_some()
-                        || !(event.modifiers.secondary() || event.modifiers.shift)
+                        || !(event.modifiers.secondary(cx) || event.modifiers.shift)
                     {
                         return;
                     }
@@ -991,7 +991,7 @@ impl TableDelegate for LibraryDelegate {
                             .and_then(|id| delegate.rows.iter().position(|r| r.id == id))
                             .unwrap_or(row_ix);
                         let range = anchor.min(row_ix)..=anchor.max(row_ix);
-                        if !event.modifiers.secondary() {
+                        if !event.modifiers.secondary(cx) {
                             delegate.selected_ids.clear();
                         }
                         delegate
