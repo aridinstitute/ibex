@@ -1916,6 +1916,8 @@ pub struct LibraryApp {
     /// Ids with a detail fetch in flight, so selection and prefetch share
     /// one request per id instead of stacking duplicates.
     detail_inflight: HashSet<ResourceId>,
+    attachment_pending: HashSet<ResourceId>,
+    attachment_error: Option<(ResourceId, String)>,
     /// Ignore repeated keyboard/button requests until this id's write completes.
     favorite_pending: HashSet<ResourceId>,
     /// Resources with a suggestion-accept write in flight.
@@ -2740,6 +2742,8 @@ impl LibraryApp {
             detail: None,
             detail_cache: DetailCache::new(),
             detail_inflight: HashSet::new(),
+            attachment_pending: HashSet::new(),
+            attachment_error: None,
             favorite_pending: HashSet::new(),
             suggestion_pending: HashSet::new(),
             jev: None,
@@ -4392,6 +4396,88 @@ impl LibraryApp {
         .detach();
     }
 
+    fn add_attachment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected else { return };
+        if self.attachment_pending.contains(&id) || window.has_active_dialog(cx) {
+            return;
+        }
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Add attachment".into()),
+        });
+        self.attachment_pending.insert(id);
+        self.attachment_error = None;
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let result: Result<Option<ibex_core::Attachment>, String> = async {
+                let paths = paths
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+                let Some(path) = paths.and_then(|paths| paths.into_iter().next()) else {
+                    return Ok(None);
+                };
+                worker.add_attachment(id, path).await.map(Some)
+            }
+            .await;
+            _ = app.update_in(window, |app, window, cx| {
+                app.attachment_pending.remove(&id);
+                match result {
+                    Ok(Some(_)) => {
+                        app.detail_inflight.remove(&id);
+                        *app.detail_gens.entry(id).or_insert(0) += 1;
+                        app.detail_cache.invalidate(&id);
+                        if app.selected == Some(id) {
+                            app.detail = Some((id, DetailFetch::Loading));
+                            app.fetch_detail(id, window, cx);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => app.attachment_error = Some((id, error)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_attachment(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.selected;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            #[cfg(target_os = "macos")]
+            let result = std::process::Command::new("open").arg(&path).status();
+            #[cfg(target_os = "linux")]
+            let result = std::process::Command::new("xdg-open").arg(&path).status();
+            #[cfg(target_os = "windows")]
+            let result = std::process::Command::new("explorer.exe")
+                .arg(&path)
+                .status();
+            let _ = tx.send(result.map_err(|e| e.to_string()).and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("launcher exited with {status}"))
+                }
+            }));
+        });
+        cx.spawn_in(window, async move |app, window| {
+            if let Ok(Err(error)) = rx.await {
+                _ = app.update_in(window, |app, _, cx| {
+                    if let Some(id) = id {
+                        app.attachment_error =
+                            Some((id, format!("Could not open attachment: {error}")));
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
     fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.selected = None;
         cx.notify();
@@ -5937,6 +6023,15 @@ impl LibraryApp {
                                     }),
                                 ),
                         )
+                        .child(
+                            Button::new("add-attachment")
+                                .ghost()
+                                .icon(Icon::new(IconName::Plus).with_size(px(16.)))
+                                .tooltip("Add attachment")
+                                .accessibility_label("Add attachment")
+                                .disabled(self.selected.is_some_and(|id| self.attachment_pending.contains(&id)))
+                                .on_click(cx.listener(|this, _, window, cx| this.add_attachment(window, cx))),
+                        )
                         .into_any_element()
                 });
                 // Read-only hashtags and memberships; editing happens on the
@@ -5956,6 +6051,73 @@ impl LibraryApp {
                                         .iter()
                                         .map(|tag| div().child(format!("#{}", tag.text.as_str()))),
                                 )
+                                .into_any_element(),
+                        ));
+                    }
+                    if !detail.attachments.is_empty()
+                        || self.attachment_pending.contains(&detail.id)
+                    {
+                        extra_rows.push((
+                            "Attachments".into(),
+                            v_flex()
+                                .gap_1()
+                                .children(detail.attachments.iter().map(|attachment| {
+                                    let path = attachment.file_path.clone();
+                                    h_flex()
+                                        .id(SharedString::from(format!(
+                                            "attachment-{}",
+                                            attachment.id
+                                        )))
+                                        .test_support()
+                                        .aria_label(format!(
+                                            "{} ({})",
+                                            attachment.title, attachment.attachment_type
+                                        ))
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .child(attachment.title.clone())
+                                                .child(
+                                                    div()
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(attachment.attachment_type.clone()),
+                                                ),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "open-attachment-{}",
+                                                attachment.id
+                                            )))
+                                            .ghost()
+                                            .xsmall()
+                                            .icon(Icon::new(IconName::ExternalLink).xsmall())
+                                            .tooltip(format!("Open {}", attachment.title))
+                                            .accessibility_label(format!(
+                                                "Open {}",
+                                                attachment.title
+                                            ))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.open_attachment(path.clone(), window, cx)
+                                            })),
+                                        )
+                                }))
+                                .when(self.attachment_pending.contains(&detail.id), |list| {
+                                    list.child("Adding attachment…")
+                                })
+                                .into_any_element(),
+                        ));
+                    }
+                    if let Some((id, error)) = &self.attachment_error
+                        && *id == detail.id
+                    {
+                        extra_rows.push((
+                            "Attachment error".into(),
+                            div()
+                                .text_color(cx.theme().danger)
+                                .child(error.clone())
                                 .into_any_element(),
                         ));
                     }
@@ -8723,6 +8885,7 @@ mod detail_prefetch_tests {
             favorite: false,
             tags: vec![],
             collections: vec![],
+            attachments: vec![],
             date_added: UtcMillis::from_unix_ms(0),
             date_edited: UtcMillis::from_unix_ms(0),
         }
@@ -10666,6 +10829,64 @@ mod classification_tests {
         let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
         assert_eq!(saved.title.as_str(), "An edit after acceptance");
         assert_eq!(saved.collection_ids, vec![f.collections[1]]);
+    }
+
+    #[gpui_kit::test]
+    fn attachment_detail_shows_ordered_files_and_named_open_buttons(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut ids = Vec::new();
+        for name in ["first.pdf", "second.txt"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"file").unwrap();
+            ids.push(
+                rt.block_on(f.worker.add_attachment(f.resource, path))
+                    .unwrap()
+                    .id,
+            );
+        }
+        cx.update_window(f.handle, |_, window, cx| {
+            f.app.update(cx, |app, cx| {
+                app.refresh_after_write(f.resource, window, cx)
+            });
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find(format!("attachment-{}", ids[0])).label(),
+                Some("first (pdf)")
+            );
+            assert_eq!(
+                window.find(format!("attachment-{}", ids[1])).label(),
+                Some("second (txt)")
+            );
+            assert_eq!(
+                window.find(format!("open-attachment-{}", ids[0])).label(),
+                Some("Open first")
+            );
+            assert_eq!(
+                window.find(format!("open-attachment-{}", ids[1])).label(),
+                Some("Open second")
+            );
+        })
+        .unwrap();
+        f.app.read_with(cx, |app, _| {
+            let Some((_, DetailFetch::Loaded(detail))) = &app.detail else {
+                panic!("detail should reload")
+            };
+            assert_eq!(
+                detail
+                    .attachments
+                    .iter()
+                    .map(|a| a.title.as_str())
+                    .collect::<Vec<_>>(),
+                ["first", "second"]
+            );
+        });
     }
 
     #[gpui_kit::test]

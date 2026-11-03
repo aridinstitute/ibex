@@ -629,6 +629,7 @@ pub struct ResourceDetail {
     pub tags: Vec<Tag>,
     /// Collections this resource belongs to, in `collection_ids` order.
     pub collections: Vec<Collection>,
+    pub attachments: Vec<crate::Attachment>,
     /// Record-keeping stamps, always present on a stored record.
     pub date_added: UtcMillis,
     pub date_edited: UtcMillis,
@@ -953,6 +954,7 @@ pub struct Resource {
     pub tag_ids: Vec<TagId>,
     /// Collection record ids this resource belongs to (not graph edges).
     pub collection_ids: Vec<CollectionId>,
+    pub attachment_ids: Vec<crate::AttachmentId>,
     pub metadata: ResourceMetadata,
     /// User-starred flag. Create starts false; only the favorite toggle
     /// changes it. Bibliographic updates preserve the existing value.
@@ -1055,6 +1057,7 @@ impl Resource {
             tag_ids: new.tag_ids,
             collection_ids: new.collection_ids,
             metadata: new.metadata,
+            attachment_ids: vec![],
             subtitle: new.subtitle,
             title_addon: new.title_addon,
             short_title: new.short_title,
@@ -1140,6 +1143,7 @@ impl Resource {
             tag_ids,
             collection_ids,
             metadata,
+            attachment_ids: vec![],
             subtitle: None,
             title_addon: None,
             short_title: None,

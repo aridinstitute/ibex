@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
+use ibex_core::{Attachment, AttachmentId};
 use ibex_core::{
     Creator, InheritanceError, NewResource, PersonId, Resource, ResourceCounts, ResourceDetail,
     ResourceError, ResourceId, ResourcePage, ResourceQuery, ResourceSummary, SeriesId,
@@ -13,6 +15,62 @@ use crate::{AppState, CommandError, Handler, Outcome};
 #[derive(Debug, Clone)]
 pub struct CreateResource {
     pub new: NewResource,
+}
+
+#[derive(Debug, Clone)]
+pub struct AddAttachment {
+    pub resource_id: ResourceId,
+    pub file_path: PathBuf,
+}
+
+pub(crate) struct AddedAttachment(pub Attachment);
+
+impl From<AddedAttachment> for Outcome {
+    fn from(AddedAttachment(attachment): AddedAttachment) -> Self {
+        Outcome::AddAttachment(attachment)
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for AddAttachment {
+    const NAME: &'static str = "add_attachment";
+    type Output = AddedAttachment;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::RESOURCE_ID, self.resource_id.to_string());
+    }
+
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<AddedAttachment, CommandError> {
+        let path = std::fs::canonicalize(&self.file_path)
+            .map_err(|e| CommandError::Invalid(format!("attachment path: {e}")))?;
+        if !path.is_file() {
+            return Err(CommandError::Invalid(
+                "attachment path must be a file".into(),
+            ));
+        }
+        let title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| CommandError::Invalid("attachment filename must be UTF-8".into()))?
+            .to_owned();
+        let attachment_type = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let attachment = Attachment {
+            id: AttachmentId::generate(),
+            attachment_type,
+            title,
+            file_path: path,
+        };
+        let added = state
+            .store()
+            .add_attachment(self.resource_id, attachment)
+            .await
+            .map_err(|e| map_resource_lookup(e, self.resource_id))?;
+        Ok(AddedAttachment(added))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -700,7 +758,13 @@ impl Handler for GetResourceDetail {
             }
         }
 
+        let mut attachments = Vec::with_capacity(resource.attachment_ids.len());
+        for id in &resource.attachment_ids {
+            attachments.push(state.store().get_attachment(*id).await?);
+        }
+
         Ok(FetchedDetail(ResourceDetail {
+            attachments,
             subtitle: resource.subtitle,
             title_addon: resource.title_addon,
             short_title: resource.short_title,
