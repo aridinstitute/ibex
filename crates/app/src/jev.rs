@@ -195,6 +195,7 @@ pub(crate) mod tests {
             favorite: false,
             tags: vec![],
             collections: vec![],
+            attachments: vec![],
             date_added: UtcMillis::from_unix_ms(0),
             date_edited: UtcMillis::from_unix_ms(0),
             subtitle: None,

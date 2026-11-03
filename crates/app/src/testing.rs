@@ -114,6 +114,7 @@ struct ResourceRow {
     series_number: Option<NonEmptyStr>,
     tag_ids: Vec<TagId>,
     collection_ids: Vec<CollectionId>,
+    attachment_ids: Vec<ibex_core::AttachmentId>,
     metadata: ResourceMetadata,
     favorite: bool,
     date_added: UtcMillis,
@@ -168,6 +169,7 @@ impl ResourceRow {
         resource.school = self.school.clone();
         resource.abstract_text = self.abstract_text.clone();
         resource.keywords = self.keywords.clone();
+        resource.attachment_ids = self.attachment_ids.clone();
         Ok(resource)
     }
 }
@@ -223,6 +225,7 @@ pub struct MemoryStore {
     /// `(child, parent)` edges for `child_of`.
     collection_child_of: Arc<Mutex<Vec<(CollectionId, CollectionId)>>>,
     resources: Arc<Mutex<HashMap<ResourceId, ResourceRow>>>,
+    attachments: Arc<Mutex<HashMap<ibex_core::AttachmentId, ibex_core::Attachment>>>,
     created: Arc<Mutex<Vec<CreatedEdge>>>,
     /// When set, the Nth subsequent `create_imported_resource` fails (0-based).
     import_fail_at: Arc<Mutex<Option<usize>>>,
@@ -245,6 +248,7 @@ impl MemoryStore {
             collections: Arc::new(Mutex::new(HashMap::new())),
             collection_child_of: Arc::new(Mutex::new(Vec::new())),
             resources: Arc::new(Mutex::new(HashMap::new())),
+            attachments: Arc::new(Mutex::new(HashMap::new())),
             created: Arc::new(Mutex::new(Vec::new())),
             import_fail_at: Arc::new(Mutex::new(None)),
             import_create_count: Arc::new(Mutex::new(0)),
@@ -912,6 +916,34 @@ impl Store for MemoryStore {
         Ok(collection_descendant_closure(id, edges))
     }
 
+    async fn add_attachment(
+        &self,
+        resource_id: ResourceId,
+        attachment: ibex_core::Attachment,
+    ) -> Result<ibex_core::Attachment, StoreError> {
+        let mut resources = self.resources.lock().expect("MemoryStore lock");
+        let row = resources
+            .get_mut(&resource_id)
+            .ok_or_else(|| StoreError::not_found(format!("resource {resource_id}")))?;
+        row.attachment_ids.push(attachment.id);
+        self.attachments
+            .lock()
+            .expect("MemoryStore lock")
+            .insert(attachment.id, attachment.clone());
+        Ok(attachment)
+    }
+
+    async fn get_attachment(
+        &self,
+        id: ibex_core::AttachmentId,
+    ) -> Result<ibex_core::Attachment, StoreError> {
+        self.attachments
+            .lock()
+            .expect("MemoryStore lock")
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| StoreError::not_found(format!("attachment {id}")))
+    }
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError> {
         let resource = Resource::try_new(ResourceId::generate(), new)?;
         let row = ResourceRow {
@@ -925,6 +957,7 @@ impl Store for MemoryStore {
             series_number: resource.series_number.clone(),
             tag_ids: resource.tag_ids.clone(),
             collection_ids: resource.collection_ids.clone(),
+            attachment_ids: vec![],
             metadata: resource.metadata.clone(),
             subtitle: resource.subtitle.clone(),
             title_addon: resource.title_addon.clone(),
@@ -1071,6 +1104,7 @@ impl Store for MemoryStore {
                         series_number: dep.series_number.clone(),
                         tag_ids: dep.tag_ids.clone(),
                         collection_ids: dep.collection_ids.clone(),
+                        attachment_ids: vec![],
                         metadata: dep.metadata.clone(),
                         subtitle: dep.subtitle.clone(),
                         title_addon: dep.title_addon.clone(),
@@ -1123,6 +1157,7 @@ impl Store for MemoryStore {
         let mut resource = Resource::try_new_updated(id, date_added, new)?;
         // Bibliographic replace never clears the star.
         resource.favorite = favorite;
+        resource.attachment_ids = resources[&id].attachment_ids.clone();
         resources.insert(
             id,
             ResourceRow {
@@ -1136,6 +1171,7 @@ impl Store for MemoryStore {
                 series_number: resource.series_number.clone(),
                 tag_ids: resource.tag_ids.clone(),
                 collection_ids: resource.collection_ids.clone(),
+                attachment_ids: resource.attachment_ids.clone(),
                 metadata: resource.metadata.clone(),
                 subtitle: resource.subtitle.clone(),
                 title_addon: resource.title_addon.clone(),
@@ -1253,6 +1289,7 @@ impl Store for MemoryStore {
                 series_number: r.series_number.clone(),
                 tag_ids: r.tag_ids.clone(),
                 collection_ids: r.collection_ids.clone(),
+                attachment_ids: r.attachment_ids.clone(),
                 metadata: r.metadata.clone(),
                 subtitle: r.subtitle.clone(),
                 title_addon: r.title_addon.clone(),
@@ -1346,6 +1383,7 @@ impl Store for MemoryStore {
         resource.school = row.school;
         resource.abstract_text = row.abstract_text;
         resource.keywords = row.keywords;
+        resource.attachment_ids = row.attachment_ids;
         Ok(resource)
     }
 
@@ -1667,6 +1705,20 @@ impl Store for StubStore {
         Err(unsupported("collection_descendant_ids"))
     }
 
+    async fn add_attachment(
+        &self,
+        _resource_id: ResourceId,
+        _attachment: ibex_core::Attachment,
+    ) -> Result<ibex_core::Attachment, StoreError> {
+        Err(unsupported("add_attachment"))
+    }
+
+    async fn get_attachment(
+        &self,
+        _id: ibex_core::AttachmentId,
+    ) -> Result<ibex_core::Attachment, StoreError> {
+        Err(unsupported("get_attachment"))
+    }
     async fn create_resource(&self, _new: NewResource) -> Result<Resource, StoreError> {
         Err(unsupported("create_resource"))
     }

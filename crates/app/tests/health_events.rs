@@ -183,6 +183,20 @@ impl Store for HangStore {
         std::future::pending().await
     }
 
+    async fn add_attachment(
+        &self,
+        _resource_id: ResourceId,
+        _attachment: ibex_core::Attachment,
+    ) -> Result<ibex_core::Attachment, StoreError> {
+        std::future::pending().await
+    }
+
+    async fn get_attachment(
+        &self,
+        _id: ibex_core::AttachmentId,
+    ) -> Result<ibex_core::Attachment, StoreError> {
+        std::future::pending().await
+    }
     async fn create_resource(&self, _new: NewResource) -> Result<Resource, StoreError> {
         std::future::pending().await
     }

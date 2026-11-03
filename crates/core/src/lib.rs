@@ -2,6 +2,7 @@
 //!
 //! Ports and shared domain types. Application runtime lives in `ibex-app`.
 
+mod attachment;
 mod classify;
 mod collection;
 mod identifier;
@@ -14,6 +15,7 @@ mod series;
 mod store;
 mod tag;
 
+pub use attachment::{Attachment, AttachmentId};
 pub use classify::{
     ClassifyInput, KEYWORD_MAX_CHARS, KEYWORDS_MAX_PER_COLLECTION, keyword_suggestions,
     normalize_keywords, parse_keywords,
