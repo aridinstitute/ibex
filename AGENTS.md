@@ -22,9 +22,9 @@ See `README.md` and `docs/` for product context.
   other path or config logic to the clients.
 - Tests must never touch the real home: pass `--data` and `IBEX_CONFIG_DIR`
   temp dirs (CLI tests use `tests/common::ibex()`), or `--memory`.
-- Never point this SurrealDB 3.3.4 build at a database written by SurrealDB 4.0;
-  the formats are incompatible. Use the matching SurrealDB version to export or
-  migrate data before changing versions.
+- This build uses SurrealDB 4.0.0. Do not open a 3.x library with it, or open a
+  4.0 library with an older build; the formats are incompatible. Use fresh test
+  databases and the matching SurrealDB version to export data before upgrading.
 
 ## Git: branches
 
@@ -70,6 +70,8 @@ Only create commits when the user asks. Never amend pushed history or skip hooks
 - Do not expand scope into unrelated refactors or drive-by docs.
 - Treat `docs/user-guide.md` as user-authored: keep its template headings and shortcut table, and add explanatory prose only when explicitly requested.
 - Scope formatting to touched files; check the diff afterward and remove unrelated formatting changes (avoid `cargo fmt --all` for local UI edits).
+- For performance investigations, reuse normal release builds and run small seed-only checks first; ask before enabling LTO or other settings that require expensive rebuilds.
+- For relationships anchored at a known record ID, prefer direct SurrealQL graph traversal (e.g. `FROM $person->created`) over filtering/grouping an entire edge table; consult the `surrealql` skill before choosing the query shape.
 - Ask before destructive git operations (force push, hard reset).
 - Before adding complexity for a speculative or vanishingly unlikely race or security edge case, explain the concrete failure mode, likelihood, and complexity cost to the user and get their buy-in. Do not silently expand scope for theoretical robustness
 - Do not to worry about writing migrations or writing defensive code since we're pre-release. You don't have to worry about corrupting existing data. Instead of coding defensively or writing migrations, the goal is to come away with cleanest data model, architecture, and code even if that means rewriting big parts of the app.

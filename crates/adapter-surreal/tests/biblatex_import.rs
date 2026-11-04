@@ -360,6 +360,188 @@ async fn imported_resource_write_rolls_back_new_deps_and_keeps_shared() {
     assert_eq!(kept.creators[0].person_id, shared.id);
 }
 
+#[tokio::test]
+async fn rename_refreshes_shared_creators_without_overwriting_credited_or_secondary_keys() {
+    let store = SurrealStore::open_memory().await.unwrap();
+    let ada = store
+        .create_person(
+            Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    let grace = store
+        .create_person(
+            Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    let creator = |person_id, role, credited_as| CreatorSpec {
+        person_id,
+        role,
+        credited_as,
+    };
+    let primary = store
+        .create_resource(minimal_book(
+            "Primary",
+            vec![
+                creator(grace.id, CreatorRole::Author, None),
+                creator(grace.id, CreatorRole::Editor, None),
+            ],
+        ))
+        .await
+        .unwrap();
+    let credited = store
+        .create_resource(minimal_book(
+            "Credited",
+            vec![creator(
+                grace.id,
+                CreatorRole::Author,
+                Some(NonEmptyStr::try_new("G. Aardvark").unwrap()),
+            )],
+        ))
+        .await
+        .unwrap();
+    let secondary = store
+        .create_resource(minimal_book(
+            "Secondary",
+            vec![
+                creator(ada.id, CreatorRole::Author, None),
+                creator(grace.id, CreatorRole::Editor, None),
+            ],
+        ))
+        .await
+        .unwrap();
+    let query = ResourceQuery::sorted(ResourceSort::PrimaryCreator, SortDirection::Ascending);
+    let page = store
+        .list_resources_query_page(&query, 0, 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        [credited.id, primary.id, secondary.id]
+    );
+    store
+        .update_person(
+            grace.id,
+            Name::try_new(Some("Grace"), Some("Zulu"), None::<&str>).unwrap(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    let page = store
+        .list_resources_query_page(&query, 0, 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        [credited.id, secondary.id, primary.id]
+    );
+    for resource in [primary, credited, secondary] {
+        assert_eq!(
+            store.get_resource(resource.id).await.unwrap().date_edited,
+            resource.date_edited
+        );
+    }
+}
+
+#[tokio::test]
+async fn imported_creator_sort_survives_rename_and_failed_replacement() {
+    let store = SurrealStore::open_memory().await.unwrap();
+    let shared = store
+        .create_person(
+            Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    let existing = store
+        .create_resource(minimal_book(
+            "Existing",
+            vec![CreatorSpec {
+                person_id: shared.id,
+                role: CreatorRole::Author,
+                credited_as: None,
+            }],
+        ))
+        .await
+        .unwrap();
+    let imported_person = Person::try_new(
+        PersonId::generate(),
+        Name::try_new(Some("Grace"), Some("Hopper"), None::<&str>).unwrap(),
+        vec![],
+    )
+    .unwrap();
+    let imported = store
+        .create_imported_resource(ImportedResourceWrite {
+            new_people: vec![imported_person.clone()],
+            new_series: None,
+            new_dependencies: vec![],
+            resource: minimal_book(
+                "Imported",
+                vec![CreatorSpec {
+                    person_id: imported_person.id,
+                    role: CreatorRole::Author,
+                    credited_as: None,
+                }],
+            ),
+        })
+        .await
+        .unwrap();
+    let query = ResourceQuery::sorted(ResourceSort::PrimaryCreator, SortDirection::Ascending);
+    let page = store
+        .list_resources_query_page(&query, 0, 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        [imported.id, existing.id]
+    );
+    store
+        .update_person(
+            imported_person.id,
+            Name::try_new(Some("Grace"), Some("Zulu"), None::<&str>).unwrap(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    let page = store
+        .list_resources_query_page(&query, 0, 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        [existing.id, imported.id]
+    );
+    let mut invalid = imported.to_new();
+    invalid.creators = vec![
+        CreatorSpec {
+            person_id: shared.id,
+            role: CreatorRole::Author,
+            credited_as: None,
+        },
+        CreatorSpec {
+            person_id: PersonId::generate(),
+            role: CreatorRole::Editor,
+            credited_as: None,
+        },
+    ];
+    assert!(store.update_resource(imported.id, invalid).await.is_err());
+    let page = store
+        .list_resources_query_page(&query, 0, 50)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+        [existing.id, imported.id]
+    );
+    let loaded = store.get_resource(imported.id).await.unwrap();
+    assert_eq!(loaded.creators.len(), 1);
+    assert_eq!(loaded.creators[0].person_id, imported_person.id);
+    assert_eq!(loaded.date_edited, imported.date_edited);
+}
+
 fn minimal_book(title: &str, creators: Vec<CreatorSpec>) -> NewResource {
     NewResource {
         kind: ResourceKind::Book,
