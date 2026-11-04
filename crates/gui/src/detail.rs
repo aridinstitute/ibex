@@ -721,6 +721,7 @@ mod tests {
             favorite: false,
             tags: vec![],
             collections: vec![],
+            attachments: vec![],
             date_added: UtcMillis::from_unix_ms(1_609_459_200_000),
             date_edited: UtcMillis::from_unix_ms(1_609_459_200_000),
         }

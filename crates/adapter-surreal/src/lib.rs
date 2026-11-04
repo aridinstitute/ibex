@@ -3,14 +3,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use ibex_core::{
-    BibliographicDate, Collection, CollectionId, CollectionTreeNode, CollectionUpdate, Creator,
-    CreatorRole, DateCertainty, DatePrecision, ImportedResourceWrite, Name, NewResource, NewSeries,
-    NonEmptyStr, Person, PersonId, Resource, ResourceCounts, ResourceFilter, ResourceId,
-    ResourceKind, ResourceMetadata, ResourcePage, ResourceQuery, ResourceSort, ResourceSummary,
-    Series, SeriesId, SortDirection, SortedResourcePage, Store, StoreError, StoreHealth, Tag,
-    TagId, UtcMillis, build_collection_forest, collection_descendant_closure,
-    collection_update_edges, creator_label_name, format_creators_label, gather_ancestors,
-    published_label_from, resolve_effective,
+    Attachment, AttachmentId, BibliographicDate, Collection, CollectionId, CollectionTreeNode,
+    CollectionUpdate, Creator, CreatorRole, DateCertainty, DatePrecision, ImportedResourceWrite,
+    Name, NewResource, NewSeries, NonEmptyStr, Person, PersonId, Resource, ResourceCounts,
+    ResourceFilter, ResourceId, ResourceKind, ResourceMetadata, ResourcePage, ResourceQuery,
+    ResourceSort, ResourceSummary, Series, SeriesId, SortDirection, SortedResourcePage, Store,
+    StoreError, StoreHealth, Tag, TagId, UtcMillis, build_collection_forest,
+    collection_descendant_closure, collection_update_edges, creator_label_name,
+    format_creators_label, gather_ancestors, published_label_from, resolve_effective,
 };
 use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, Mem, SurrealKv};
@@ -25,6 +25,14 @@ const TAG_TABLE: &str = "tag";
 const COLLECTION_TABLE: &str = "collection";
 const CHILD_OF_TABLE: &str = "child_of";
 const RESOURCE_TABLE: &str = "resource";
+const ATTACHMENT_TABLE: &str = "attachment";
+
+#[derive(Debug, Clone, SurrealValue)]
+struct AttachmentDoc {
+    attachment_type: String,
+    title: String,
+    file_path: String,
+}
 pub struct SurrealStore {
     db: Surreal<Db>,
 }
@@ -202,6 +210,8 @@ struct ResourceDoc {
     /// Record links to collection rows; legacy rows omit the field.
     #[surreal(default)]
     collections: Option<Vec<RecordId>>,
+    #[surreal(default)]
+    attachments: Option<Vec<RecordId>>,
     /// Legacy rows omit the field; treat missing as not favorited.
     #[surreal(default)]
     favorite: Option<bool>,
@@ -610,6 +620,12 @@ impl SurrealStore {
             .db
             .query("DEFINE TABLE IF NOT EXISTS resource SCHEMALESS")
             .await;
+        self.db
+            .query("DEFINE TABLE IF NOT EXISTS attachment SCHEMALESS")
+            .await
+            .map_err(map_err)?
+            .check()
+            .map_err(map_err)?;
 
         self.ensure_created_relation_table().await?;
 
@@ -1191,6 +1207,14 @@ impl SurrealStore {
         resource.school = doc.school;
         resource.abstract_text = doc.abstract_text;
         resource.keywords = doc.keywords;
+        resource.attachment_ids = doc
+            .attachments
+            .unwrap_or_default()
+            .iter()
+            .map(|id| {
+                AttachmentId::parse(&record_key(id)).map_err(|e| StoreError::invalid(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(resource)
     }
 
@@ -1252,6 +1276,13 @@ impl SurrealStore {
                     .iter()
                     .copied()
                     .map(Self::collection_key)
+                    .collect(),
+            ),
+            attachments: Some(
+                resource
+                    .attachment_ids
+                    .iter()
+                    .map(|id| RecordId::new(ATTACHMENT_TABLE, id.to_string()))
                     .collect(),
             ),
             favorite: Some(resource.favorite),
@@ -1386,7 +1417,7 @@ impl SurrealStore {
         let mut seen = HashSet::new();
         Ok(resources
             .into_iter()
-            .filter(|id| seen.insert(id.clone()))
+            .filter(|id| seen.insert(record_key(id)))
             .collect())
     }
     /// RELATE one `created` edge per creator with role / order / credited_as.
@@ -2194,6 +2225,56 @@ impl Store for SurrealStore {
         Ok(collection_descendant_closure(id, edges))
     }
 
+    async fn add_attachment(
+        &self,
+        resource_id: ResourceId,
+        attachment: Attachment,
+    ) -> Result<Attachment, StoreError> {
+        let txn = self.db.clone().begin().await.map_err(map_err)?;
+        let persist = async {
+            let key = Self::resource_key(resource_id);
+            let existing: Option<ResourceDoc> = txn.select(key.clone()).await.map_err(map_err)?;
+            if existing.is_none() {
+                return Err(StoreError::not_found(format!("resource {resource_id}")));
+            }
+            let doc = AttachmentDoc {
+                attachment_type: attachment.attachment_type.clone(),
+                title: attachment.title.clone(),
+                file_path: attachment.file_path.to_string_lossy().into_owned(),
+            };
+            let attachment_key = RecordId::new(ATTACHMENT_TABLE, attachment.id.to_string());
+            let _: Option<AttachmentDoc> = txn.create(attachment_key.clone()).content(doc).await.map_err(map_err)?;
+            txn.query("UPDATE ONLY $resource SET attachments = array::append(attachments ?? [], $attachment)")
+                .bind(("resource", key)).bind(("attachment", attachment_key))
+                .await.map_err(map_err)?.check().map_err(map_err)?;
+            Ok(())
+        }.await;
+        match persist {
+            Ok(()) => {
+                txn.commit().await.map_err(map_err)?;
+                Ok(attachment)
+            }
+            Err(err) => {
+                let _ = txn.cancel().await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn get_attachment(&self, id: AttachmentId) -> Result<Attachment, StoreError> {
+        let doc: AttachmentDoc = self
+            .db
+            .select(RecordId::new(ATTACHMENT_TABLE, id.to_string()))
+            .await
+            .map_err(map_err)?
+            .ok_or_else(|| StoreError::not_found(format!("attachment {id}")))?;
+        Ok(Attachment {
+            id,
+            attachment_type: doc.attachment_type,
+            title: doc.title,
+            file_path: doc.file_path.into(),
+        })
+    }
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError> {
         let id = ResourceId::generate();
         let resource = Resource::try_new(id, new)?;
@@ -2327,6 +2408,15 @@ impl Store for SurrealStore {
         let mut resource = Resource::try_new_updated(id, date_added, new)?;
         // Bibliographic replace never clears the star.
         resource.favorite = existing_doc.favorite.unwrap_or(false);
+        resource.attachment_ids = existing_doc
+            .attachments
+            .unwrap_or_default()
+            .iter()
+            .map(|record| {
+                AttachmentId::parse(&record_key(record))
+                    .map_err(|e| StoreError::invalid(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
         let txn = self.db.clone().begin().await.map_err(map_err)?;
 

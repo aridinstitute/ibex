@@ -54,6 +54,91 @@ fn example() -> NewResource {
         keywords: vec!["history".into(), "bibliography".into()],
     }
 }
+#[tokio::test]
+async fn attachments_round_trip_through_app_and_surreal_in_order() {
+    use ibex_app::command::{AddAttachment, CreateResource, GetResourceDetail};
+    use ibex_app::{AppState, Command, Outcome};
+    let store = SurrealStore::open_memory().await.unwrap();
+    let state = AppState::builder(store).build();
+    let Outcome::CreateResource(resource) = state
+        .execute(Command::CreateResource(CreateResource { new: example() }))
+        .await
+        .unwrap()
+    else {
+        panic!("create resource")
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("A Paper.PDF");
+    let second = dir.path().join("notes.txt");
+    std::fs::write(&first, b"pdf").unwrap();
+    std::fs::write(&second, b"notes").unwrap();
+    let Outcome::AddAttachment(a) = state
+        .execute(Command::AddAttachment(AddAttachment {
+            resource_id: resource.id,
+            file_path: first.clone(),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("add attachment")
+    };
+    assert_eq!(a.title, "A Paper");
+    assert_eq!(a.attachment_type, "pdf");
+    assert_eq!(a.file_path, first.canonicalize().unwrap());
+    let Outcome::AddAttachment(b) = state
+        .execute(Command::AddAttachment(AddAttachment {
+            resource_id: resource.id,
+            file_path: second.clone(),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("add attachment")
+    };
+    let Outcome::GetResourceDetail(detail) = state
+        .execute(Command::GetResourceDetail(GetResourceDetail {
+            id: resource.id,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("detail")
+    };
+    assert_eq!(detail.attachments, vec![a.clone(), b.clone()]);
+    let Outcome::GetResource(stored) = state
+        .execute(Command::GetResource(ibex_app::command::GetResource {
+            id: resource.id,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("get resource")
+    };
+    assert_eq!(stored.attachment_ids, vec![a.id, b.id]);
+    let mut edit = stored.to_new();
+    edit.title = NonEmptyStr::try_new("Updated").unwrap();
+    let Outcome::UpdateResource(stored) = state
+        .execute(Command::UpdateResource(ibex_app::command::UpdateResource {
+            id: resource.id,
+            new: edit,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("update resource")
+    };
+    assert_eq!(stored.attachment_ids, vec![a.id, b.id]);
+    let Outcome::GetResourceDetail(detail) = state
+        .execute(Command::GetResourceDetail(GetResourceDetail {
+            id: resource.id,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("detail after update")
+    };
+    assert_eq!(detail.attachments, vec![a, b]);
+}
 
 #[tokio::test]
 async fn bibliographic_fields_survive_storage_updates_and_reopen() {

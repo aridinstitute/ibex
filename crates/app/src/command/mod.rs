@@ -22,14 +22,15 @@ pub use person::{
     UpdatePerson,
 };
 pub use resource::{
-    CountResources, CreateResource, GetResource, GetResourceDetail, ListResourceGridPage,
-    ListResources, ListResourcesPage, ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
+    AddAttachment, CountResources, CreateResource, GetResource, GetResourceDetail,
+    ListResourceGridPage, ListResources, ListResourcesPage, ListResourcesQueryPage,
+    SetResourceFavorite, UpdateResource,
 };
 pub use series::CreateSeries;
 pub use tag::{CreateTag, FindTagByText, GetTag, ListTags};
 
 use ibex_core::{
-    Collection, CollectionTreeNode, Person, Resource, ResourceCounts, ResourceDetail,
+    Attachment, Collection, CollectionTreeNode, Person, Resource, ResourceCounts, ResourceDetail,
     ResourceGridPage, ResourcePage, ResourceSummary, Series, SortedResourcePage, StoreError, Tag,
 };
 
@@ -61,6 +62,7 @@ pub enum Command {
     RemoveCollectionParent(RemoveCollectionParent),
     DeleteCollection(DeleteCollection),
     CreateResource(CreateResource),
+    AddAttachment(AddAttachment),
     ImportBiblatex(ImportBiblatex),
     ImportCslJson(ImportCslJson),
     PreviewBiblatex(PreviewBiblatex),
@@ -102,6 +104,7 @@ pub enum Outcome {
     RemoveCollectionParent(()),
     DeleteCollection(DeletedCollection),
     CreateResource(Resource),
+    AddAttachment(Attachment),
     ImportBiblatex(ImportReport),
     ImportCslJson(ImportReport),
     PreviewBiblatex(ImportPreview),
@@ -170,6 +173,7 @@ impl Command {
             Command::RemoveCollectionParent(_) => RemoveCollectionParent::NAME,
             Command::DeleteCollection(_) => DeleteCollection::NAME,
             Command::CreateResource(_) => CreateResource::NAME,
+            Command::AddAttachment(_) => AddAttachment::NAME,
             Command::ImportBiblatex(_) => ImportBiblatex::NAME,
             Command::ImportCslJson(_) => ImportCslJson::NAME,
             Command::PreviewBiblatex(_) => PreviewBiblatex::NAME,
@@ -228,6 +232,7 @@ pub(crate) async fn dispatch(
         Command::RemoveCollectionParent(c) => drive(c, state, ev).await,
         Command::DeleteCollection(c) => drive(c, state, ev).await,
         Command::CreateResource(c) => drive(c, state, ev).await,
+        Command::AddAttachment(c) => drive(c, state, ev).await,
         Command::ImportBiblatex(c) => drive(c, state, ev).await,
         Command::ImportCslJson(c) => drive(c, state, ev).await,
         Command::PreviewBiblatex(c) => drive(c, state, ev).await,

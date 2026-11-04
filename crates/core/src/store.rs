@@ -199,6 +199,18 @@ pub trait Store: Send + Sync + 'static {
     /// (`CreateResource`) does that before invoke.
     async fn create_resource(&self, new: NewResource) -> Result<Resource, StoreError>;
 
+    /// Create attachment row and append its link to the resource in one transaction.
+    async fn add_attachment(
+        &self,
+        resource_id: ResourceId,
+        attachment: crate::Attachment,
+    ) -> Result<crate::Attachment, StoreError>;
+
+    async fn get_attachment(
+        &self,
+        id: crate::AttachmentId,
+    ) -> Result<crate::Attachment, StoreError>;
+
     /// Persist one imported resource and the people/series/containers newly
     /// required for it as a single atomic unit. On failure, none of those new
     /// rows or edges remain.

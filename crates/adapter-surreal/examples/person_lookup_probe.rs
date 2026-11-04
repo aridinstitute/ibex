@@ -1,7 +1,11 @@
 //! Compare the person-to-resource lookup forms used before rename/delete.
 //! cargo run --release --locked -p ibex-adapter-surreal --example person_lookup_probe -- 1000
 use std::time::Instant;
-use surrealdb::{Surreal, engine::local::Mem, types::RecordId};
+use surrealdb::{
+    Surreal,
+    engine::local::Mem,
+    types::{RecordId, ToSql},
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n: usize = std::env::args()
@@ -31,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let txn = db.clone().begin().await?;
                         let mut response = txn.query(sql).bind(("person", RecordId::new("person", "one"))).await?;
                         let ids: Vec<RecordId> = response.take(0)?;
-                        let unique: std::collections::HashSet<_> = ids.into_iter().collect();
+                        let unique: std::collections::HashSet<_> = ids.iter().map(|id| id.key.to_sql()).collect();
                         assert_eq!(unique.len(), usize::from(edges));
                         txn.cancel().await?;
                     }

@@ -5,19 +5,19 @@ use ibex_app::command::ListResourceGridPage;
 #[cfg(test)]
 use ibex_app::command::ListResourcesPage;
 use ibex_app::command::{
-    AddCollectionParent, CountResources, CreateCollection, CreatePerson, CreateResource, CreateTag,
-    DeleteCollection, FindTagByText, GetResource, GetResourceDetail, ListCollectionForest,
-    ListPersons, ListResourcesQueryPage, ListTags, RemoveCollectionParent, RenameCollection,
-    SetCollectionClassification, SetResourceFavorite, UpdateResource,
+    AddAttachment, AddCollectionParent, CountResources, CreateCollection, CreatePerson,
+    CreateResource, CreateTag, DeleteCollection, FindTagByText, GetResource, GetResourceDetail,
+    ListCollectionForest, ListPersons, ListResourcesQueryPage, ListTags, RemoveCollectionParent,
+    RenameCollection, SetCollectionClassification, SetResourceFavorite, UpdateResource,
 };
 use ibex_app::command::{ImportBiblatex, ImportReport, PreviewBiblatex};
 use ibex_app::{AppState, Command, Outcome};
 #[cfg(test)]
 use ibex_core::ResourcePage;
 use ibex_core::{
-    Collection, CollectionId, CollectionTreeNode, ImportChoices, ImportPreview, Name, NewResource,
-    NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId, ResourceQuery,
-    SortedResourcePage, Tag,
+    Attachment, Collection, CollectionId, CollectionTreeNode, ImportChoices, ImportPreview, Name,
+    NewResource, NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId,
+    ResourceQuery, SortedResourcePage, Tag,
 };
 use ibex_core::{ResourceGridPage, ResourceGridParent};
 use std::{io::Read as _, path::PathBuf};
@@ -65,6 +65,11 @@ pub enum DbRequest {
     GetDetail {
         id: ResourceId,
         reply: oneshot::Sender<Result<ResourceDetail, String>>,
+    },
+    AddAttachment {
+        id: ResourceId,
+        path: PathBuf,
+        reply: oneshot::Sender<Result<Attachment, String>>,
     },
     GetResource {
         id: ResourceId,
@@ -336,6 +341,20 @@ impl DbWorker {
                                             Err("unexpected outcome from get_resource_detail"
                                                 .into())
                                         }
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::AddAttachment { id, path, reply } => {
+                                let result = state
+                                    .execute(Command::AddAttachment(AddAttachment {
+                                        resource_id: id,
+                                        file_path: path,
+                                    }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::AddAttachment(attachment) => Ok(attachment),
+                                        _ => Err("unexpected outcome from add_attachment".into()),
                                     });
                                 let _ = reply.send(result);
                             }
@@ -914,6 +933,23 @@ impl DbWorker {
             .map_err(|_| "db worker dropped the request".to_string())?
     }
 
+    pub async fn add_attachment(
+        &self,
+        id: ResourceId,
+        path: PathBuf,
+    ) -> Result<Attachment, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::AddAttachment {
+                id,
+                path,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
     /// Replace one resource's stored fields with `new`, handing back the
     /// stored record.
     pub async fn update_resource(
@@ -1050,6 +1086,48 @@ mod tests {
             .unwrap();
         assert!(!updated.favorite);
         assert!(!worker.resource(created.id).await.unwrap().favorite);
+    }
+
+    #[tokio::test]
+    async fn worker_adds_attachment_and_detail_retains_order() {
+        use ibex_adapter_surreal::SurrealStore;
+        use ibex_core::{ResourceKind, Store};
+
+        let store = SurrealStore::open_memory().await.unwrap();
+        let resource = store
+            .create_resource(
+                crate::metadata::empty_resource("With files", ResourceKind::Book).unwrap(),
+            )
+            .await
+            .unwrap();
+        let worker = DbWorker::spawn(AppState::builder(store).surface(Surface::Test).build());
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["first.pdf", "second.pdf"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"file").unwrap();
+            let added = worker
+                .add_attachment(resource.id, path.clone())
+                .await
+                .unwrap();
+            assert_eq!(added.file_path, std::fs::canonicalize(path).unwrap());
+        }
+        let detail = worker.resource_detail(resource.id).await.unwrap();
+        assert_eq!(
+            detail
+                .attachments
+                .iter()
+                .map(|a| a.title.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert_eq!(
+            detail
+                .attachments
+                .iter()
+                .map(|a| a.attachment_type.as_str())
+                .collect::<Vec<_>>(),
+            ["pdf", "pdf"]
+        );
     }
 
     #[tokio::test]
