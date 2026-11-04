@@ -240,7 +240,7 @@ fn compact_menu_item(
     handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> PopupMenuItem {
     let label = label.into();
-    PopupMenuItem::element(move |_, _| div().text_size(px(12.)).child(label.clone()))
+    PopupMenuItem::element(move |_, _| div().text_size(rems(1.)).child(label.clone()))
         .on_click(handler)
 }
 
@@ -264,7 +264,7 @@ impl Render for CollectionDragGhost {
             .rounded(px(6.))
             .bg(cx.theme().popover)
             .text_color(cx.theme().popover_foreground)
-            .text_size(px(12.))
+            .text_size(rems(1.))
             .border_1()
             .border_color(cx.theme().border)
             .child(self.name.clone())
@@ -317,15 +317,15 @@ const COLUMN_KEYS: [&str; COLUMNS] = [
 /// grid opens readable on narrower windows.
 const DEFAULT_TITLE_WIDTH: f32 = 310.;
 
-const CELL_TEXT_SIZE: Pixels = px(12.);
+const CELL_TEXT_SIZE: Rems = rems(1.);
 /// Inline editors read slightly larger than static cells so the caret and
 /// typed text stay obvious on the accent row.
-const INLINE_CELL_TEXT_SIZE: Pixels = px(13.);
+const INLINE_CELL_TEXT_SIZE: Rems = rems(1.1);
 /// Kind dropdown is wider than the 28px icon column so labels aren't clipped.
 const INLINE_KIND_MENU_WIDTH: Pixels = px(220.);
 /// Header labels are one step below the cell text; the kit's default
 /// `text_xs` reads too small at this base font size.
-const HEADER_TEXT_SIZE: Pixels = px(10.);
+const HEADER_TEXT_SIZE: Rems = rems(0.9);
 
 pub struct LibraryDelegate {
     worker: DbWorker,
@@ -3152,8 +3152,8 @@ impl LibraryApp {
                 v_flex().id("biblatex-import-report").test_support().aria_label(summary.clone()).gap_3()
                     .child(summary.clone())
                     .child(div().id("biblatex-import-issues").max_h(px(320.)).overflow_y_scroll()
-                        .child(v_flex().gap_2().children(issues.iter().map(|issue| div().text_size(px(12.)).child(issue.clone())))))
-                    .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground)
+                        .child(v_flex().gap_2().children(issues.iter().map(|issue| div().text_size(rems(1.)).child(issue.clone())))))
+                    .child(div().text_size(rems(1.)).text_color(cx.theme().muted_foreground)
                         .child("Existing records are not overwritten. Same-source retries reuse committed entries. Current library filters still apply."))
             )
         });
@@ -5952,7 +5952,7 @@ impl LibraryApp {
             .size_full()
             .p_2()
             .overflow_y_scroll()
-            .text_size(px(12.))
+            .text_size(rems(1.))
             .child(self.sidebar_row(
                 0,
                 SidebarNav::All,
@@ -7384,7 +7384,7 @@ impl Render for LibraryApp {
                                                 .border_color(cx.theme().border)
                                                 .px(px(12.))
                                                 .py(px(6.))
-                                                .text_size(px(12.))
+                                                .text_size(rems(1.))
                                                 .prefix(
                                                     Icon::new(IconName::Search)
                                                         .with_size(px(13.))

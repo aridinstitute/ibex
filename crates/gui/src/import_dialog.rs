@@ -428,7 +428,7 @@ impl Render for ImportDialog {
         let review_lines = self.review_lines();
         let muted = cx.theme().muted_foreground;
         let disabled = self.submitted;
-        let label = |text: &'static str| div().text_size(px(12.)).text_color(muted).child(text);
+        let label = |text: &'static str| div().text_size(rems(1.)).text_color(muted).child(text);
 
         let collection_rows: Vec<_> = self
             .collections
@@ -486,10 +486,10 @@ impl Render for ImportDialog {
                         .child(v_flex().gap_2().children(
                             review_lines
                                 .into_iter()
-                                .map(|line| div().text_size(px(12.)).child(line)),
+                                .map(|line| div().text_size(rems(1.)).child(line)),
                         )),
                 )
-                .child(div().text_size(px(12.)).text_color(muted).child(
+                .child(div().text_size(rems(1.)).text_color(muted).child(
                     "Skip conflicted leaves entries that need review out. Import duplicates creates new copies.",
                 ))
             })
@@ -525,7 +525,7 @@ impl Render for ImportDialog {
                     )
                     .children(tag_rows),
             )
-            .child(div().text_size(px(12.)).text_color(muted).child(
+            .child(div().text_size(rems(1.)).text_color(muted).child(
                 "Every imported or reused entry is added to these collections and tags. Existing memberships are kept. New collections are top-level.",
             ))
     }
