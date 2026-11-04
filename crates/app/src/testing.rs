@@ -697,6 +697,22 @@ impl Store for MemoryStore {
         Ok(state.by_id.values().cloned().collect())
     }
 
+    async fn list_series(&self) -> Result<Vec<Series>, StoreError> {
+        let mut series: Vec<_> = self
+            .series
+            .lock()
+            .expect("MemoryStore lock")
+            .values()
+            .cloned()
+            .collect();
+        series.sort_by(|a, b| {
+            a.title
+                .as_str()
+                .cmp(b.title.as_str())
+                .then_with(|| a.id.as_ulid().cmp(&b.id.as_ulid()))
+        });
+        Ok(series)
+    }
     async fn create_series(&self, new: NewSeries) -> Result<Series, StoreError> {
         let series = Series::try_new(SeriesId::generate(), new);
         self.series
@@ -1618,6 +1634,9 @@ impl Store for StubStore {
         Err(unsupported("create_series"))
     }
 
+    async fn list_series(&self) -> Result<Vec<Series>, StoreError> {
+        Err(unsupported("list_series"))
+    }
     async fn get_series(&self, _id: SeriesId) -> Result<Series, StoreError> {
         Err(unsupported("get_series"))
     }

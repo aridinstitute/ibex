@@ -116,6 +116,9 @@ pub trait Store: Send + Sync + 'static {
     /// Fetch series by id. Missing → [`StoreError::not_found`].
     async fn get_series(&self, id: SeriesId) -> Result<Series, StoreError>;
 
+    /// Every series, ordered by title ascending. Empty vec when none.
+    async fn list_series(&self) -> Result<Vec<Series>, StoreError>;
+
     /// Allocate [`TagId`], insert tag row. Text must be unique (exact string).
     /// Duplicate text → [`StoreError::invalid`].
     async fn create_tag(&self, text: NonEmptyStr) -> Result<Tag, StoreError>;

@@ -352,6 +352,7 @@ impl InlineRowEdit {
         let creators = creators_from_person_ids(&person_ids, &self.previous_creators);
         let ridden = self.record.as_ref().map(prefill_draft);
         EditDraft {
+            fields: Default::default(),
             title: value(&self.title),
             kind,
             parent: self.record.as_ref().and_then(|r| r.parent_id),

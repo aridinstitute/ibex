@@ -26,7 +26,7 @@ pub use resource::{
     ListResourceGridPage, ListResources, ListResourcesPage, ListResourcesQueryPage,
     SetResourceFavorite, UpdateResource,
 };
-pub use series::CreateSeries;
+pub use series::{CreateSeries, ListSeries};
 pub use tag::{CreateTag, FindTagByText, GetTag, ListTags};
 
 use ibex_core::{
@@ -49,6 +49,7 @@ pub enum Command {
     FindPersonsByName(FindPersonsByName),
     ListPersons(ListPersons),
     CreateSeries(CreateSeries),
+    ListSeries(ListSeries),
     CreateTag(CreateTag),
     GetTag(GetTag),
     FindTagByText(FindTagByText),
@@ -91,6 +92,7 @@ pub enum Outcome {
     FindPersonsByName(Vec<Person>),
     ListPersons(Vec<Person>),
     CreateSeries(Series),
+    ListSeries(Vec<Series>),
     CreateTag(Tag),
     GetTag(Tag),
     FindTagByText(Option<Tag>),
@@ -160,6 +162,7 @@ impl Command {
             Command::FindPersonsByName(_) => FindPersonsByName::NAME,
             Command::ListPersons(_) => ListPersons::NAME,
             Command::CreateSeries(_) => CreateSeries::NAME,
+            Command::ListSeries(_) => ListSeries::NAME,
             Command::CreateTag(_) => CreateTag::NAME,
             Command::GetTag(_) => GetTag::NAME,
             Command::FindTagByText(_) => FindTagByText::NAME,
@@ -219,6 +222,7 @@ pub(crate) async fn dispatch(
         Command::FindPersonsByName(c) => drive(c, state, ev).await,
         Command::ListPersons(c) => drive(c, state, ev).await,
         Command::CreateSeries(c) => drive(c, state, ev).await,
+        Command::ListSeries(c) => drive(c, state, ev).await,
         Command::CreateTag(c) => drive(c, state, ev).await,
         Command::GetTag(c) => drive(c, state, ev).await,
         Command::FindTagByText(c) => drive(c, state, ev).await,

@@ -7,6 +7,9 @@
 #[path = "resource_grid.rs"]
 mod resource_grid;
 use resource_grid::ResourceGrid;
+#[path = "series_picker.rs"]
+mod series_picker;
+use series_picker::{SeriesChoice, SeriesDelegate};
 
 use std::{
     any::Any,
@@ -21,7 +24,7 @@ use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::base::{Transition as MotionTransition, transition};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
-use gpui_kit::component::input::{Enter, Input, InputEvent, InputState};
+use gpui_kit::component::input::{Enter, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::resizable::resize_handle;
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
@@ -57,14 +60,13 @@ use crate::detail::{
 };
 use crate::documentation::{DocumentationWindow, OpenDocumentation};
 use crate::edit::{
-    EditDraft, KindItem, build_create, build_update, creators_from_person_ids, kind_items,
-    prefill_draft,
+    BibliographicField, EditDraft, KindItem, build_create, build_update, kind_items, prefill_draft,
 };
 use crate::icons::symbol;
 use crate::import_dialog::{ConflictPolicy, ImportConfirmed, ImportDialog};
 use crate::inline_edit::{
     InlineField, InlineRowEdit, InlineSession, PersonChoice, PersonDelegate,
-    creators_badge_trigger, person_items, person_name_from_query, selected_person_ids,
+    creators_badge_trigger, person_name_from_query, selected_person_ids,
 };
 use crate::kind::{kind_color, kind_label, kind_symbol};
 use crate::settings::{Settings, ThemeColorTarget};
@@ -1933,6 +1935,7 @@ pub struct LibraryApp {
     /// fetched, ready once the inputs exist. One form at a time, owned by
     /// the row it was opened on.
     edit: Option<EditFetch>,
+    edit_generation: u64,
     /// Per-id generation for detail fetches. Saving an edit bumps its id's
     /// generation; a reply from a fetch issued before the bump is dropped
     /// instead of re-caching the pre-edit detail.
@@ -1953,6 +1956,102 @@ enum EditFetch {
     Ready(Box<EditForm>),
 }
 
+enum BibliographicInput {
+    Single(Entity<InputState>),
+    Multiline(Entity<TextareaState>),
+}
+impl BibliographicInput {
+    fn value(&self, cx: &App) -> String {
+        match self {
+            Self::Single(input) => input.read(cx).value().to_string(),
+            Self::Multiline(input) => input.read(cx).value().to_string(),
+        }
+    }
+    fn render(&self, field: BibliographicField, disabled: bool) -> AnyElement {
+        match self {
+            Self::Single(input) => Input::new(input)
+                .small()
+                .aria_label(field.label())
+                .disabled(disabled)
+                .w_full()
+                .into_any_element(),
+            Self::Multiline(input) => Textarea::new(input)
+                .small()
+                .aria_label(field.label())
+                .disabled(disabled)
+                .w_full()
+                .into_any_element(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CreatorRoleItem(ibex_core::CreatorRole);
+impl SearchableListItem for CreatorRoleItem {
+    type Value = ibex_core::CreatorRole;
+    fn title(&self) -> SharedString {
+        format!("{:?}", self.0).into()
+    }
+    fn value(&self) -> &Self::Value {
+        &self.0
+    }
+}
+struct CreatorRow {
+    key: u64,
+    person_id: PersonId,
+    name: String,
+    role: Entity<ComboboxState<SearchableVec<CreatorRoleItem>>>,
+    credited_as: Entity<InputState>,
+}
+impl CreatorRow {
+    fn new(
+        key: u64,
+        spec: ibex_core::CreatorSpec,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<LibraryApp>,
+    ) -> Self {
+        use ibex_core::CreatorRole::*;
+        let roles = vec![Author, Editor, Translator, Contributor, Host, Director];
+        let selected = roles.iter().position(|role| *role == spec.role).unwrap();
+        Self {
+            key,
+            person_id: spec.person_id,
+            name,
+            role: cx.new(|cx| {
+                ComboboxState::new(
+                    SearchableVec::new(roles.into_iter().map(CreatorRoleItem).collect::<Vec<_>>()),
+                    vec![IndexPath::new(selected)],
+                    window,
+                    cx,
+                )
+                .searchable(true)
+            }),
+            credited_as: prefill_input(
+                spec.credited_as
+                    .map(|s| s.as_str().to_owned())
+                    .unwrap_or_default(),
+                "Credited as (optional)",
+                window,
+                cx,
+            ),
+        }
+    }
+    fn spec(&self, cx: &App) -> ibex_core::CreatorSpec {
+        ibex_core::CreatorSpec {
+            person_id: self.person_id,
+            role: self
+                .role
+                .read(cx)
+                .selected_values()
+                .first()
+                .copied()
+                .unwrap_or(ibex_core::CreatorRole::Author),
+            credited_as: NonEmptyStr::try_new(self.credited_as.read(cx).value().trim()).ok(),
+        }
+    }
+}
+
 /// The edit form's widgets plus the raw record they edit. Inputs are
 /// prefilled from the record at construction; saving reads them back into
 /// an [`EditDraft`] and builds the full-replace payload. The parent box
@@ -1961,14 +2060,21 @@ enum EditFetch {
 /// [`LibraryApp::request_edit`]).
 struct EditForm {
     record: Box<Resource>,
+    favorite: bool,
     title: Entity<InputState>,
     kind: Entity<ComboboxState<SearchableVec<KindItem>>>,
     parent: Entity<ComboboxState<SearchableVec<ParentItem>>>,
     creators: Entity<ComboboxState<PersonDelegate>>,
+    creator_rows: Vec<CreatorRow>,
+    next_creator_key: u64,
+    people_names: HashMap<PersonId, String>,
     publisher: Entity<InputState>,
-    published_year: Entity<InputState>,
-    accessed_year: Entity<InputState>,
-    series: Entity<InputState>,
+    fields: BTreeMap<BibliographicField, BibliographicInput>,
+    series: Entity<ComboboxState<SeriesDelegate>>,
+    series_options: Vec<ibex_core::Series>,
+    series_selected: Option<ibex_core::SeriesId>,
+    series_loading: bool,
+    series_creating: bool,
     series_number: Entity<InputState>,
     /// Tags staged for save: order matches the form rows; the Combobox
     /// adds, the row × removes, neither writes until Save.
@@ -2040,22 +2146,27 @@ impl EditForm {
             ComboboxState::new(SearchableVec::new(Vec::new()), Vec::new(), window, cx)
                 .searchable(true)
         });
-        let items = person_items(people);
-        let selected: Vec<IndexPath> = draft
+        let creators = cx.new(|cx| {
+            ComboboxState::new(PersonDelegate::new(people), Vec::new(), window, cx).searchable(true)
+        });
+        let people_names: HashMap<_, _> = people.iter().map(|p| (p.id, p.name.display())).collect();
+        let creator_rows = draft
             .creators
             .iter()
-            .filter_map(|spec| {
-                items
-                    .iter()
-                    .position(|item| item.choice == PersonChoice::Existing(spec.person_id))
-                    .map(IndexPath::new)
+            .enumerate()
+            .map(|(ix, spec)| {
+                CreatorRow::new(
+                    ix as u64,
+                    spec.clone(),
+                    people_names
+                        .get(&spec.person_id)
+                        .cloned()
+                        .unwrap_or_else(|| "Unknown person".into()),
+                    window,
+                    cx,
+                )
             })
             .collect();
-        let creators = cx.new(|cx| {
-            ComboboxState::new(PersonDelegate::new(people), selected, window, cx)
-                .multiple(true)
-                .searchable(true)
-        });
         // A parent valid for the old kind is off-kind for the new one, and
         // a kind that forbids parents empties the box outright, so every
         // kind change re-keys the parent options.
@@ -2104,14 +2215,41 @@ impl EditForm {
             kind,
             parent,
             creators,
+            creator_rows,
+            next_creator_key: draft.creators.len() as u64,
+            people_names,
             publisher: prefill_input(draft.publisher, "Publisher", window, cx),
-            published_year: prefill_input(draft.published_year, "Year", window, cx),
-            accessed_year: prefill_input(draft.accessed_year, "Year", window, cx),
-            series: prefill_input(draft.series, "Series id", window, cx),
+            fields: BibliographicField::ALL
+                .iter()
+                .map(|field| {
+                    let value = draft.fields.get(field).cloned().unwrap_or_default();
+                    let input = if field.multiline() {
+                        let input = cx.new(|cx| {
+                            TextareaState::new(window, cx)
+                                .rows(3)
+                                .placeholder(field.label())
+                        });
+                        input.update(cx, |input, cx| input.set_value(value, window, cx));
+                        BibliographicInput::Multiline(input)
+                    } else {
+                        BibliographicInput::Single(prefill_input(value, field.label(), window, cx))
+                    };
+                    (*field, input)
+                })
+                .collect(),
+            series: cx.new(|cx| {
+                ComboboxState::new(SeriesDelegate::new(&[]), Vec::new(), window, cx)
+                    .searchable(true)
+            }),
+            series_options: Vec::new(),
+            series_selected: record.series_id,
+            series_loading: true,
+            series_creating: false,
             series_number: prefill_input(draft.series_number, "e.g. LCL 26", window, cx),
             tags,
             collections,
             author_creating: false,
+            favorite: record.favorite,
             record: Box::new(record),
             error: None,
             saving: false,
@@ -2126,7 +2264,13 @@ impl EditForm {
     /// parent.
     fn draft(&self, cx: &App) -> EditDraft {
         let value = |input: &Entity<InputState>| input.read(cx).value().to_string();
+        let original = prefill_draft(&self.record);
         EditDraft {
+            fields: self
+                .fields
+                .iter()
+                .map(|(field, input)| (*field, input.value(cx)))
+                .collect(),
             title: value(&self.title),
             kind: self
                 .kind
@@ -2137,14 +2281,14 @@ impl EditForm {
                 .unwrap_or(self.record.kind),
             parent: self.parent.read(cx).selected_values().first().cloned(),
             publisher: value(&self.publisher),
-            published_year: value(&self.published_year),
-            accessed_year: value(&self.accessed_year),
-            series: value(&self.series),
+            published_year: original.published_year,
+            accessed_year: original.accessed_year,
+            series: match self.series.read(cx).selected_values().first() {
+                Some(SeriesChoice::Existing(id)) => id.to_string(),
+                _ => String::new(),
+            },
             series_number: value(&self.series_number),
-            creators: creators_from_person_ids(
-                &selected_person_ids(&self.creators.read(cx).selected_values()),
-                &self.record.to_new().creators,
-            ),
+            creators: self.creator_rows.iter().map(|row| row.spec(cx)).collect(),
             tag_ids: self.tags.iter().map(|tag| tag.id).collect(),
             collection_ids: self.collections.iter().map(|c| c.id).collect(),
         }
@@ -2751,6 +2895,7 @@ impl LibraryApp {
             jev_endpoint: crate::jev::DECISIONS_URL.to_owned(),
             rules_window: None,
             edit: None,
+            edit_generation: 0,
             detail_gens: HashMap::new(),
             last_escape_at: None,
             inline_trap: cx.focus_handle(),
@@ -4780,6 +4925,55 @@ impl LibraryApp {
 
     /// Both author comboboxes create people through the worker, then select the
     /// saved id on the same still-open form. A late reply cannot edit a new form.
+    fn move_creator(&mut self, key: u64, direction: isize, cx: &mut Context<Self>) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        if form.saving {
+            return;
+        }
+        let Some(ix) = form.creator_rows.iter().position(|r| r.key == key) else {
+            return;
+        };
+        if let Some(next) = ix
+            .checked_add_signed(direction)
+            .filter(|next| *next < form.creator_rows.len())
+        {
+            form.creator_rows.swap(ix, next);
+            cx.notify();
+        }
+    }
+
+    fn add_creator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        if form.saving || form.author_creating {
+            return;
+        }
+        for id in selected_person_ids(&form.creators.read(cx).selected_values()) {
+            let name = form
+                .people_names
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| "Unknown person".into());
+            let spec = ibex_core::CreatorSpec {
+                person_id: id,
+                role: ibex_core::CreatorRole::Author,
+                credited_as: None,
+            };
+            form.creator_rows.push(CreatorRow::new(
+                form.next_creator_key,
+                spec,
+                name,
+                window,
+                cx,
+            ));
+            form.next_creator_key += 1;
+        }
+        cx.notify();
+    }
+
     fn wire_author_creation(
         picker: &Entity<ComboboxState<PersonDelegate>>,
         window: &mut Window,
@@ -4878,6 +5072,9 @@ impl LibraryApp {
                         }
                         let error = match result {
                             Ok((person, people)) => {
+                                if !inline && let Some(EditFetch::Ready(form)) = &mut app.edit {
+                                    form.people_names.insert(person.id, person.name.display());
+                                }
                                 let mut values: Vec<_> = picker
                                     .read(cx)
                                     .selected_values()
@@ -5223,6 +5420,128 @@ impl LibraryApp {
         .detach();
     }
 
+    fn load_series_options(
+        &mut self,
+        picker: Entity<ComboboxState<SeriesDelegate>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let result = worker.list_series().await;
+            _ = app.update_in(window, |app, window, cx| {
+                let Some(EditFetch::Ready(form)) = &mut app.edit else {
+                    return;
+                };
+                if form.series != picker {
+                    return;
+                }
+                match result {
+                    Ok(options) => {
+                        let selected = form.record.series_id.map(SeriesChoice::Existing);
+                        picker.update(cx, |state, cx| {
+                            state.set_items(SeriesDelegate::new(&options), window, cx);
+                            state.set_selected_values(
+                                &selected.into_iter().collect::<Vec<_>>(),
+                                window,
+                                cx,
+                            );
+                        });
+                        form.series_options = options;
+                        form.series_loading = false;
+                        form.error = None;
+                    }
+                    Err(err) => {
+                        form.error = Some(format!(
+                            "Could not load series: {err}. Cancel and reopen to retry."
+                        ))
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn wire_series_creation(
+        picker: &Entity<ComboboxState<SeriesDelegate>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe_in(
+            picker,
+            window,
+            |app, picker, event: &ComboboxEvent<SeriesDelegate>, window, cx| {
+                let ComboboxEvent::Change(choices) = event else {
+                    return;
+                };
+                let Some(EditFetch::Ready(form)) = &mut app.edit else {
+                    return;
+                };
+                if form.series != *picker
+                    || form.series_creating
+                    || form.series_loading
+                    || form.saving
+                {
+                    return;
+                }
+                let Some(SeriesChoice::Create(title)) = choices.first() else {
+                    form.series_selected = choices.first().and_then(|choice| match choice {
+                        SeriesChoice::Existing(id) => Some(*id),
+                        SeriesChoice::Create(_) => None,
+                    });
+                    return;
+                };
+                let title = title.clone();
+                let previous = form.series_selected.map(SeriesChoice::Existing);
+                picker.update(cx, |state, cx| {
+                    state.set_selected_values(&previous.into_iter().collect::<Vec<_>>(), window, cx)
+                });
+                form.series_creating = true;
+                form.error = None;
+                let picker = picker.clone();
+                let worker = app.table.read(cx).delegate().worker().clone();
+                cx.notify();
+                cx.spawn_in(window, async move |app, window| {
+                    let result = worker.create_series(title).await;
+                    _ = app.update_in(window, |app, window, cx| {
+                        let Some(EditFetch::Ready(form)) = &mut app.edit else {
+                            return;
+                        };
+                        if form.series != picker {
+                            return;
+                        }
+                        form.series_creating = false;
+                        match result {
+                            Ok(series) => {
+                                let id = series.id;
+                                form.series_options.push(series);
+                                picker.update(cx, |state, cx| {
+                                    state.set_items(
+                                        SeriesDelegate::new(&form.series_options),
+                                        window,
+                                        cx,
+                                    );
+                                    state.set_selected_values(
+                                        &[SeriesChoice::Existing(id)],
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                            Err(err) => {
+                                form.error = Some(format!("Could not create series: {err}"))
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            },
+        )
+        .detach();
+    }
+
     /// Open the edit form for the selected resource: fetch the raw record
     /// (the panel's projection drops the ids the form needs), then open
     /// the prefilled widgets — the parent box empty until its options land,
@@ -5248,6 +5567,8 @@ impl LibraryApp {
         }
         self.cancel_inline(cx);
         self.edit = Some(EditFetch::Loading(id));
+        self.edit_generation += 1;
+        let generation = self.edit_generation;
         self.detail_open = true;
         let worker = self.table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
@@ -5256,6 +5577,11 @@ impl LibraryApp {
                 Err(err) => Err(err),
             };
             _ = app.update_in(window, |app, window, cx| {
+                if app.edit_generation != generation
+                    || !matches!(app.edit, Some(EditFetch::Loading(loading)) if loading == id)
+                {
+                    return;
+                }
                 match reply {
                     Ok((record, people)) => {
                         // The selection moved or re-clicked Edit since the
@@ -5278,7 +5604,10 @@ impl LibraryApp {
                             );
                             let title = form.title.clone();
                             Self::wire_author_creation(&form.creators, window, cx);
+                            Self::wire_series_creation(&form.series, window, cx);
+                            let series_picker = form.series.clone();
                             app.edit = Some(EditFetch::Ready(Box::new(form)));
+                            app.load_series_options(series_picker, window, cx);
                             // Land the caret in the title so `e` opens ready
                             // to type; parent options load in the background.
                             title.update(cx, |state, cx| {
@@ -5412,6 +5741,11 @@ impl LibraryApp {
 
     /// Close the form without writing; the panel falls back to the detail.
     fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(&self.edit, Some(EditFetch::Ready(form)) if form.saving) {
+            return;
+        }
+        self.edit_generation += 1;
+        self.focus_table(window, cx);
         self.edit = None;
         self.sync_tag_picker(window, cx);
         cx.notify();
@@ -5425,10 +5759,12 @@ impl LibraryApp {
         let Some(EditFetch::Ready(form)) = &self.edit else {
             return;
         };
-        if form.saving || form.author_creating {
+        if form.saving || form.author_creating || form.series_loading || form.series_creating {
             return;
         }
         let record = form.record.clone();
+        let favorite = form.favorite;
+        let form_identity = form.title.clone();
         let draft = form.draft(cx);
         let new = match build_update(&record, &draft) {
             Ok(new) => new,
@@ -5451,8 +5787,13 @@ impl LibraryApp {
         self.focus_table(window, cx);
         let worker = self.table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
-            let reply = worker.update_resource(id, new).await;
+            let reply = match worker.update_resource(id, new).await {
+                Ok(resource) if favorite != resource.favorite => worker.set_resource_favorite(id, favorite).await
+                    .map_err(|err| format!("Bibliography saved, but favorite could not be saved: {err}. Retry Save.")),
+                other => other,
+            };
             _ = app.update_in(window, |app, window, cx| {
+                if !matches!(&app.edit, Some(EditFetch::Ready(form)) if form.title == form_identity) { return; }
                 match reply {
                     Ok(_) => {
                         if content_changed {
@@ -6342,7 +6683,8 @@ impl LibraryApp {
     /// dropdown of library titles, not an id to type: users pick the
     /// containing work by name.
     fn render_edit_panel(&self, form: &EditForm, cx: &mut Context<Self>) -> Div {
-        let saving = form.saving || form.author_creating;
+        let saving =
+            form.saving || form.author_creating || form.series_loading || form.series_creating;
         let error = form.error.clone();
         let danger = cx.theme().danger;
 
@@ -6352,13 +6694,6 @@ impl LibraryApp {
             .w_full()
             .bg(cx.theme().background)
             .text_size(FIELD_TEXT_SIZE)
-            .child(
-                v_flex()
-                    .id("edit-panel")
-                    .size_full()
-                    .p_3()
-                    .gap_2()
-                    .overflow_y_scroll()
                     .child(
                         h_flex()
                             .justify_end()
@@ -6368,6 +6703,7 @@ impl LibraryApp {
                                     .ghost()
                                     .small()
                                     .label("Cancel")
+                                    .disabled(form.saving)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.cancel_edit(window, cx)
                                     })),
@@ -6378,15 +6714,26 @@ impl LibraryApp {
                                     .small()
                                     .label("Save")
                                     .loading(saving)
+                                    .disabled(saving)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.save_edit(window, cx)
                                     })),
                             ),
                     )
+            .child(
+                v_flex().id("edit-panel").test_support().flex_1().min_h_0().w_full().p_3().gap_2().overflow_y_scroll()
+                    .capture_action(cx.listener(|app, action: &Enter, window, cx| {
+                        if action.secondary { app.save_edit(window, cx); } else { cx.propagate(); }
+                    }))
                     .when_some(error, |el, error| {
                         el.child(div().text_xs().text_color(danger).child(error))
                     })
                     .child(edit_field("Title", padded_input(&form.title).w_full()))
+                    .child(edit_field("Favorite", Button::new("edit-favorite").ghost().small()
+                        .label(if form.favorite { "★ Favorite" } else { "☆ Not favorite" }).selected(form.favorite).disabled(saving)
+                        .on_click(cx.listener(|app, _, _, cx| {
+                            if let Some(EditFetch::Ready(form)) = &mut app.edit { form.favorite = !form.favorite; cx.notify(); }
+                        }))))
                     .child(edit_field(
                         "Kind",
                         Combobox::new(&form.kind)
@@ -6404,32 +6751,67 @@ impl LibraryApp {
                             .cleanable(true)
                             .w_full(),
                     ))
-                    .child(edit_field(
-                        "Authors",
-                        Combobox::new(&form.creators)
-                            .small()
-                            .placeholder("Add authors")
-                            .search_placeholder("Search people")
-                            .cleanable(true)
-                            .w_full(),
+                    .child(edit_field("Creators",
+                        v_flex().w_full().gap_2()
+                            .children(form.creator_rows.iter().enumerate().map(|(ix, row)| {
+                                let key = row.key;
+                                v_flex().id(SharedString::from(format!("creator-row-{key}"))).gap_1().w_full()
+                                    .child(div().child(row.name.clone()))
+                                    .child(div().id(SharedString::from(format!("creator-role-{key}"))).test_support().w_full().child(
+                                        Combobox::new(&row.role).small().placeholder("Role").search_placeholder("Search roles").disabled(saving).w_full()
+                                    ))
+                                    .child(div().id(SharedString::from(format!("creator-credit-{key}"))).test_support().w_full().child(
+                                        Input::new(&row.credited_as).small().aria_label("Credited as").disabled(saving).w_full()
+                                    ))
+                                    .child(h_flex().gap_1()
+                                        .child(Button::new(SharedString::from(format!("creator-up-{key}"))).ghost().xsmall().label("Move up").disabled(saving || ix == 0)
+                                            .on_click(cx.listener(move |app, _, _, cx| app.move_creator(key, -1, cx))))
+                                        .child(Button::new(SharedString::from(format!("creator-down-{key}"))).ghost().xsmall().label("Move down").disabled(saving || ix + 1 == form.creator_rows.len())
+                                            .on_click(cx.listener(move |app, _, _, cx| app.move_creator(key, 1, cx))))
+                                        .child(Button::new(SharedString::from(format!("creator-remove-{key}"))).ghost().xsmall().label("Remove").tooltip("Remove creator").disabled(saving)
+                                            .on_click(cx.listener(move |app, _, _, cx| {
+                                                if let Some(EditFetch::Ready(form)) = &mut app.edit { form.creator_rows.retain(|r| r.key != key); cx.notify(); }
+                                            })))
+                                    )
+                            }))
+                            .child(div().id("add-creator-person").test_support().w_full().child(
+                                Combobox::new(&form.creators).small().placeholder("Select or create person").search_placeholder("Search people").disabled(saving).w_full()
+                            ))
+                            .child(Button::new("add-creator").ghost().small().label("Add creator").disabled(saving)
+                                .on_click(cx.listener(|app, _, window, cx| app.add_creator(window, cx))))
                     ))
                     .child(edit_field(
                         "Publisher",
                         padded_input(&form.publisher).w_full(),
                     ))
                     .child(edit_field(
-                        "Published",
-                        padded_input(&form.published_year).w_full(),
+                        "Series",
+                        div().id("edit-series").test_support().w_full().child(
+                            Combobox::new(&form.series)
+                                .small()
+                                .placeholder(if form.series_loading {
+                                    "Loading series…"
+                                } else {
+                                    "Select series"
+                                })
+                                .search_placeholder("Search or create series")
+                                .cleanable(true)
+                                .disabled(saving)
+                                .w_full(),
+                        ),
                     ))
-                    .child(edit_field(
-                        "Accessed",
-                        padded_input(&form.accessed_year).w_full(),
-                    ))
-                    .child(edit_field("Series", padded_input(&form.series).w_full()))
                     .child(edit_field(
                         "Series no.",
                         padded_input(&form.series_number).w_full(),
                     ))
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Dates: YYYY, YYYY-MM, YYYY-MM-DD or RFC3339; ranges use /; append ? (uncertain) or ~ (approximate). Display text is optional."))
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Lists (identifiers and keywords): one entry per line, not commas."))
+                    .children(BibliographicField::ALL.iter().map(|field| {
+                        let input = &form.fields[field];
+                        v_flex().gap_1().w_full()
+                            .when(*field == BibliographicField::Citekey, |el| el.child(div().text_xs().child("Advanced metadata")))
+                            .child(edit_field(field.label(), div().id(SharedString::from(format!("edit-field-{field:?}"))).test_support().w_full().child(input.render(*field, saving))))
+                    }))
                     .child(edit_field(
                         "Tags",
                         v_flex()
@@ -10742,6 +11124,469 @@ mod classification_tests {
         })
         .unwrap();
         settle(cx, &f.worker);
+    }
+
+    #[gpui_kit::test]
+    fn details_series_create_select_save_and_cancel(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-series", cx);
+            window.input("Studies in bibliography", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let series = rt.block_on(f.worker.list_series()).unwrap();
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].title.as_str(), "Studies in bibliography");
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource))
+                .unwrap()
+                .series_id,
+            Some(series[0].id)
+        );
+        cx.update_window(f.handle, |_, window, cx| {
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-series", cx);
+            window.input("Cancelled series", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cancel-edit", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource))
+                .unwrap()
+                .series_id,
+            Some(series[0].id)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn details_all_fields_save_and_reopen(cx: &mut TestAppContext) {
+        use crate::edit::{BibliographicField as F, prefill_draft};
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let values: Vec<_> = F::ALL
+            .iter()
+            .map(|field| {
+                (
+                    *field,
+                    match field {
+                        F::Published | F::Accessed | F::OriginalDate | F::EventDate => "2024-02-29",
+                        F::Isbns => "9780306406157",
+                        F::Issns => "2049-3630",
+                        F::Isrns => "TEST-2024",
+                        F::Pages => "12–19",
+                        _ => "Edited value",
+                    },
+                )
+            })
+            .collect();
+        for (field, value) in &values {
+            cx.update_window(f.handle, |_, window, cx| {
+                window.render_frame(cx);
+                let id = gpui_kit::SharedString::from(format!("edit-field-{field:?}"));
+                for _ in 0..60 {
+                    let viewport = window.find("edit-panel").bounds();
+                    if window.try_find(id.clone()).is_some_and(|s| {
+                        s.visible()
+                            && s.bounds().top() >= viewport.top()
+                            && s.bounds().bottom() <= viewport.bottom()
+                    }) {
+                        break;
+                    }
+                    window.scroll(
+                        "edit-panel",
+                        gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                            gpui_kit::px(0.),
+                            gpui_kit::px(-100.),
+                        )),
+                        cx,
+                    );
+                }
+                window.click(id, cx);
+                window.press("cmd-a", cx);
+                window.input(value, cx);
+                assert!(
+                    window.find("save-edit").visible(),
+                    "Save must stay visible while scrolling"
+                );
+            })
+            .unwrap();
+        }
+        cx.update_window(f.handle, |_, window, cx| {
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+        let draft = prefill_draft(&saved);
+        for (field, value) in values {
+            assert_eq!(draft.fields[&field], value, "{field:?}");
+        }
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        f.app.read_with(cx, |app, cx| {
+            let Some(super::EditFetch::Ready(form)) = &app.edit else {
+                panic!("form should reopen")
+            };
+            assert_eq!(form.draft(cx).fields, draft.fields);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn details_creator_roles_credit_and_order_roundtrip(cx: &mut TestAppContext) {
+        use ibex_core::{CreatorRole as R, CreatorSpec, Name};
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let person =
+            rt.block_on(f.worker.create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            ))
+            .unwrap();
+        let mut new = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        new.creators = vec![
+            CreatorSpec {
+                person_id: person.id,
+                role: R::Author,
+                credited_as: Some(NonEmptyStr::try_new("A. L.").unwrap()),
+            },
+            CreatorSpec {
+                person_id: person.id,
+                role: R::Editor,
+                credited_as: Some(NonEmptyStr::try_new("Ada").unwrap()),
+            },
+        ];
+        rt.block_on(f.worker.update_resource(f.resource, new))
+            .unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("creator-credit-1", cx);
+            window.press("cmd-a", cx);
+            window.input("Augusta Ada", cx);
+            window.click("creator-role-1", cx);
+            window.input("Translator", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("creator-up-1", cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        assert_eq!(
+            saved.creators,
+            vec![
+                CreatorSpec {
+                    person_id: person.id,
+                    role: R::Translator,
+                    credited_as: Some(NonEmptyStr::try_new("Augusta Ada").unwrap())
+                },
+                CreatorSpec {
+                    person_id: person.id,
+                    role: R::Author,
+                    credited_as: Some(NonEmptyStr::try_new("A. L.").unwrap())
+                },
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn details_favorite_is_staged_until_save(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-favorite", cx);
+            window.click("cancel-edit", cx);
+        })
+        .unwrap();
+        assert!(!rt.block_on(f.worker.resource(f.resource)).unwrap().favorite);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-favorite", cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        assert!(rt.block_on(f.worker.resource(f.resource)).unwrap().favorite);
+    }
+
+    #[gpui_kit::test]
+    fn details_create_person_add_remove_preserves_all_other_roles(cx: &mut TestAppContext) {
+        use ibex_core::{CreatorRole::*, CreatorSpec, Name};
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let person =
+            rt.block_on(f.worker.create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            ))
+            .unwrap();
+        let mut new = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        let roles = [Author, Editor, Translator, Contributor, Host, Director];
+        new.creators = roles
+            .iter()
+            .map(|role| CreatorSpec {
+                person_id: person.id,
+                role: *role,
+                credited_as: Some(NonEmptyStr::try_new("A. L.").unwrap()),
+            })
+            .collect();
+        let expected = new.creators[1..].to_vec();
+        rt.block_on(f.worker.update_resource(f.resource, new))
+            .unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("creator-remove-0", cx);
+            reveal_edit_control("add-creator-person", window, cx);
+            window.click("add-creator-person", cx);
+            window.input("Grace Hopper", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("add-creator", window, cx);
+            window.click("add-creator", cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        assert_eq!(&saved.creators[..5], expected);
+        assert_eq!(saved.creators.len(), 6);
+        let people = rt.block_on(f.worker.list_persons()).unwrap();
+        let grace = people
+            .iter()
+            .find(|p| p.name.display() == "Grace Hopper")
+            .unwrap();
+        assert_eq!(saved.creators[5].person_id, grace.id);
+        assert_eq!(saved.creators[5].role, Author);
+    }
+
+    fn reveal_edit_control(id: &str, window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
+        let id = gpui_kit::SharedString::from(id.to_owned());
+        window.render_frame(cx);
+        for _ in 0..100 {
+            let viewport = window.find("edit-panel").bounds();
+            let target = window.find(id.clone());
+            if target.visible()
+                && target.bounds().top() >= viewport.top()
+                && target.bounds().bottom() <= viewport.bottom()
+            {
+                return;
+            }
+            let delta = if target.bounds().top() < viewport.top() {
+                100.
+            } else {
+                -100.
+            };
+            window.scroll(
+                "edit-panel",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                    gpui_kit::px(0.),
+                    gpui_kit::px(delta),
+                )),
+                cx,
+            );
+        }
+        panic!("Could not reveal {id}");
+    }
+
+    #[gpui_kit::test]
+    fn details_multiline_rich_dates_validate_and_cancel(cx: &mut TestAppContext) {
+        use crate::edit::{BibliographicField as F, prefill_draft};
+        let f = fixture(cx);
+        select_first(&f, cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let before = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        for save in [false, true] {
+            cx.update_window(f.handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("edit-resource", cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            for (field, text) in [
+                (F::AbstractText, "First paragraph\nSecond paragraph"),
+                (F::Keywords, "alpha\nbeta, gamma"),
+                (F::Published, "2023-02-29"),
+            ] {
+                cx.update_window(f.handle, |_, window, cx| {
+                    let id = format!("edit-field-{field:?}");
+                    reveal_edit_control(&id, window, cx);
+                    window.click(gpui_kit::SharedString::from(id), cx);
+                    window.press("cmd-a", cx);
+                    for (ix, line) in text.split('\n').enumerate() {
+                        if ix > 0 {
+                            window.press("shift-enter", cx);
+                        }
+                        window.input(line, cx);
+                    }
+                })
+                .unwrap();
+            }
+            cx.update_window(f.handle, |_, window, cx| {
+                window.click("save-edit", cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            f.app.read_with(cx, |app, _| {
+                let Some(super::EditFetch::Ready(form)) = &app.edit else {
+                    panic!("invalid date must keep the form open")
+                };
+                assert!(
+                    form.error
+                        .as_ref()
+                        .is_some_and(|error| error.contains("Published"))
+                );
+            });
+            assert_eq!(
+                rt.block_on(f.worker.resource(f.resource)).unwrap().to_new(),
+                before
+            );
+            cx.update_window(f.handle, |_, window, cx| {
+                reveal_edit_control("edit-field-Published", window, cx);
+                window.click("edit-field-Published", cx);
+                window.press("cmd-a", cx);
+                window.input("2024-02/2024-03~", cx);
+                window.click(if save { "save-edit" } else { "cancel-edit" }, cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+            if save {
+                assert_eq!(
+                    saved.abstract_text.as_deref(),
+                    Some("First paragraph\nSecond paragraph")
+                );
+                assert_eq!(saved.keywords, vec!["alpha", "beta, gamma"]);
+                assert_eq!(
+                    prefill_draft(&saved).fields[&F::Published],
+                    "2024-02/2024-03~"
+                );
+            } else {
+                assert_eq!(saved.to_new(), before);
+            }
+        }
+    }
+
+    #[gpui_kit::test]
+    fn details_multiline_cmd_enter_saves_without_inserting_newline(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("edit-field-AbstractText", window, cx);
+            window.click("edit-field-AbstractText", cx);
+            window.input("First", cx);
+            window.press("enter", cx);
+            window.input("Second", cx);
+            window.press("cmd-enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource))
+                .unwrap()
+                .abstract_text
+                .as_deref(),
+            Some("First\nSecond")
+        );
+        f.app.read_with(cx, |app, _| assert!(app.edit.is_none()));
     }
 
     #[gpui_kit::test]

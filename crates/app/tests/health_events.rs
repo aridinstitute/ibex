@@ -96,6 +96,9 @@ impl Store for HangStore {
         std::future::pending().await
     }
 
+    async fn list_series(&self) -> Result<Vec<Series>, StoreError> {
+        std::future::pending().await
+    }
     async fn get_series(&self, _id: SeriesId) -> Result<Series, StoreError> {
         std::future::pending().await
     }

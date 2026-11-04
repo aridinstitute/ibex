@@ -10,6 +10,7 @@ use ibex_app::command::{
     ListCollectionForest, ListPersons, ListResourcesQueryPage, ListTags, RemoveCollectionParent,
     RenameCollection, SetCollectionClassification, SetResourceFavorite, UpdateResource,
 };
+use ibex_app::command::{CreateSeries, ListSeries};
 use ibex_app::command::{ImportBiblatex, ImportReport, PreviewBiblatex};
 use ibex_app::{AppState, Command, Outcome};
 #[cfg(test)]
@@ -19,6 +20,7 @@ use ibex_core::{
     NewResource, NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId,
     ResourceQuery, SortedResourcePage, Tag,
 };
+use ibex_core::{NewSeries, Series};
 use ibex_core::{ResourceGridPage, ResourceGridParent};
 use std::{io::Read as _, path::PathBuf};
 use tokio::sync::oneshot;
@@ -100,6 +102,13 @@ pub enum DbRequest {
     CreatePerson {
         name: Name,
         reply: oneshot::Sender<Result<Person, String>>,
+    },
+    ListSeries {
+        reply: oneshot::Sender<Result<Vec<Series>, String>>,
+    },
+    CreateSeries {
+        title: String,
+        reply: oneshot::Sender<Result<Series, String>>,
     },
     ListTags {
         reply: oneshot::Sender<Result<Vec<Tag>, String>>,
@@ -446,6 +455,37 @@ impl DbWorker {
                                     });
                                 let _ = reply.send(result);
                             }
+                            DbRequest::ListSeries { reply } => {
+                                let result = state
+                                    .execute(Command::ListSeries(ListSeries))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::ListSeries(series) => Ok(series),
+                                        _ => Err("unexpected outcome from list_series".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::CreateSeries { title, reply } => {
+                                let result = async {
+                                    let title =
+                                        NonEmptyStr::try_new(title).map_err(|e| e.to_string())?;
+                                    state
+                                        .execute(Command::CreateSeries(CreateSeries {
+                                            new: NewSeries { title },
+                                        }))
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                        .and_then(|outcome| match outcome {
+                                            Outcome::CreateSeries(series) => Ok(series),
+                                            _ => {
+                                                Err("unexpected outcome from create_series".into())
+                                            }
+                                        })
+                                }
+                                .await;
+                                let _ = reply.send(result);
+                            }
                             DbRequest::ListTags { reply } => {
                                 let result = state
                                     .execute(Command::ListTags(ListTags))
@@ -754,6 +794,23 @@ impl DbWorker {
             .map_err(|_| "db worker dropped the request".to_string())?
     }
 
+    pub async fn list_series(&self) -> Result<Vec<Series>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::ListSeries { reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    pub async fn create_series(&self, title: String) -> Result<Series, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::CreateSeries { title, reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
     pub async fn list_tags(&self) -> Result<Vec<Tag>, String> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -1056,6 +1113,22 @@ mod tests {
     use ibex_core::CreatorRole;
     use ibex_core::published_label_from;
 
+    #[tokio::test]
+    async fn worker_lists_and_creates_series_with_surreal_store() {
+        let store = ibex_adapter_surreal::SurrealStore::open_memory()
+            .await
+            .unwrap();
+        let state = AppState::builder(store).surface(Surface::Test).build();
+        let worker = DbWorker::spawn(state);
+        assert!(worker.list_series().await.unwrap().is_empty());
+        assert!(worker.create_series("   ".into()).await.is_err());
+        let created = worker.create_series("Classics".into()).await.unwrap();
+        assert_eq!(created.title.as_str(), "Classics");
+        let listed = worker.list_series().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, created.id);
+        assert_eq!(listed[0].title.as_str(), "Classics");
+    }
     // Use the real adapter: MemoryStore does not exercise SurrealDB's stack usage.
     #[tokio::test]
     async fn worker_toggles_favorite_with_surreal_store() {

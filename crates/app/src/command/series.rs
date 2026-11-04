@@ -44,3 +44,24 @@ impl Handler for CreateSeries {
         Ok(Created(series))
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct ListSeries;
+
+pub(crate) struct Listed(pub Vec<Series>);
+
+impl From<Listed> for Outcome {
+    fn from(Listed(series): Listed) -> Self {
+        Outcome::ListSeries(series)
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for ListSeries {
+    const NAME: &'static str = "list_series";
+    type Output = Listed;
+
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<Listed, CommandError> {
+        Ok(Listed(state.store().list_series().await?))
+    }
+}

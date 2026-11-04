@@ -67,6 +67,13 @@ struct SeriesDoc {
     title: NonEmptyStr,
 }
 
+#[derive(Debug, SurrealValue)]
+struct SeriesRow {
+    id: RecordId,
+    #[surreal(wrap)]
+    title: NonEmptyStr,
+}
+
 #[derive(Debug, Clone, SurrealValue)]
 struct TagDoc {
     #[surreal(wrap)]
@@ -1894,6 +1901,22 @@ impl Store for SurrealStore {
         Ok(series)
     }
 
+    async fn list_series(&self) -> Result<Vec<Series>, StoreError> {
+        let mut response = self
+            .db
+            .query("SELECT id, title FROM series ORDER BY title ASC, id ASC")
+            .await
+            .map_err(map_err)?;
+        let rows: Vec<SeriesRow> = response.take(0).map_err(map_err)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(Series {
+                    id: Self::thing_to_series_id(&row.id)?,
+                    title: row.title,
+                })
+            })
+            .collect()
+    }
     async fn get_series(&self, id: SeriesId) -> Result<Series, StoreError> {
         let row: Option<SeriesDoc> = self
             .db
