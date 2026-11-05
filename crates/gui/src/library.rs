@@ -13,7 +13,7 @@ use series_picker::{SeriesChoice, SeriesDelegate};
 
 use std::{
     any::Any,
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     ops::Range,
     path::PathBuf,
     time::{Duration, Instant},
@@ -63,7 +63,7 @@ use crate::edit::{
     BibliographicField, EditDraft, FieldError, KindItem, build_create, build_update, kind_items,
     prefill_draft,
 };
-use crate::edit_layout::{FormField, Section};
+use crate::edit_layout::{self, FormField, Section};
 use crate::icons::symbol;
 use crate::import_dialog::{ConflictPolicy, ImportConfirmed, ImportDialog};
 use crate::inline_edit::{
@@ -2763,13 +2763,15 @@ impl DetailsValueDelegate {
                 ("vi", "Vietnamese"),
             ],
             F::DocumentType => &[
-                ("Thesis", "Thesis"),
-                ("Dissertation", "Dissertation"),
+                ("PhD thesis", "PhD thesis"),
+                ("Master's thesis", "Master's thesis"),
+                ("Bachelor's thesis", "Bachelor's thesis"),
                 ("Technical report", "Technical report"),
                 ("Working paper", "Working paper"),
-                ("Research article", "Research article"),
-                ("Review article", "Review article"),
-                ("Preprint", "Preprint"),
+                ("White paper", "White paper"),
+                ("Policy brief", "Policy brief"),
+                ("Letter", "Letter"),
+                ("Draft", "Draft"),
             ],
             F::PublicationMethod => &[
                 ("Print", "Print"),
@@ -3137,6 +3139,8 @@ struct EditForm {
     tags: Vec<Tag>,
     /// Collections staged for save (same attach pattern as tags).
     collections: Vec<Collection>,
+    /// Rows the user opened through "Add field…"; shown even while empty.
+    revealed: BTreeSet<FormField>,
     /// A rejected payload, shown on its row, or a failed save (no field),
     /// shown above the form; cleared by the next attempt.
     error: Option<FieldError>,
@@ -3275,7 +3279,7 @@ impl EditForm {
             ParentRule::Optional { expected } | ParentRule::Required { expected } => Some(expected),
             ParentRule::Forbidden => None,
         };
-        let form = Self {
+        let mut form = Self {
             title: prefill_input(draft.title, "Title", window, cx),
             kind,
             parent,
@@ -3354,6 +3358,7 @@ impl EditForm {
             series_creating: false,
             tags,
             collections,
+            revealed: BTreeSet::new(),
             author_creating: false,
             record: Box::new(record),
             error: None,
@@ -3388,7 +3393,72 @@ impl EditForm {
                 });
             }
         }
+        // Rows that open with data stay shown after the user clears them,
+        // so a row never vanishes mid-edit.
+        form.revealed = FormField::ORDER
+            .iter()
+            .copied()
+            .filter(|field| form.has_value(*field, cx))
+            .collect();
         form
+    }
+
+    /// The kind the form edits now: the kind box's selection, or the
+    /// stored kind while the box is cleared (the same rule save applies).
+    fn current_kind(&self, cx: &App) -> ResourceKind {
+        self.kind
+            .read(cx)
+            .selected_values()
+            .first()
+            .copied()
+            .unwrap_or(self.record.kind)
+    }
+
+    fn parent_set(&self, cx: &App) -> bool {
+        !self.parent.read(cx).selected_values().is_empty()
+    }
+
+    /// Whether the row's controls hold anything to save.
+    fn has_value(&self, field: FormField, cx: &App) -> bool {
+        use BibliographicField as F;
+        let filled = |bib: BibliographicField| !self.fields[&bib].value(cx).trim().is_empty();
+        match field {
+            FormField::Kind => true,
+            FormField::Title => !self.title.read(cx).value().trim().is_empty(),
+            FormField::Creators => !self.creator_rows.is_empty(),
+            FormField::Parent => self.parent_set(cx),
+            FormField::Series => self.series_selected.is_some(),
+            FormField::Identifiers => [F::Doi, F::Eprint, F::Isbns, F::Issns, F::Isrns]
+                .into_iter()
+                .any(filled),
+            FormField::Tags => !self.tags.is_empty(),
+            FormField::Collections => !self.collections.is_empty(),
+            FormField::Bib(bib) => filled(bib),
+        }
+    }
+
+    fn visible(&self, field: FormField, cx: &App) -> bool {
+        edit_layout::visible(
+            self.current_kind(cx),
+            field,
+            self.has_value(field, cx),
+            self.revealed.contains(&field),
+            self.parent_set(cx),
+        )
+    }
+
+    /// Hidden rows that "Add field…" can reveal, in panel order.
+    fn addable_fields(&self, cx: &App) -> Vec<FormField> {
+        let kind = self.current_kind(cx);
+        let parent_set = self.parent_set(cx);
+        FormField::ORDER
+            .iter()
+            .copied()
+            .filter(|field| {
+                !self.visible(*field, cx)
+                    && edit_layout::visible(kind, *field, false, true, parent_set)
+            })
+            .collect()
     }
 
     /// The inputs' current values as one plain draft. A cleared kind box
@@ -3404,13 +3474,7 @@ impl EditForm {
                 .map(|(field, input)| (*field, input.value(cx)))
                 .collect(),
             title: value(&self.title),
-            kind: self
-                .kind
-                .read(cx)
-                .selected_values()
-                .first()
-                .copied()
-                .unwrap_or(self.record.kind),
+            kind: self.current_kind(cx),
             parent: self.parent.read(cx).selected_values().first().cloned(),
             series: self
                 .series_selected
@@ -7904,10 +7968,16 @@ impl LibraryApp {
         let muted = cx.theme().muted_foreground;
         let mut sections = Vec::new();
         for section in Section::ALL {
-            let rows: Vec<Div> = FormField::ORDER
+            if section == Section::Organize {
+                sections.extend(self.render_add_field_menu(form, cx));
+            }
+            let fields: Vec<FormField> = FormField::ORDER
                 .iter()
                 .copied()
-                .filter(|field| field.section() == section)
+                .filter(|field| field.section() == section && form.visible(*field, cx))
+                .collect();
+            let rows: Vec<Div> = fields
+                .into_iter()
                 .map(|field| self.render_form_row(form, field, cx))
                 .collect();
             if rows.is_empty() {
@@ -7973,12 +8043,76 @@ impl LibraryApp {
             )
     }
 
+    /// "Add field…": a menu of the rows the kind hides, by their kind
+    /// labels. `None` when every row is already shown.
+    fn render_add_field_menu(&self, form: &EditForm, cx: &mut Context<Self>) -> Option<Div> {
+        let kind = form.current_kind(cx);
+        let addable: Vec<(FormField, &'static str)> = form
+            .addable_fields(cx)
+            .into_iter()
+            .map(|field| (field, field.label(kind)))
+            .collect();
+        if addable.is_empty() {
+            return None;
+        }
+        let app = cx.entity().downgrade();
+        Some(
+            h_flex().child(
+                Button::new("add-field-menu")
+                    .ghost()
+                    .small()
+                    .label("Add field…")
+                    .disabled(form.saving)
+                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, window, _cx| {
+                        let Some(app) = app.upgrade() else {
+                            return menu;
+                        };
+                        addable.iter().fold(menu, |menu, &(field, label)| {
+                            // `PopupMenuItem::new` takes no id; tests find the
+                            // item through the element's own id.
+                            menu.item(
+                                PopupMenuItem::element(move |_, _| {
+                                    div()
+                                        .id(SharedString::from(format!("add-field-{field:?}")))
+                                        .test_support()
+                                        .child(label)
+                                })
+                                .on_click(window.listener_for(
+                                    &app,
+                                    move |this, _, window, cx| {
+                                        this.reveal_form_field(field, window, cx)
+                                    },
+                                )),
+                            )
+                        })
+                    }),
+            ),
+        )
+    }
+
+    fn reveal_form_field(&mut self, field: FormField, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        form.revealed.insert(field);
+        if let FormField::Bib(bib) = field
+            && let BibliographicInput::Single(input) = &form.fields[&bib]
+        {
+            let input = input.clone();
+            // The menu restores focus as it dismisses; focus after it.
+            window.defer(cx, move |window, cx| {
+                input.update(cx, |input, cx| input.focus(window, cx))
+            });
+        }
+        cx.notify();
+    }
+
     /// One registry row: the label column plus the control that edits
     /// `field`, with the form's error underneath when it targets the row.
     fn render_form_row(&self, form: &EditForm, field: FormField, cx: &mut Context<Self>) -> Div {
         let saving = form.saving;
         let danger = cx.theme().danger;
-        let label = field.label(form.record.kind);
+        let label = field.label(form.current_kind(cx));
         match field {
             FormField::Kind => edit_field(
                 label,
@@ -8179,6 +8313,19 @@ impl LibraryApp {
                     .test_support()
                     .w_full()
                     .child(form.fields[&bib].render(bib, saving))
+                    .when(
+                        bib == BibliographicField::Venue && form.parent_set(cx),
+                        |el| {
+                            el.child(
+                                div()
+                                    .id("venue-parent-hint")
+                                    .test_support()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Not used while a parent is linked"),
+                            )
+                        },
+                    )
                     .children(field_error(form, field, danger)),
             ),
         }
@@ -12698,6 +12845,7 @@ mod classification_tests {
         })
         .unwrap();
         settle(cx, &f.worker);
+        reveal_all_fields(&f, cx);
         cx.update_window(f.handle, |_, window, cx| {
             window.render_frame(cx);
             reveal_edit_control("edit-field-PublicationMethod", window, cx);
@@ -12742,6 +12890,7 @@ mod classification_tests {
         })
         .unwrap();
         settle(cx, &f.worker);
+        reveal_all_fields(&f, cx);
         cx.update_window(f.handle, |_, window, cx| {
             window.render_frame(cx);
             let title = window.find("edit-label-Title").bounds();
@@ -12773,7 +12922,7 @@ mod classification_tests {
                         < gpui_kit::px(20.)
             );
             let kind = match &f.app.read(cx).edit {
-                Some(super::EditFetch::Ready(form)) => form.record.kind,
+                Some(super::EditFetch::Ready(form)) => form.current_kind(cx),
                 _ => panic!("form"),
             };
             let labels: Vec<&str> = super::FormField::ORDER
@@ -13054,6 +13203,7 @@ mod classification_tests {
         })
         .unwrap();
         settle(cx, &f.worker);
+        reveal_all_fields(&f, cx);
         cx.update_window(f.handle, |_, window, cx| {
             reveal_edit_control("edit-field-Published", window, cx);
             open_date_details("edit-field-Published", window, cx);
@@ -13299,6 +13449,7 @@ mod classification_tests {
             })
             .unwrap();
             settle(cx, &f.worker);
+            reveal_all_fields(&f, cx);
             for key in [
                 "Publisher",
                 "Institution",
@@ -13427,6 +13578,7 @@ mod classification_tests {
             })
             .unwrap();
             settle(cx, &f.worker);
+            reveal_all_fields(&f, cx);
             cx.update_window(f.handle, |_, window, cx| {
                 reveal_edit_control("edit-field-Language", window, cx);
                 if query.is_empty() {
@@ -13757,6 +13909,7 @@ mod classification_tests {
         })
         .unwrap();
         settle(cx, &f.worker);
+        reveal_all_fields(&f, cx);
         let values: Vec<_> = F::ALL
             .iter()
             // A series number is rejected without a series; edit.rs covers it.
@@ -14106,6 +14259,117 @@ mod classification_tests {
         assert!(rt.block_on(f.worker.resource(f.resource)).unwrap().favorite);
     }
 
+    /// Stores `edit` on the fixture's resource, then opens its edit form.
+    fn open_edit_with(
+        f: &Fixture,
+        cx: &mut TestAppContext,
+        edit: impl FnOnce(&mut ibex_core::NewResource),
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut source = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        edit(&mut source);
+        rt.block_on(f.worker.update_resource(f.resource, source))
+            .unwrap();
+        select_first(f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+    }
+
+    #[gpui_kit::test]
+    fn details_webpage_shows_its_fields_only(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        open_edit_with(&f, cx, |source| source.kind = ResourceKind::Webpage);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("edit-field-Url").is_some());
+            assert!(window.try_find("edit-field-Accessed").is_some());
+            assert!(window.try_find("edit-label-Website").is_some());
+            assert!(window.try_find("edit-field-Volume").is_none());
+            assert!(window.try_find("edit-field-Isbns").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn details_add_field_menu_reveals_a_hidden_row(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        open_edit_with(&f, cx, |_| {});
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("edit-field-Volume").is_none());
+            reveal_edit_control("add-field-menu", window, cx);
+            window.click("add-field-menu", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("add-field-Bib(TitleAddon)").is_some());
+            assert!(
+                window.try_find("add-field-Bib(Subtitle)").is_none(),
+                "Shown rows stay out of the menu"
+            );
+            window.click("add-field-Bib(Volume)", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("popup-menu").is_none());
+            assert!(window.try_find("edit-field-Volume").is_some());
+            let Some(super::EditFetch::Ready(form)) = &f.app.read(cx).edit else {
+                panic!("form")
+            };
+            let super::BibliographicInput::Single(volume) =
+                &form.fields[&crate::edit::BibliographicField::Volume]
+            else {
+                panic!("volume input")
+            };
+            let focus = gpui_kit::Focusable::focus_handle(volume.read(cx), cx);
+            assert!(focus.is_focused(window), "Volume takes focus");
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn details_kind_change_recomputes_visible_rows(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        open_edit_with(&f, cx, |_| {});
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("edit-field-Edition").is_some());
+            assert!(window.try_find("edit-field-Venue").is_none());
+            let Some(super::EditFetch::Ready(form)) = &f.app.read(cx).edit else {
+                panic!("form")
+            };
+            let kind = form.kind.clone();
+            kind.update(cx, |state, cx| {
+                state.set_selected_values(&[ResourceKind::JournalArticle], window, cx)
+            });
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("edit-label-Parent").is_some());
+            assert!(window.try_find("edit-field-Venue").is_some());
+            assert!(window.try_find("edit-field-Edition").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn details_book_with_a_volume_still_shows_it(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        open_edit_with(&f, cx, |source| source.volume = Some("3".into()));
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("edit-field-Volume").is_some());
+            assert!(window.try_find("edit-field-Issue").is_none());
+        })
+        .unwrap();
+    }
+
     #[gpui_kit::test]
     fn details_sections_follow_the_registry_order(cx: &mut TestAppContext) {
         use super::{FormField, Section};
@@ -14119,10 +14383,29 @@ mod classification_tests {
         settle(cx, &f.worker);
         cx.update_window(f.handle, |_, window, cx| {
             window.render_frame(cx);
-            let kind = match &f.app.read(cx).edit {
-                Some(super::EditFetch::Ready(form)) => form.record.kind,
+            let (kind, shown): (_, Vec<FormField>) = match &f.app.read(cx).edit {
+                Some(super::EditFetch::Ready(form)) => (
+                    form.current_kind(cx),
+                    FormField::ORDER
+                        .iter()
+                        .copied()
+                        .filter(|field| form.visible(*field, cx))
+                        .collect(),
+                ),
                 _ => panic!("form"),
             };
+            let sections: Vec<Section> = Section::ALL
+                .into_iter()
+                .filter(|section| shown.iter().any(|field| field.section() == *section))
+                .collect();
+            for section in Section::ALL {
+                let id = gpui_kit::SharedString::from(format!("edit-section-{section:?}"));
+                assert_eq!(
+                    window.try_find(id).is_some(),
+                    sections.contains(&section),
+                    "{section:?} has a header only when it shows rows"
+                );
+            }
             let header = |section: Section| {
                 window
                     .find(gpui_kit::SharedString::from(format!(
@@ -14130,7 +14413,7 @@ mod classification_tests {
                     )))
                     .bounds()
             };
-            let headers: Vec<_> = Section::ALL.into_iter().map(header).collect();
+            let headers: Vec<_> = sections.iter().copied().map(header).collect();
             for pair in headers.windows(2) {
                 assert!(pair[0].bottom() <= pair[1].top());
             }
@@ -14144,11 +14427,11 @@ mod classification_tests {
             };
             let kind_row = row(FormField::Kind);
             assert!(headers[0].bottom() <= kind_row.top());
-            for field in &FormField::ORDER[1..] {
+            for field in &shown[1..] {
                 assert!(kind_row.bottom() <= row(*field).top(), "Kind precedes {field:?}");
             }
-            for field in FormField::ORDER {
-                let ix = Section::ALL
+            for field in &shown {
+                let ix = sections
                     .iter()
                     .position(|section| *section == field.section())
                     .unwrap();
@@ -14234,6 +14517,17 @@ mod classification_tests {
             window.render_frame(cx);
         }
         reveal_edit_control(id.as_ref(), window, cx);
+    }
+    /// Opens every row the kind hides, for tests that reach all fields.
+    fn reveal_all_fields(f: &Fixture, cx: &mut TestAppContext) {
+        f.app.update(cx, |app, cx| {
+            let Some(super::EditFetch::Ready(form)) = &mut app.edit else {
+                panic!("form")
+            };
+            form.revealed
+                .extend(super::FormField::ORDER.iter().copied());
+            cx.notify();
+        });
     }
     fn reveal_edit_control(id: &str, window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
         let id = gpui_kit::SharedString::from(id.to_owned());
