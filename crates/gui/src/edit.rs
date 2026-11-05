@@ -620,7 +620,7 @@ fn merge_date(
         .get(&field)
         .filter(|text| text.trim() != date_text(date.as_ref()));
     let mut changed = if let Some(text) = edited_full {
-        parse_date(field, text)?
+        parse_date_preserving_endpoints(field, text, date.as_ref())?
     } else if let Some((label, year)) =
         legacy.filter(|(_, year)| year.trim() != date_year(date.as_ref()))
     {
@@ -653,6 +653,47 @@ fn merge_date(
     }
     *date = changed;
     Ok(())
+}
+// Partial display precision is not permission to round an imported instant.
+// Merge endpoint edits independently, including a certainty-only edit.
+fn parse_date_preserving_endpoints(
+    field: BibliographicField,
+    text: &str,
+    original: Option<&BibliographicDate>,
+) -> Result<Option<BibliographicDate>, String> {
+    let parsed = parse_date(field, text)?;
+    let (Some(original), Some(parsed)) = (original, parsed.as_ref()) else {
+        return Ok(parsed);
+    };
+    let old = date_text(Some(original));
+    let endpoints = |text: &str| {
+        let text = text.trim().trim_end_matches(['?', '~']);
+        let (start, end) = text.split_once('/').unwrap_or((text, ""));
+        (start.to_owned(), end.to_owned())
+    };
+    let (old_start, old_end) = endpoints(&old);
+    let (start, end) = endpoints(text);
+    BibliographicDate::try_new_precise(
+        if start == old_start {
+            original.instant()
+        } else {
+            parsed.instant()
+        },
+        if end == old_end {
+            original.end()
+        } else {
+            parsed.end()
+        },
+        if start == old_start {
+            original.precision()
+        } else {
+            parsed.precision()
+        },
+        parsed.certainty(),
+        None,
+    )
+    .map(Some)
+    .map_err(|error| format!("{}: {error}", field.label()))
 }
 
 fn parse_date(field: BibliographicField, text: &str) -> Result<Option<BibliographicDate>, String> {

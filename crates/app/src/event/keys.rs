@@ -46,6 +46,10 @@ pub(crate) const RESOURCE_GRID_ROWS: Key = Key::new("resource.grid_rows");
 pub(crate) const RESOURCE_GRID_HAS_MORE: Key = Key::new("resource.grid_has_more");
 pub(crate) const RESOURCE_SORT_FIELD: Key = Key::new("resource.sort_field");
 pub(crate) const RESOURCE_SORT_DIRECTION: Key = Key::new("resource.sort_direction");
+pub(crate) const RESOURCE_SUGGESTION_FIELD: Key = Key::new("resource.suggestion_field");
+pub(crate) const RESOURCE_SUGGESTION_QUERY_LENGTH: Key =
+    Key::new("resource.suggestion_query_length");
+pub(crate) const RESOURCE_SUGGESTION_COUNT: Key = Key::new("resource.suggestion_count");
 pub(crate) const SERIES_ID: Key = Key::new("series.id");
 pub(crate) const SERIES_TITLE: Key = Key::new("series.title");
 pub(crate) const TAG_ID: Key = Key::new("tag.id");
@@ -104,6 +108,9 @@ mod tests {
         RESOURCE_GRID_HAS_MORE,
         RESOURCE_SORT_FIELD,
         RESOURCE_SORT_DIRECTION,
+        RESOURCE_SUGGESTION_FIELD,
+        RESOURCE_SUGGESTION_QUERY_LENGTH,
+        RESOURCE_SUGGESTION_COUNT,
         SERIES_ID,
         SERIES_TITLE,
         TAG_ID,

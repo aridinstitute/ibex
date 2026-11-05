@@ -59,6 +59,14 @@ struct HangStore;
 
 #[async_trait::async_trait]
 impl Store for HangStore {
+    async fn suggest_field_values(
+        &self,
+        _field: ibex_core::ResourceTextField,
+        _query: String,
+        _limit: u32,
+    ) -> Result<Vec<String>, StoreError> {
+        std::future::pending().await
+    }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         std::future::pending().await
     }

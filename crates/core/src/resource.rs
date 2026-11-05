@@ -5,6 +5,33 @@ use crate::{
     deserialize_identifiers, deserialize_pages_opt,
 };
 
+/// Scalar resource metadata supported by value autocomplete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResourceTextField {
+    Publisher,
+    Institution,
+    Organization,
+    School,
+    DocumentType,
+    PublicationMethod,
+    Language,
+}
+
+impl ResourceTextField {
+    /// Stable metadata field name; also the adapter's allowlisted column.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Publisher => "publisher",
+            Self::Institution => "institution",
+            Self::Organization => "organization",
+            Self::School => "school",
+            Self::DocumentType => "document_type",
+            Self::PublicationMethod => "publication_method",
+            Self::Language => "language",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ResourceId(ulid::Ulid);
 

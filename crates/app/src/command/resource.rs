@@ -13,6 +13,45 @@ use crate::event::{self, Event};
 use crate::{AppState, CommandError, Handler, Outcome};
 
 #[derive(Debug, Clone)]
+pub struct SuggestFieldValues {
+    pub field: ibex_core::ResourceTextField,
+    pub query: String,
+    pub limit: u32,
+}
+
+pub(crate) struct SuggestedFieldValues(pub Vec<String>);
+
+impl From<SuggestedFieldValues> for Outcome {
+    fn from(SuggestedFieldValues(values): SuggestedFieldValues) -> Self {
+        Outcome::SuggestFieldValues(values)
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for SuggestFieldValues {
+    const NAME: &'static str = "suggest_field_values";
+    type Output = SuggestedFieldValues;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::RESOURCE_SUGGESTION_FIELD, self.field.as_str());
+        ev.set(event::RESOURCE_PAGE_LIMIT, self.limit);
+        // Autocomplete records only the search size, never user-entered text.
+        ev.set(
+            event::RESOURCE_SUGGESTION_QUERY_LENGTH,
+            self.query.chars().count(),
+        );
+    }
+
+    async fn run(self, state: &AppState, ev: &mut Event) -> Result<Self::Output, CommandError> {
+        let values = state
+            .store()
+            .suggest_field_values(self.field, self.query, self.limit)
+            .await?;
+        ev.set(event::RESOURCE_SUGGESTION_COUNT, values.len());
+        Ok(SuggestedFieldValues(values))
+    }
+}
+#[derive(Debug, Clone)]
 pub struct CreateResource {
     pub new: NewResource,
 }

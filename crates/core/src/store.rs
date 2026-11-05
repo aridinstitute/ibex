@@ -86,6 +86,17 @@ pub trait Store: Send + Sync + 'static {
     /// Cheap liveness probe. Must not mutate state.
     async fn ping(&self) -> Result<StoreHealth, StoreError>;
 
+    /// Stored nonblank values of one scalar field, matching a case-insensitive
+    /// substring. Case-insensitive distinct values sort alphabetically by their
+    /// lowercase keys; duplicate spellings choose the lexically first original.
+    /// Empty query matches all values. Zero limit returns no values.
+    async fn suggest_field_values(
+        &self,
+        field: crate::ResourceTextField,
+        query: String,
+        limit: u32,
+    ) -> Result<Vec<String>, StoreError>;
+
     /// Insert a new person. Store allocates [`PersonId`], then [`Person::try_new`].
     async fn create_person(&self, name: Name, aliases: Vec<Name>) -> Result<Person, StoreError>;
 

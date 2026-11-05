@@ -624,6 +624,45 @@ impl Default for MemoryStore {
 
 #[async_trait::async_trait]
 impl Store for MemoryStore {
+    async fn suggest_field_values(
+        &self,
+        field: ibex_core::ResourceTextField,
+        query: String,
+        limit: u32,
+    ) -> Result<Vec<String>, StoreError> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        let query = query.to_lowercase();
+        let resources = self.resources.lock().expect("MemoryStore lock");
+        let mut values = std::collections::BTreeMap::<String, String>::new();
+        for row in resources.values() {
+            use ibex_core::ResourceTextField::*;
+            let value = match field {
+                Publisher => &row.publisher,
+                Institution => &row.institution,
+                Organization => &row.organization,
+                School => &row.school,
+                DocumentType => &row.document_type,
+                PublicationMethod => &row.publication_method,
+                Language => &row.language,
+            };
+            if let Some(value) = value {
+                let key = value.to_lowercase();
+                if !value.trim().is_empty() && key.contains(&query) {
+                    values
+                        .entry(key)
+                        .and_modify(|first| {
+                            if value < first {
+                                *first = value.clone();
+                            }
+                        })
+                        .or_insert_with(|| value.clone());
+                }
+            }
+        }
+        Ok(values.into_values().take(limit as usize).collect())
+    }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         Ok(StoreHealth {
             backend: "memory",
@@ -1594,6 +1633,14 @@ fn unsupported(op: &str) -> StoreError {
 
 #[async_trait::async_trait]
 impl Store for StubStore {
+    async fn suggest_field_values(
+        &self,
+        _field: ibex_core::ResourceTextField,
+        _query: String,
+        _limit: u32,
+    ) -> Result<Vec<String>, StoreError> {
+        Err(unsupported("suggest_field_values"))
+    }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         match &self.health {
             Ok(h) => Ok(h.clone()),

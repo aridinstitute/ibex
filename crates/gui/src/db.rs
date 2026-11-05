@@ -33,6 +33,12 @@ pub struct BiblatexImportPlan {
 }
 
 pub enum DbRequest {
+    SuggestFieldValues {
+        field: ibex_core::ResourceTextField,
+        query: String,
+        limit: u32,
+        reply: oneshot::Sender<Result<Vec<String>, String>>,
+    },
     PreviewBiblatex {
         path: PathBuf,
         reply: oneshot::Sender<Result<BiblatexImportPlan, String>>,
@@ -170,6 +176,24 @@ pub struct DbWorker {
 }
 
 impl DbWorker {
+    pub async fn suggest_field_values(
+        &self,
+        field: ibex_core::ResourceTextField,
+        query: String,
+        limit: u32,
+    ) -> Result<Vec<String>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::SuggestFieldValues {
+                field,
+                query,
+                limit,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
     /// Read a bibliography and build a shared preview (no writes).
     pub async fn preview_biblatex(&self, path: PathBuf) -> Result<BiblatexImportPlan, String> {
         let (tx, rx) = oneshot::channel();
@@ -325,6 +349,31 @@ impl DbWorker {
                                         Outcome::ResourceGridPage(page) => Ok(page),
                                         _ => Err("unexpected outcome from list_resource_grid_page"
                                             .into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::SuggestFieldValues {
+                                field,
+                                query,
+                                limit,
+                                reply,
+                            } => {
+                                let result = state
+                                    .execute(Command::SuggestFieldValues(
+                                        ibex_app::command::SuggestFieldValues {
+                                            field,
+                                            query,
+                                            limit,
+                                        },
+                                    ))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::SuggestFieldValues(values) => Ok(values),
+                                        _ => {
+                                            Err("unexpected outcome from suggest_field_values"
+                                                .into())
+                                        }
                                     });
                                 let _ = reply.send(result);
                             }
@@ -1105,6 +1154,76 @@ fn read_bibliography_file(path: &PathBuf) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn worker_suggests_stored_metadata_values() {
+        use ibex_core::{ResourceKind, ResourceTextField::*, Store};
+        let store = ibex_adapter_surreal::SurrealStore::open_memory()
+            .await
+            .unwrap();
+        for value in ["zeta Custom", "Alpha Custom", "alpha custom", "", "  "] {
+            let mut new =
+                crate::metadata::empty_resource("Not metadata", ResourceKind::Book).unwrap();
+            new.publisher = Some(value.into());
+            new.institution = Some(value.into());
+            new.organization = Some(value.into());
+            new.school = Some(value.into());
+            new.document_type = Some(value.into());
+            new.publication_method = Some(value.into());
+            new.language = Some(value.into());
+            store.create_resource(new).await.unwrap();
+        }
+        let worker = DbWorker::spawn(
+            AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
+                .build(),
+        );
+        for field in [
+            Publisher,
+            Institution,
+            Organization,
+            School,
+            DocumentType,
+            PublicationMethod,
+            Language,
+        ] {
+            assert_eq!(
+                worker
+                    .suggest_field_values(field, "UsTo".into(), 10)
+                    .await
+                    .unwrap(),
+                ["Alpha Custom", "zeta Custom"]
+            );
+            assert_eq!(
+                worker
+                    .suggest_field_values(field, "".into(), 1)
+                    .await
+                    .unwrap(),
+                ["Alpha Custom"]
+            );
+            assert_eq!(
+                worker
+                    .suggest_field_values(field, "".into(), 10)
+                    .await
+                    .unwrap(),
+                ["Alpha Custom", "zeta Custom"]
+            );
+            assert!(
+                worker
+                    .suggest_field_values(field, "".into(), 0)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert!(
+            worker
+                .suggest_field_values(Publisher, "Not metadata".into(), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
     use super::*;
     use ibex_app::Surface;
     use ibex_app::command::ListResources;

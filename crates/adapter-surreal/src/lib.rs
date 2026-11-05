@@ -1751,6 +1751,39 @@ fn open_error(path: &Path, err: surrealdb::Error) -> StoreError {
 
 #[async_trait::async_trait]
 impl Store for SurrealStore {
+    async fn suggest_field_values(
+        &self,
+        field: ibex_core::ResourceTextField,
+        query: String,
+        limit: u32,
+    ) -> Result<Vec<String>, StoreError> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        // Only the typed allowlist is interpolated; user text is always bound.
+        // Group and limit scalar projections in the database, not resource rows.
+        let column = field.as_str();
+        let sql = format!(
+            "SELECT VALUE value FROM (
+                SELECT key, array::first(array::sort(array::group(value))) AS value
+                FROM (
+                    SELECT {column} AS value, string::lowercase({column}) AS key
+                    FROM resource
+                    WHERE {column} != NONE AND string::trim({column}) != ''
+                        AND string::contains(string::lowercase({column}), $query)
+                )
+                GROUP BY key ORDER BY key LIMIT $limit
+            )"
+        );
+        let mut response = self
+            .db
+            .query(sql)
+            .bind(("query", query.to_lowercase()))
+            .bind(("limit", limit))
+            .await
+            .map_err(map_err)?;
+        response.take(0).map_err(map_err)
+    }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         self.db.query("RETURN true").await.map_err(map_err)?;
         Ok(StoreHealth {

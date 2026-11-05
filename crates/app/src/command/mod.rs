@@ -24,7 +24,7 @@ pub use person::{
 pub use resource::{
     AddAttachment, CountResources, CreateResource, GetResource, GetResourceDetail,
     ListResourceGridPage, ListResources, ListResourcesPage, ListResourcesQueryPage,
-    SetResourceFavorite, UpdateResource,
+    SetResourceFavorite, SuggestFieldValues, UpdateResource,
 };
 pub use series::{CreateSeries, ListSeries};
 pub use tag::{CreateTag, FindTagByText, GetTag, ListTags};
@@ -78,6 +78,7 @@ pub enum Command {
     ListResourcesQueryPage(ListResourcesQueryPage),
     ListResourceGridPage(ListResourceGridPage),
     CountResources(CountResources),
+    SuggestFieldValues(SuggestFieldValues),
 }
 
 /// The result of a successful command. One variant per [`Command`] variant.
@@ -121,6 +122,7 @@ pub enum Outcome {
     ListResourcesQueryPage(SortedResourcePage),
     ResourceGridPage(ResourceGridPage),
     CountResources(ResourceCounts),
+    SuggestFieldValues(Vec<String>),
 }
 
 /// A command plus per-call transport context.
@@ -191,6 +193,7 @@ impl Command {
             Command::ListResourcesQueryPage(_) => ListResourcesQueryPage::NAME,
             Command::ListResourceGridPage(_) => ListResourceGridPage::NAME,
             Command::CountResources(_) => CountResources::NAME,
+            Command::SuggestFieldValues(_) => SuggestFieldValues::NAME,
         }
     }
 }
@@ -251,6 +254,7 @@ pub(crate) async fn dispatch(
         Command::ListResourcesQueryPage(c) => drive(c, state, ev).await,
         Command::ListResourceGridPage(c) => drive(c, state, ev).await,
         Command::CountResources(c) => drive(c, state, ev).await,
+        Command::SuggestFieldValues(c) => drive(c, state, ev).await,
     }
 }
 
