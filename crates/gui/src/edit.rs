@@ -522,6 +522,199 @@ fn identifier_field(
         .collect())
 }
 
+/// What one entry of the identifiers row is. Each kind writes its own
+/// stored field; the badge names it in the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentifierKind {
+    Doi,
+    Isbn,
+    Issn,
+    Isrn,
+    Eprint,
+}
+
+impl IdentifierKind {
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::Doi => "DOI",
+            Self::Isbn => "ISBN",
+            Self::Issn => "ISSN",
+            Self::Isrn => "ISRN",
+            Self::Eprint => "arXiv",
+        }
+    }
+}
+
+const UNRECOGNIZED_IDENTIFIER: &str =
+    "Unrecognized identifier; prefix it with doi:, isbn:, issn:, isrn:, or arxiv:";
+
+/// Sorts one typed identifier into its kind: an explicit prefix wins, then
+/// DOI shapes, checksummed ISBNs, ISSNs, and arXiv ids. ISRNs have no
+/// recognizable shape, so they need their prefix. The value keeps the
+/// user's spelling minus any prefix.
+pub fn classify_identifier(text: &str) -> Result<(IdentifierKind, String), String> {
+    let text = text.trim();
+    if text.is_empty() || text.chars().any(char::is_control) {
+        return Err("Enter an identifier without control characters".into());
+    }
+    let strip = |prefix: &str| {
+        text.get(..prefix.len())
+            .filter(|head| head.eq_ignore_ascii_case(prefix))
+            .map(|_| text[prefix.len()..].trim())
+    };
+    let prefixed = [
+        ("doi:", IdentifierKind::Doi),
+        ("isbn:", IdentifierKind::Isbn),
+        ("issn:", IdentifierKind::Issn),
+        ("isrn:", IdentifierKind::Isrn),
+        ("arxiv:", IdentifierKind::Eprint),
+        ("eprint:", IdentifierKind::Eprint),
+        ("https://doi.org/", IdentifierKind::Doi),
+        ("http://doi.org/", IdentifierKind::Doi),
+        ("https://dx.doi.org/", IdentifierKind::Doi),
+        ("http://dx.doi.org/", IdentifierKind::Doi),
+    ];
+    if let Some((kind, value)) = prefixed
+        .iter()
+        .find_map(|(prefix, kind)| strip(prefix).map(|value| (*kind, value)))
+    {
+        return if value.is_empty() {
+            Err("Enter an identifier after the prefix".into())
+        } else {
+            Ok((kind, value.to_owned()))
+        };
+    }
+    let kind = if text.starts_with("10.") && text.contains('/') {
+        IdentifierKind::Doi
+    } else if is_isbn(text) {
+        IdentifierKind::Isbn
+    } else if is_issn(text) {
+        IdentifierKind::Issn
+    } else if is_arxiv(text) {
+        IdentifierKind::Eprint
+    } else {
+        return Err(UNRECOGNIZED_IDENTIFIER.into());
+    };
+    Ok((kind, text.to_owned()))
+}
+
+fn is_isbn(text: &str) -> bool {
+    let compact: Vec<char> = text.chars().filter(|c| !matches!(c, '-' | ' ')).collect();
+    let digit = |c: char| c.to_digit(10);
+    match compact.len() {
+        13 if compact.iter().all(char::is_ascii_digit)
+            && (compact.starts_with(&['9', '7', '8']) || compact.starts_with(&['9', '7', '9'])) =>
+        {
+            let sum: u32 = compact
+                .iter()
+                .enumerate()
+                .map(|(ix, c)| digit(*c).unwrap() * if ix % 2 == 0 { 1 } else { 3 })
+                .sum();
+            sum.is_multiple_of(10)
+        }
+        10 if compact[..9].iter().all(char::is_ascii_digit)
+            && (compact[9].is_ascii_digit() || compact[9] == 'X') =>
+        {
+            let sum: u32 = compact
+                .iter()
+                .enumerate()
+                .map(|(ix, c)| digit(*c).unwrap_or(10) * (10 - ix as u32))
+                .sum();
+            sum.is_multiple_of(11)
+        }
+        _ => false,
+    }
+}
+
+/// `\d{4}-?\d{3}[\dXx]`.
+fn is_issn(text: &str) -> bool {
+    let compact = text
+        .get(..4)
+        .filter(|_| text.as_bytes().get(4) == Some(&b'-'))
+        .map_or_else(|| text.to_owned(), |head| format!("{head}{}", &text[5..]));
+    let bytes = compact.as_bytes();
+    bytes.len() == 8
+        && bytes[..7].iter().all(u8::is_ascii_digit)
+        && (bytes[7].is_ascii_digit() || matches!(bytes[7], b'X' | b'x'))
+}
+
+/// New-style `\d{4}\.\d{4,5}(v\d+)?` or old-style
+/// `[a-z-]+(\.[A-Z]{2})?/\d{7}` arXiv ids.
+fn is_arxiv(text: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if let Some((year, rest)) = text.split_once('.')
+        && year.len() == 4
+        && digits(year)
+    {
+        let (number, version) = rest.split_once('v').unwrap_or((rest, "0"));
+        return (4..=5).contains(&number.len()) && digits(number) && digits(version);
+    }
+    let Some((archive, number)) = text.split_once('/') else {
+        return false;
+    };
+    let (name, class) = archive.split_once('.').unwrap_or((archive, "AB"));
+    !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')
+        && class.len() == 2
+        && class.bytes().all(|b| b.is_ascii_uppercase())
+        && number.len() == 7
+        && digits(number)
+}
+
+const IDENTIFIER_FIELDS: [(BibliographicField, IdentifierKind); 5] = [
+    (BibliographicField::Doi, IdentifierKind::Doi),
+    (BibliographicField::Eprint, IdentifierKind::Eprint),
+    (BibliographicField::Isbns, IdentifierKind::Isbn),
+    (BibliographicField::Issns, IdentifierKind::Issn),
+    (BibliographicField::Isrns, IdentifierKind::Isrn),
+];
+
+/// The draft's identifiers as one list: DOI, eprint, then ISBNs, ISSNs,
+/// and ISRNs in stored order.
+pub fn identifier_tokens(draft: &EditDraft) -> Vec<(IdentifierKind, String)> {
+    IDENTIFIER_FIELDS
+        .iter()
+        .flat_map(|(field, kind)| {
+            draft
+                .fields
+                .get(field)
+                .map(String::as_str)
+                .unwrap_or_default()
+                .lines()
+                .map(|line| (*kind, line.to_owned()))
+        })
+        .collect()
+}
+
+/// Writes the identifier list back into the draft's five fields. Lists keep
+/// token order, so unchanged identifiers still match the stored text and
+/// keep their canonical forms.
+pub fn apply_identifier_tokens(
+    draft: &mut EditDraft,
+    tokens: &[(IdentifierKind, String)],
+) -> Result<(), FieldError> {
+    for (field, kind) in IDENTIFIER_FIELDS {
+        let values: Vec<&str> = tokens
+            .iter()
+            .filter(|(token_kind, _)| *token_kind == kind)
+            .map(|(_, value)| value.as_str())
+            .collect();
+        if values.len() > 1 {
+            match kind {
+                IdentifierKind::Doi => {
+                    return Err(FieldError::at(FormField::Identifiers, "Only one DOI"));
+                }
+                IdentifierKind::Eprint => {
+                    return Err(FieldError::at(FormField::Identifiers, "Only one eprint"));
+                }
+                _ => {}
+            }
+        }
+        draft.fields.insert(field, values.join("\n"));
+    }
+    Ok(())
+}
+
 /// Person ids from a multi-select, merged into creator specs: keep role and
 /// credited-as when the person was already on the record, otherwise Author.
 pub fn creators_from_person_ids(
@@ -1532,5 +1725,163 @@ mod tests {
         for kind in ResourceKind::ALL {
             assert_eq!(items.iter().filter(|item| item.value() == &kind).count(), 1);
         }
+    }
+
+    #[test]
+    fn classify_identifier_honors_prefixes() {
+        use super::{IdentifierKind as K, classify_identifier};
+        for (text, kind, value) in [
+            (" DOI: 10.1/x ", K::Doi, "10.1/x"),
+            ("isbn:123", K::Isbn, "123"),
+            ("ISSN:abc", K::Issn, "abc"),
+            ("isrn:TEST-2024", K::Isrn, "TEST-2024"),
+            ("arXiv:2101.00001", K::Eprint, "2101.00001"),
+            ("eprint:custom", K::Eprint, "custom"),
+        ] {
+            assert_eq!(
+                classify_identifier(text),
+                Ok((kind, value.into())),
+                "{text}"
+            );
+        }
+        assert!(classify_identifier("doi:").is_err());
+    }
+
+    #[test]
+    fn classify_identifier_reads_doi_urls_and_bare_dois() {
+        use super::{IdentifierKind as K, classify_identifier};
+        for text in [
+            "https://doi.org/10.1000/xyz",
+            "http://dx.doi.org/10.1000/xyz",
+            "https://dx.doi.org/10.1000/xyz",
+            "10.1000/xyz",
+        ] {
+            assert_eq!(
+                classify_identifier(text),
+                Ok((K::Doi, "10.1000/xyz".into())),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_identifier_checks_isbn_checksums() {
+        use super::{IdentifierKind as K, classify_identifier};
+        for text in [
+            "978-0-306-40615-7",
+            "9780306406157",
+            "0-306-40615-2",
+            "080442957X",
+        ] {
+            assert_eq!(
+                classify_identifier(text),
+                Ok((K::Isbn, text.into())),
+                "{text}"
+            );
+        }
+        for text in ["978-0-306-40615-8", "0-306-40615-3", "1230306406157"] {
+            assert_eq!(
+                classify_identifier(text),
+                Err(super::UNRECOGNIZED_IDENTIFIER.into()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_identifier_reads_issns_and_arxiv_ids() {
+        use super::{IdentifierKind as K, classify_identifier};
+        for text in ["2049-3630", "0378595x", "1234567X"] {
+            assert_eq!(
+                classify_identifier(text),
+                Ok((K::Issn, text.into())),
+                "{text}"
+            );
+        }
+        for text in [
+            "2101.00001",
+            "1501.0001v2",
+            "hep-th/9901001",
+            "math.GT/0309136",
+        ] {
+            assert_eq!(
+                classify_identifier(text),
+                Ok((K::Eprint, text.into())),
+                "{text}"
+            );
+        }
+        for text in [
+            "2101.001",
+            "1501.00001v",
+            "Hep-th/9901001",
+            "math.gt/0309136",
+            "TEST-2024",
+        ] {
+            assert_eq!(
+                classify_identifier(text),
+                Err(super::UNRECOGNIZED_IDENTIFIER.into()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn identifier_tokens_round_trip_through_the_draft() {
+        use super::{IdentifierKind as K, apply_identifier_tokens, identifier_tokens};
+        let mut record = loaded_record();
+        record.doi = Some("10.1000/xyz".into());
+        record.eprint = Some("2101.00001".into());
+        record.isbns = vec![
+            ibex_core::Identifier {
+                original: "978-0-306-40615-7".into(),
+                canonical: Some("custom-key".into()),
+            },
+            ibex_core::Identifier::new("0-306-40615-2"),
+        ];
+        record.issns = vec![ibex_core::Identifier::new("2049-3630")];
+        record.isrns = vec![ibex_core::Identifier::new("TEST-2024")];
+        let mut draft = prefill_draft(&record);
+        let tokens = identifier_tokens(&draft);
+        assert_eq!(
+            tokens,
+            vec![
+                (K::Doi, "10.1000/xyz".into()),
+                (K::Eprint, "2101.00001".into()),
+                (K::Isbn, "978-0-306-40615-7".into()),
+                (K::Isbn, "0-306-40615-2".into()),
+                (K::Issn, "2049-3630".into()),
+                (K::Isrn, "TEST-2024".into()),
+            ]
+        );
+        for field in super::IDENTIFIER_FIELDS.map(|(field, _)| field) {
+            draft.fields.remove(&field);
+        }
+        apply_identifier_tokens(&mut draft, &tokens).unwrap();
+        assert_eq!(build_update(&record, &draft).unwrap(), record.to_new());
+    }
+
+    #[test]
+    fn apply_identifier_tokens_allows_one_doi_and_one_eprint() {
+        use super::{IdentifierKind as K, apply_identifier_tokens};
+        let record = loaded_record();
+        let mut draft = prefill_draft(&record);
+        let err = apply_identifier_tokens(
+            &mut draft,
+            &[(K::Doi, "10.1/a".into()), (K::Doi, "10.1/b".into())],
+        )
+        .unwrap_err();
+        assert_eq!(err, FieldError::at(FormField::Identifiers, "Only one DOI"));
+        let err = apply_identifier_tokens(
+            &mut draft,
+            &[
+                (K::Eprint, "2101.00001".into()),
+                (K::Eprint, "2101.00002".into()),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            FieldError::at(FormField::Identifiers, "Only one eprint")
+        );
     }
 }

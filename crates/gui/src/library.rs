@@ -60,8 +60,8 @@ use crate::detail::{
 };
 use crate::documentation::{DocumentationWindow, OpenDocumentation};
 use crate::edit::{
-    BibliographicField, EditDraft, FieldError, KindItem, build_create, build_update, kind_items,
-    prefill_draft,
+    BibliographicField, EditDraft, FieldError, IdentifierKind, KindItem, apply_identifier_tokens,
+    build_create, build_update, classify_identifier, identifier_tokens, kind_items, prefill_draft,
 };
 use crate::edit_layout::{self, FormField, Section};
 use crate::icons::symbol;
@@ -2664,6 +2664,156 @@ impl Render for DetailsTokens {
             )
     }
 }
+/// The identifiers row: one list of typed entries (DOI, ISBN, ISSN, ISRN,
+/// arXiv), each sorted into its stored field by [`classify_identifier`].
+struct IdentifierTokens {
+    owner: WeakEntity<LibraryApp>,
+    tokens: Vec<(IdentifierKind, String)>,
+    pending: Entity<InputState>,
+    error: Option<String>,
+    _subscription: Subscription,
+}
+impl IdentifierTokens {
+    fn new(
+        tokens: Vec<(IdentifierKind, String)>,
+        owner: WeakEntity<LibraryApp>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let pending = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Add a DOI, ISBN, ISSN, ISRN, or arXiv id…")
+        });
+        let subscription = cx.subscribe_in(&pending, window, |this, _, event, window, cx| {
+            if matches!(
+                event,
+                InputEvent::PressEnter {
+                    secondary: false,
+                    ..
+                }
+            ) {
+                this.add(window, cx);
+            }
+        });
+        Self {
+            owner,
+            tokens,
+            pending,
+            error: None,
+            _subscription: subscription,
+        }
+    }
+    fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match classify_identifier(&self.pending.read(cx).value()) {
+            Ok(token) => {
+                self.tokens.push(token);
+                self.pending
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
+        cx.notify();
+    }
+    /// The entries to save: the list plus typed-but-unadded text, or the
+    /// reason that text is not an identifier.
+    fn tokens(&self, cx: &App) -> Result<Vec<(IdentifierKind, String)>, String> {
+        let mut tokens = self.tokens.clone();
+        let pending = self.pending.read(cx).value();
+        if !pending.is_empty() {
+            tokens.push(classify_identifier(&pending)?);
+        }
+        Ok(tokens)
+    }
+    fn is_empty(&self, cx: &App) -> bool {
+        self.tokens.is_empty() && self.pending.read(cx).value().trim().is_empty()
+    }
+    fn holds(&self, kind: IdentifierKind, cx: &App) -> bool {
+        self.tokens(cx)
+            .is_ok_and(|tokens| tokens.iter().any(|(token, _)| *token == kind))
+    }
+}
+impl Render for IdentifierTokens {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let disabled = self.owner.upgrade().is_none_or(
+            |owner| matches!(&owner.read(cx).edit, Some(EditFetch::Ready(form)) if form.saving),
+        );
+        v_flex()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if !disabled
+                    && event.keystroke.key == "backspace"
+                    && this.pending.read(cx).focus_handle(cx).is_focused(window)
+                    && this.pending.read(cx).value().is_empty()
+                    && !this.tokens.is_empty()
+                {
+                    this.tokens.pop();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .children(self.tokens.iter().enumerate().map(|(ix, (kind, value))| {
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .id(("identifier-badge", ix))
+                            .test_support()
+                            .aria_label(kind.badge())
+                            .px_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .bg(cx.theme().secondary)
+                            .child(kind.badge()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(value.clone()),
+                    )
+                    .child(
+                        Button::new(("identifier-remove", ix))
+                            .small()
+                            .ghost()
+                            .label("×")
+                            .tooltip(format!("Remove {value}"))
+                            .accessibility_label(format!("Remove {value}"))
+                            .disabled(disabled)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.tokens.remove(ix);
+                                cx.notify();
+                            })),
+                    )
+            }))
+            .child(
+                Input::new(&self.pending)
+                    .id("identifier-input")
+                    .small()
+                    .aria_label("Identifier")
+                    .disabled(disabled)
+                    .w_full(),
+            )
+            .child(
+                Button::new("identifier-add")
+                    .small()
+                    .outline()
+                    .label("Add")
+                    .disabled(disabled)
+                    .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
+            )
+            .children(
+                self.error
+                    .clone()
+                    .map(|error| div().text_sm().text_color(cx.theme().danger).child(error)),
+            )
+    }
+}
 fn details_suggestion_field(field: BibliographicField) -> Option<ibex_core::ResourceTextField> {
     use BibliographicField as F;
     use ibex_core::ResourceTextField as S;
@@ -3126,7 +3276,10 @@ struct EditForm {
     creator_rows: Vec<CreatorRow>,
     next_creator_key: u64,
     people_names: HashMap<PersonId, String>,
+    /// Every bibliographic input except the identifiers, which share
+    /// `identifiers`.
     fields: BTreeMap<BibliographicField, BibliographicInput>,
+    identifiers: Entity<IdentifierTokens>,
     _value_suggestions: Entity<DetailsSuggestions>,
     series: Entity<ComboboxState<SeriesDelegate>>,
     series_options: Vec<ibex_core::Series>,
@@ -3294,6 +3447,7 @@ impl EditForm {
             ParentRule::Optional { expected } | ParentRule::Required { expected } => Some(expected),
             ParentRule::Forbidden => None,
         };
+        let identifiers = identifier_tokens(&draft);
         let mut form = Self {
             title: prefill_input(draft.title, "Title", window, cx),
             kind,
@@ -3304,6 +3458,7 @@ impl EditForm {
             people_names,
             fields: BibliographicField::ALL
                 .iter()
+                .filter(|field| FormField::for_bib(**field) != FormField::Identifiers)
                 .map(|field| {
                     let value = draft.fields.get(field).cloned().unwrap_or_default();
                     let input = if matches!(
@@ -3324,13 +3479,7 @@ impl EditForm {
                         BibliographicInput::Date(
                             cx.new(|cx| DetailsDateInput::new(value, stored, owner, window, cx)),
                         )
-                    } else if matches!(
-                        field,
-                        BibliographicField::Isbns
-                            | BibliographicField::Issns
-                            | BibliographicField::Isrns
-                            | BibliographicField::Keywords
-                    ) {
+                    } else if *field == BibliographicField::Keywords {
                         let owner = cx.entity().downgrade();
                         BibliographicInput::Tokens(
                             cx.new(|cx| DetailsTokens::new(value, owner, window, cx)),
@@ -3361,6 +3510,10 @@ impl EditForm {
                     (*field, input)
                 })
                 .collect(),
+            identifiers: {
+                let owner = cx.entity().downgrade();
+                cx.new(|cx| IdentifierTokens::new(identifiers, owner, window, cx))
+            },
             _value_suggestions: value_suggestions,
             series: cx.new(|cx| {
                 ComboboxState::new(SeriesDelegate::new(&[]), Vec::new(), window, cx)
@@ -3437,7 +3590,6 @@ impl EditForm {
 
     /// Whether the row's controls hold anything to save.
     fn has_value(&self, field: FormField, cx: &App) -> bool {
-        use BibliographicField as F;
         let filled = |bib: BibliographicField| !self.fields[&bib].value(cx).trim().is_empty();
         match field {
             FormField::Kind => true,
@@ -3445,9 +3597,7 @@ impl EditForm {
             FormField::Creators => !self.creator_rows.is_empty(),
             FormField::Parent => self.parent_set(cx),
             FormField::Series => self.series_selected.is_some(),
-            FormField::Identifiers => [F::Doi, F::Eprint, F::Isbns, F::Issns, F::Isrns]
-                .into_iter()
-                .any(filled),
+            FormField::Identifiers => !self.identifiers.read(cx).is_empty(cx),
             FormField::Tags => !self.tags.is_empty(),
             FormField::Collections => !self.collections.is_empty(),
             FormField::Bib(bib) => filled(bib),
@@ -3455,8 +3605,8 @@ impl EditForm {
     }
 
     /// "From {parent}: {value}" for an empty row that inherits a value. The
-    /// identifiers row names inherited ISBNs and ISSNs whose own lists are
-    /// empty; other rows hide the hint once they hold a value.
+    /// identifiers row names inherited ISBNs and ISSNs while the row holds
+    /// none of that kind; other rows hide the hint once they hold a value.
     fn inherited_hint(&self, field: FormField, cx: &App) -> Option<String> {
         use BibliographicField as F;
         let preview = self.inherited.as_ref()?;
@@ -3487,11 +3637,15 @@ impl EditForm {
         };
         match field {
             FormField::Identifiers => {
-                let hints: Vec<String> = [(F::Isbns, &values.isbns), (F::Issns, &values.issns)]
-                    .into_iter()
-                    .filter(|(bib, _)| empty(*bib))
-                    .filter_map(|(_, effective)| ids(effective))
-                    .collect();
+                let identifiers = self.identifiers.read(cx);
+                let hints: Vec<String> = [
+                    (IdentifierKind::Isbn, &values.isbns),
+                    (IdentifierKind::Issn, &values.issns),
+                ]
+                .into_iter()
+                .filter(|(kind, _)| !identifiers.holds(*kind, cx))
+                .filter_map(|(_, effective)| ids(effective))
+                .collect();
                 (!hints.is_empty()).then(|| hints.join("; "))
             }
             FormField::Bib(bib) if empty(bib) => match bib {
@@ -3541,10 +3695,16 @@ impl EditForm {
     /// The inputs' current values as one plain draft. A cleared kind box
     /// falls back to the stored kind: every resource carries one, so the
     /// form never clears it. A cleared parent box is exactly that: no
-    /// parent.
-    fn draft(&self, cx: &App) -> EditDraft {
+    /// parent. Fails when the identifiers row holds text that is not an
+    /// identifier, or more than one DOI or eprint.
+    fn draft(&self, cx: &App) -> Result<EditDraft, FieldError> {
         let value = |input: &Entity<InputState>| input.read(cx).value().to_string();
-        EditDraft {
+        let tokens = self
+            .identifiers
+            .read(cx)
+            .tokens(cx)
+            .map_err(|error| FieldError::at(FormField::Identifiers, error))?;
+        let mut draft = EditDraft {
             fields: self
                 .fields
                 .iter()
@@ -3560,7 +3720,9 @@ impl EditForm {
             creators: self.creator_rows.iter().map(|row| row.spec(cx)).collect(),
             tag_ids: self.tags.iter().map(|tag| tag.id).collect(),
             collection_ids: self.collections.iter().map(|c| c.id).collect(),
-        }
+        };
+        apply_identifier_tokens(&mut draft, &tokens)?;
+        Ok(draft)
     }
 }
 
@@ -7114,7 +7276,7 @@ impl LibraryApp {
             _ => None,
         });
         let payload = input_error
-            .map_or_else(|| build_update(&record, &draft), Err)
+            .map_or_else(|| draft.and_then(|draft| build_update(&record, &draft)), Err)
             .and_then(|mut new| {
                 use ibex_core::{BibliographicDate, DatePrecision as P};
                 for (field, date) in [
@@ -8205,10 +8367,15 @@ impl LibraryApp {
             return;
         };
         form.revealed.insert(field);
-        if let FormField::Bib(bib) = field
-            && let BibliographicInput::Single(input) = &form.fields[&bib]
-        {
-            let input = input.clone();
+        let input = match field {
+            FormField::Identifiers => Some(form.identifiers.read(cx).pending.clone()),
+            FormField::Bib(bib) => match &form.fields[&bib] {
+                BibliographicInput::Single(input) => Some(input.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(input) = input {
             // The menu restores focus as it dismisses; focus after it.
             window.defer(cx, move |window, cx| {
                 input.update(cx, |input, cx| input.focus(window, cx))
@@ -8313,22 +8480,13 @@ impl LibraryApp {
                     }))
                 )),
             ),
-            FormField::Identifiers => {
-                use BibliographicField as F;
-                let muted = cx.theme().muted_foreground;
-                edit_field(
-                    label,
-                    v_flex().id("edit-field-Identifiers").test_support().w_full().gap_1()
-                        .children([F::Doi, F::Eprint, F::Isbns, F::Issns, F::Isrns].into_iter().map(|bib| {
-                            v_flex().w_full().gap_1()
-                                .child(div().text_xs().text_color(muted).child(bib.label()))
-                                .child(div().id(SharedString::from(format!("edit-field-{bib:?}"))).test_support().w_full()
-                                    .child(form.fields[&bib].render(bib, saving)))
-                        }))
-                        .children(inherited_note(form, field, cx))
-                        .children(field_error(form, field, danger)),
-                )
-            }
+            FormField::Identifiers => edit_field(
+                label,
+                v_flex().id("edit-field-Identifiers").test_support().w_full().gap_1()
+                    .child(form.identifiers.clone())
+                    .children(inherited_note(form, field, cx))
+                    .children(field_error(form, field, danger)),
+            ),
             FormField::Tags => edit_field(
                 label,
                 v_flex()
@@ -14038,21 +14196,33 @@ mod classification_tests {
         let values: Vec<_> = F::ALL
             .iter()
             // A series number is rejected without a series; edit.rs covers it.
-            .filter(|field| **field != F::SeriesNumber)
+            // Identifiers share one row, entered below.
+            .filter(|field| {
+                **field != F::SeriesNumber
+                    && super::FormField::for_bib(**field) != super::FormField::Identifiers
+            })
             .map(|field| {
                 (
                     *field,
                     match field {
                         F::Published | F::Accessed | F::OriginalDate | F::EventDate => "2024-02-29",
-                        F::Isbns => "9780306406157",
-                        F::Issns => "2049-3630",
-                        F::Isrns => "TEST-2024",
                         F::Pages => "12–19",
                         _ => "Edited value",
                     },
                 )
             })
             .collect();
+        let identifiers = [
+            (F::Doi, "doi:10.1000/edited", "10.1000/edited"),
+            (F::Eprint, "arxiv:2101.00001", "2101.00001"),
+            (F::Isbns, "9780306406157", "9780306406157"),
+            (F::Issns, "2049-3630", "2049-3630"),
+            (F::Isrns, "isrn:TEST-2024", "TEST-2024"),
+        ];
+        cx.update_window(f.handle, |_, window, cx| {
+            enter_identifiers(identifiers.map(|(_, typed, _)| typed), window, cx);
+        })
+        .unwrap();
         for (field, value) in &values {
             cx.update_window(f.handle, |_, window, cx| {
                 enter_details_field(*field, value, window, cx);
@@ -14091,6 +14261,9 @@ mod classification_tests {
         for (field, value) in values {
             assert_eq!(draft.fields[&field], value, "{field:?}");
         }
+        for (field, _, stored) in identifiers {
+            assert_eq!(draft.fields[&field], stored, "{field:?}");
+        }
         cx.update_window(f.handle, |_, window, cx| {
             window.render_frame(cx);
             window.click("edit-resource", cx);
@@ -14101,8 +14274,78 @@ mod classification_tests {
             let Some(super::EditFetch::Ready(form)) = &app.edit else {
                 panic!("form should reopen")
             };
-            assert_eq!(form.draft(cx).fields, draft.fields);
+            assert_eq!(form.draft(cx).unwrap().fields, draft.fields);
         });
+    }
+    #[gpui_kit::test]
+    fn details_identifiers_share_one_list(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        open_edit_with(&f, cx, |source| source.kind = ResourceKind::Book);
+        reveal_all_fields(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            enter_identifiers(["10.1000/xyz", "978-0-306-40615-7"], window, cx);
+            window.render_frame(cx);
+            let row = window.within("edit-field-Identifiers");
+            assert_eq!(row.find(("identifier-badge", 0usize)).label(), Some("DOI"));
+            assert_eq!(row.find(("identifier-badge", 1usize)).label(), Some("ISBN"));
+            window.within("edit-field-Identifiers").click("identifier-input", cx);
+            window.input("not an id", cx);
+            window.click("save-edit", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Identifiers")
+                    .find("edit-field-error")
+                    .label(),
+                Some(
+                    "Unrecognized identifier; prefix it with doi:, isbn:, issn:, isrn:, or arxiv:"
+                )
+            );
+            window.within("edit-field-Identifiers").click("identifier-input", cx);
+            window.press("cmd-a", cx);
+            window.press("backspace", cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        f.app.read_with(cx, |app, _| {
+            if let Some(super::EditFetch::Ready(form)) = &app.edit {
+                panic!("save failed: {:?}", form.error);
+            }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+        assert_eq!(saved.doi.as_deref(), Some("10.1000/xyz"));
+        assert_eq!(
+            saved.isbns.iter().map(|isbn| isbn.as_str()).collect::<Vec<_>>(),
+            ["978-0-306-40615-7"]
+        );
+    }
+    /// Replaces the identifiers row's entries with `texts`, added one by one.
+    fn enter_identifiers<'a>(
+        texts: impl IntoIterator<Item = &'a str>,
+        window: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::App,
+    ) {
+        let scope = gpui_kit::SharedString::from("edit-field-Identifiers");
+        reveal_edit_control(&scope, window, cx);
+        while window
+            .within(scope.clone())
+            .try_find(("identifier-remove", 0usize))
+            .is_some()
+        {
+            window
+                .within(scope.clone())
+                .click(("identifier-remove", 0usize), cx);
+        }
+        for text in texts {
+            // Each entry grows the row; keep its input in view.
+            reveal_edit_control(&scope, window, cx);
+            window.within(scope.clone()).click("identifier-input", cx);
+            window.press("cmd-a", cx);
+            window.input(text, cx);
+            window.within(scope.clone()).click("identifier-add", cx);
+        }
     }
     fn enter_details_field(
         field: crate::edit::BibliographicField,
@@ -14155,7 +14398,7 @@ mod classification_tests {
             window
                 .within(gpui_kit::SharedString::from(id))
                 .click("date-raw", cx);
-        } else if matches!(field, F::Isbns | F::Issns | F::Isrns | F::Keywords) {
+        } else if field == F::Keywords {
             let scope = gpui_kit::SharedString::from(id);
             while window
                 .within(scope.clone())
@@ -14283,7 +14526,7 @@ mod classification_tests {
             let Some(super::EditFetch::Ready(form)) = &app.edit else {
                 panic!("form should reopen")
             };
-            assert_eq!(form.draft(cx).creators, expected);
+            assert_eq!(form.draft(cx).unwrap().creators, expected);
         });
     }
 
@@ -14414,7 +14657,7 @@ mod classification_tests {
             assert!(window.try_find("edit-field-Accessed").is_some());
             assert!(window.try_find("edit-label-Website").is_some());
             assert!(window.try_find("edit-field-Volume").is_none());
-            assert!(window.try_find("edit-field-Isbns").is_none());
+            assert!(window.try_find("edit-field-Identifiers").is_none());
         })
         .unwrap();
     }
