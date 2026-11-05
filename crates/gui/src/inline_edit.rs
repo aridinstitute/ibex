@@ -304,7 +304,16 @@ impl InlineRowEdit {
 
         Self {
             title: prefill_input(draft.title, "Title", window, cx),
-            publisher: prefill_input(draft.publisher, "Publisher", window, cx),
+            publisher: prefill_input(
+                draft
+                    .fields
+                    .get(&BibliographicField::Publisher)
+                    .cloned()
+                    .unwrap_or_default(),
+                "Publisher",
+                window,
+                cx,
+            ),
             published: prefill_input(
                 draft
                     .fields
@@ -364,18 +373,17 @@ impl InlineRowEdit {
         let creators = creators_from_person_ids(&person_ids, &self.previous_creators);
         let ridden = self.record.as_ref().map(prefill_draft);
         EditDraft {
-            fields: [(BibliographicField::Published, value(&self.published))].into(),
+            fields: [
+                (BibliographicField::Published, value(&self.published)),
+                (BibliographicField::Publisher, value(&self.publisher)),
+            ]
+            .into(),
             title: value(&self.title),
             kind,
             parent: self.record.as_ref().and_then(|r| r.parent_id),
-            publisher: value(&self.publisher),
             series: ridden
                 .as_ref()
                 .map(|d| d.series.clone())
-                .unwrap_or_default(),
-            series_number: ridden
-                .as_ref()
-                .map(|d| d.series_number.clone())
                 .unwrap_or_default(),
             creators,
             // Inline row edit does not touch tags/collections; keep the stored set.

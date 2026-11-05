@@ -13,6 +13,7 @@ use ibex_core::{
     UtcMillis,
 };
 
+use crate::edit_layout::FormField;
 use crate::kind::kind_label;
 
 use std::collections::BTreeMap;
@@ -26,6 +27,7 @@ pub enum BibliographicField {
     Subtitle,
     TitleAddon,
     ShortTitle,
+    Publisher,
     Place,
     Volume,
     Issue,
@@ -33,6 +35,7 @@ pub enum BibliographicField {
     TotalPages,
     ArticleNumber,
     Edition,
+    SeriesNumber,
     Doi,
     Url,
     Eprint,
@@ -63,6 +66,7 @@ impl BibliographicField {
         Self::Subtitle,
         Self::TitleAddon,
         Self::ShortTitle,
+        Self::Publisher,
         Self::Place,
         Self::Volume,
         Self::Issue,
@@ -70,6 +74,7 @@ impl BibliographicField {
         Self::TotalPages,
         Self::ArticleNumber,
         Self::Edition,
+        Self::SeriesNumber,
         Self::Doi,
         Self::Url,
         Self::Eprint,
@@ -100,6 +105,7 @@ impl BibliographicField {
             Self::Subtitle => "Subtitle",
             Self::TitleAddon => "Title addon",
             Self::ShortTitle => "Short title",
+            Self::Publisher => "Publisher",
             Self::Place => "Place",
             Self::Volume => "Volume",
             Self::Issue => "Issue",
@@ -107,6 +113,7 @@ impl BibliographicField {
             Self::TotalPages => "Total pages",
             Self::ArticleNumber => "Article number",
             Self::Edition => "Edition",
+            Self::SeriesNumber => "Series number",
             Self::Doi => "DOI",
             Self::Url => "URL",
             Self::Eprint => "Eprint",
@@ -145,18 +152,8 @@ impl BibliographicField {
 /// a field (worker and save failures) belong to the whole form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldError {
-    pub field: Option<ErrorTarget>,
+    pub field: Option<FormField>,
     pub message: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorTarget {
-    Title,
-    Series,
-    SeriesNumber,
-    Publisher,
-    /// Display-label errors target their date's row, which hosts the display input.
-    Field(BibliographicField),
 }
 
 impl FieldError {
@@ -167,7 +164,7 @@ impl FieldError {
         }
     }
 
-    pub fn at(target: ErrorTarget, message: impl Into<String>) -> Self {
+    pub fn at(target: FormField, message: impl Into<String>) -> Self {
         Self {
             field: Some(target),
             message: message.into(),
@@ -190,9 +187,7 @@ pub struct EditDraft {
     pub title: String,
     pub kind: ResourceKind,
     pub parent: Option<ResourceId>,
-    pub publisher: String,
     pub series: String,
-    pub series_number: String,
     pub creators: Vec<CreatorSpec>,
     /// Tags attached on save, in the order shown on the form.
     pub tag_ids: Vec<TagId>,
@@ -210,15 +205,9 @@ pub fn prefill_draft(record: &Resource) -> EditDraft {
         title: record.title.as_str().to_owned(),
         kind: record.kind,
         parent: record.parent_id,
-        publisher: record.publisher.clone().unwrap_or_default(),
         series: record
             .series_id
             .map(|id| id.to_string())
-            .unwrap_or_default(),
-        series_number: record
-            .series_number
-            .as_ref()
-            .map(|number| number.as_str().to_owned())
             .unwrap_or_default(),
         creators: values.creators.clone(),
         tag_ids: record.tag_ids.clone(),
@@ -247,6 +236,7 @@ fn field_text(record: &NewResource, field: BibliographicField) -> String {
             .as_ref()
             .map(|value| value.as_str().to_owned())
             .unwrap_or_default(),
+        BibliographicField::Publisher => record.publisher.clone().unwrap_or_default(),
         BibliographicField::Place => record.place.clone().unwrap_or_default(),
         BibliographicField::Volume => record.volume.clone().unwrap_or_default(),
         BibliographicField::Issue => record.issue.clone().unwrap_or_default(),
@@ -258,6 +248,11 @@ fn field_text(record: &NewResource, field: BibliographicField) -> String {
         BibliographicField::TotalPages => record.total_pages.clone().unwrap_or_default(),
         BibliographicField::ArticleNumber => record.article_number.clone().unwrap_or_default(),
         BibliographicField::Edition => record.edition.clone().unwrap_or_default(),
+        BibliographicField::SeriesNumber => record
+            .series_number
+            .as_ref()
+            .map(|value| value.as_str().to_owned())
+            .unwrap_or_default(),
         BibliographicField::Doi => record.doi.clone().unwrap_or_default(),
         BibliographicField::Url => record.url.clone().unwrap_or_default(),
         BibliographicField::Eprint => record.eprint.clone().unwrap_or_default(),
@@ -308,9 +303,7 @@ pub fn empty_create_draft() -> EditDraft {
         title: String::new(),
         kind: ResourceKind::Book,
         parent: None,
-        publisher: String::new(),
         series: String::new(),
-        series_number: String::new(),
         creators: Vec::new(),
         tag_ids: Vec::new(),
         collection_ids: Vec::new(),
@@ -380,16 +373,13 @@ pub fn build_create(draft: &EditDraft) -> Result<NewResource, FieldError> {
 fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), FieldError> {
     let title = draft.title.trim();
     edit.title = NonEmptyStr::try_new(title)
-        .map_err(|_| FieldError::at(ErrorTarget::Title, "Title must not be empty"))?;
+        .map_err(|_| FieldError::at(FormField::Title, "Title must not be empty"))?;
 
     edit.kind = draft.kind;
     edit.parent_id = draft.parent;
     edit.creators = draft.creators.clone();
     edit.tag_ids = draft.tag_ids.clone();
     edit.collection_ids = draft.collection_ids.clone();
-
-    let publisher = draft.publisher.trim();
-    edit.publisher = (!publisher.is_empty()).then(|| publisher.to_owned());
 
     use BibliographicField as F;
     merge_date(
@@ -416,16 +406,7 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), F
     edit.series_id = (!series.is_empty())
         .then(|| {
             SeriesId::parse(series)
-                .map_err(|_| FieldError::at(ErrorTarget::Series, "Series must be a series id"))
-        })
-        .transpose()?;
-
-    let number = draft.series_number.trim();
-    edit.series_number = (!number.is_empty())
-        .then(|| {
-            NonEmptyStr::try_new(number).map_err(|_| {
-                FieldError::at(ErrorTarget::SeriesNumber, "Series number must not be empty")
-            })
+                .map_err(|_| FieldError::at(FormField::Series, "Series must be a series id"))
         })
         .transpose()?;
 
@@ -437,7 +418,7 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), F
         let value = (!text.is_empty()).then_some(text);
         let invalid = |e: ibex_core::NameError| {
             FieldError::at(
-                ErrorTarget::Field(*field),
+                FormField::for_bib(*field),
                 format!("{}: {e}", field.label()),
             )
         };
@@ -460,6 +441,7 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), F
                     .transpose()
                     .map_err(invalid)?
             }
+            BibliographicField::Publisher => edit.publisher = value.map(str::to_owned),
             BibliographicField::Place => edit.place = value.map(str::to_owned),
             BibliographicField::Volume => edit.volume = value.map(str::to_owned),
             BibliographicField::Issue => edit.issue = value.map(str::to_owned),
@@ -472,6 +454,12 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), F
             BibliographicField::TotalPages => edit.total_pages = value.map(str::to_owned),
             BibliographicField::ArticleNumber => edit.article_number = value.map(str::to_owned),
             BibliographicField::Edition => edit.edition = value.map(str::to_owned),
+            BibliographicField::SeriesNumber => {
+                edit.series_number = value
+                    .map(NonEmptyStr::try_new)
+                    .transpose()
+                    .map_err(invalid)?
+            }
             BibliographicField::Doi => edit.doi = value.map(str::to_owned),
             BibliographicField::Url => edit.url = value.map(str::to_owned),
             BibliographicField::Eprint => edit.eprint = value.map(str::to_owned),
@@ -511,7 +499,7 @@ fn list_field(field: BibliographicField, text: &str) -> Result<Vec<String>, Fiel
             let line = line.trim();
             if line.is_empty() || line.chars().any(char::is_control) {
                 Err(FieldError::at(
-                    ErrorTarget::Field(field),
+                    FormField::for_bib(field),
                     format!(
                         "{} must contain one non-empty entry per line",
                         field.label()
@@ -647,7 +635,7 @@ fn merge_date(
     field: BibliographicField,
     display_field: BibliographicField,
 ) -> Result<(), FieldError> {
-    let at = |message: String| FieldError::at(ErrorTarget::Field(field), message);
+    let at = |message: String| FieldError::at(FormField::for_bib(field), message);
     let old_display = display_text(date.as_ref());
     let edited_full = draft
         .fields
@@ -725,7 +713,7 @@ fn parse_date_preserving_endpoints(
     .map(Some)
     .map_err(|error| {
         FieldError::at(
-            ErrorTarget::Field(field),
+            FormField::for_bib(field),
             format!("{}: {error}", field.label()),
         )
     })
@@ -735,7 +723,7 @@ fn parse_date(
     field: BibliographicField,
     text: &str,
 ) -> Result<Option<BibliographicDate>, FieldError> {
-    let at = |message: String| FieldError::at(ErrorTarget::Field(field), message);
+    let at = |message: String| FieldError::at(FormField::for_bib(field), message);
     let text = text.trim();
     if text.is_empty() {
         return Ok(None);
@@ -833,8 +821,8 @@ fn parse_date_instant(text: &str) -> Option<(UtcMillis, DatePrecision)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EditDraft, ErrorTarget, FieldError, KindItem, SearchableListItem, build_create,
-        build_update, creators_from_person_ids, empty_create_draft, kind_items, prefill_draft,
+        EditDraft, FieldError, FormField, KindItem, SearchableListItem, build_create, build_update,
+        creators_from_person_ids, empty_create_draft, kind_items, prefill_draft,
     };
     use ibex_core::{
         BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId, Resource,
@@ -912,13 +900,11 @@ mod tests {
             title: title.into(),
             kind: ResourceKind::BookSection,
             parent: None,
-            publisher: "MIT Press".into(),
             series: "".into(),
-            series_number: "".into(),
             creators,
             tag_ids: Vec::new(),
             collection_ids: vec![],
-            fields: Default::default(),
+            fields: [(super::BibliographicField::Publisher, "MIT Press".into())].into(),
         }
     }
     #[test]
@@ -948,8 +934,10 @@ mod tests {
         let mut record = loaded_record();
         record.published = None;
         record.accessed = None;
+        record.publisher = None;
+        record.series_number = None;
         let draft = prefill_draft(&record);
-        assert_eq!(F::ALL.len(), 33);
+        assert_eq!(F::ALL.len(), 35);
         assert_eq!(draft.fields.len(), F::ALL.len());
         for field in F::ALL {
             assert_eq!(draft.fields[field], "");
@@ -1029,7 +1017,7 @@ mod tests {
                     err.message.contains(field.label()),
                     "{field:?}: {text}: {err}"
                 );
-                assert_eq!(err.field, Some(ErrorTarget::Field(field)));
+                assert_eq!(err.field, Some(FormField::Bib(field)));
                 assert!(build_create(&draft).is_err());
             }
         }
@@ -1044,7 +1032,7 @@ mod tests {
             draft.fields.insert(display, "Orphan display".into());
             let err = build_create(&draft).unwrap_err();
             assert!(err.message.contains(display.label()), "{err}");
-            assert_eq!(err.field, Some(ErrorTarget::Field(date)));
+            assert_eq!(err.field, Some(FormField::Bib(date)));
         }
     }
     #[test]
@@ -1178,7 +1166,7 @@ mod tests {
                 draft.fields.insert(field, text.into());
                 let err = build_update(&record, &draft).unwrap_err();
                 assert!(err.message.contains(field.label()), "{err}");
-                assert_eq!(err.field, Some(ErrorTarget::Field(field)));
+                assert_eq!(err.field, Some(FormField::for_bib(field)));
             }
         }
     }
@@ -1229,6 +1217,8 @@ mod tests {
             (F::TotalPages, "total_pages"),
             (F::ArticleNumber, "article_number"),
             (F::Edition, "edition"),
+            (F::Publisher, "publisher"),
+            (F::SeriesNumber, "series_number"),
             (F::Doi, "doi"),
             (F::Url, "url"),
             (F::Eprint, "eprint"),
@@ -1318,14 +1308,14 @@ mod tests {
         assert_eq!(draft.title, "Citation Networks");
         assert_eq!(draft.kind, ResourceKind::BookSection);
         assert_eq!(draft.parent, record.parent_id);
-        assert_eq!(draft.publisher, "MIT Press");
+        assert_eq!(draft.fields[&F::Publisher], "MIT Press");
         assert_eq!(draft.fields[&F::Published], "1991-01-01T00:00:00Z");
         assert_eq!(draft.fields[&F::Accessed], "2020-01-01T00:00:00Z");
         assert_eq!(
             draft.series,
             record.series_id.expect("series set").to_string()
         );
-        assert_eq!(draft.series_number, "LCL 26");
+        assert_eq!(draft.fields[&F::SeriesNumber], "LCL 26");
         assert_eq!(draft.creators.len(), 1);
         assert_eq!(draft.creators[0].person_id, record.creators[0].person_id);
     }
@@ -1346,11 +1336,11 @@ mod tests {
 
         let draft = prefill_draft(&record);
         assert_eq!(draft.parent, None);
-        assert_eq!(draft.publisher, "");
+        assert_eq!(draft.fields[&F::Publisher], "");
         assert_eq!(draft.fields[&F::Published], "");
         assert_eq!(draft.fields[&F::Accessed], "");
         assert_eq!(draft.series, "");
-        assert_eq!(draft.series_number, "");
+        assert_eq!(draft.fields[&F::SeriesNumber], "");
         assert!(draft.creators.is_empty());
         // Title is never optional, so it still prefills.
         assert_eq!(draft.title, "Citation Networks");
@@ -1363,12 +1353,12 @@ mod tests {
         let mut draft = draft_with("Retitled", record.to_new().creators);
         draft.kind = ResourceKind::Book;
         draft.parent = Some(ResourceId::generate());
-        draft.publisher = "Penguin".into();
+        draft.fields.insert(F::Publisher, "Penguin".into());
         draft.fields.insert(F::Published, "2024".into());
         draft.fields.insert(F::Accessed, "".into());
         // Series rides through untouched text.
         draft.series = record.series_id.expect("series set").to_string();
-        draft.series_number = "XL 1".into();
+        draft.fields.insert(F::SeriesNumber, "XL 1".into());
 
         let new = build_update(&record, &draft).expect("draft merges");
         assert_eq!(new.title.as_str(), "Retitled");
@@ -1421,7 +1411,7 @@ mod tests {
         let err = build_create(&empty_create_draft()).expect_err("blank title");
         assert_eq!(
             err,
-            FieldError::at(ErrorTarget::Title, "Title must not be empty")
+            FieldError::at(FormField::Title, "Title must not be empty")
         );
     }
 
@@ -1430,7 +1420,9 @@ mod tests {
         let author = PersonId::generate();
         let mut draft = empty_create_draft();
         draft.title = "Unsigned dictionary".into();
-        draft.publisher = "OUP".into();
+        draft
+            .fields
+            .insert(super::BibliographicField::Publisher, "OUP".into());
         draft
             .fields
             .insert(super::BibliographicField::Published, "2020".into());
@@ -1498,7 +1490,7 @@ mod tests {
             .expect_err("blank title rejects");
         assert_eq!(
             err,
-            FieldError::at(ErrorTarget::Title, "Title must not be empty")
+            FieldError::at(FormField::Title, "Title must not be empty")
         );
 
         let mut draft = draft_with("Retitled", creators.clone());
@@ -1512,7 +1504,7 @@ mod tests {
         );
         assert_eq!(
             err.field,
-            Some(ErrorTarget::Field(super::BibliographicField::Published))
+            Some(FormField::Bib(super::BibliographicField::Published))
         );
 
         let mut draft = draft_with("Retitled", creators);
@@ -1520,7 +1512,7 @@ mod tests {
         let err = build_update(&record, &draft).expect_err("bad series rejects");
         assert_eq!(
             err,
-            FieldError::at(ErrorTarget::Series, "Series must be a series id")
+            FieldError::at(FormField::Series, "Series must be a series id")
         );
     }
 

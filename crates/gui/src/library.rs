@@ -60,9 +60,10 @@ use crate::detail::{
 };
 use crate::documentation::{DocumentationWindow, OpenDocumentation};
 use crate::edit::{
-    BibliographicField, EditDraft, ErrorTarget, FieldError, KindItem, build_create, build_update,
-    kind_items, prefill_draft,
+    BibliographicField, EditDraft, FieldError, KindItem, build_create, build_update, kind_items,
+    prefill_draft,
 };
+use crate::edit_layout::{FormField, Section};
 use crate::icons::symbol;
 use crate::import_dialog::{ConflictPolicy, ImportConfirmed, ImportDialog};
 use crate::inline_edit::{
@@ -2667,6 +2668,7 @@ fn details_suggestion_field(field: BibliographicField) -> Option<ibex_core::Reso
     use BibliographicField as F;
     use ibex_core::ResourceTextField as S;
     Some(match field {
+        F::Publisher => S::Publisher,
         F::Language => S::Language,
         F::Institution => S::Institution,
         F::Organization => S::Organization,
@@ -3115,7 +3117,6 @@ impl CreatorRow {
 /// [`LibraryApp::request_edit`]).
 struct EditForm {
     record: Box<Resource>,
-    favorite: bool,
     title: Entity<InputState>,
     kind: Entity<ComboboxState<SearchableVec<KindItem>>>,
     parent: Entity<ComboboxState<SearchableVec<ParentItem>>>,
@@ -3123,7 +3124,6 @@ struct EditForm {
     creator_rows: Vec<CreatorRow>,
     next_creator_key: u64,
     people_names: HashMap<PersonId, String>,
-    publisher: DetailsValueControl,
     fields: BTreeMap<BibliographicField, BibliographicInput>,
     _value_suggestions: Entity<DetailsSuggestions>,
     series: Entity<ComboboxState<SeriesDelegate>>,
@@ -3132,7 +3132,6 @@ struct EditForm {
     series_loading: bool,
     series_error: Option<String>,
     series_creating: bool,
-    series_number: Entity<InputState>,
     /// Tags staged for save: order matches the form rows; the Combobox
     /// adds, the row × removes, neither writes until Save.
     tags: Vec<Tag>,
@@ -3284,13 +3283,6 @@ impl EditForm {
             creator_rows,
             next_creator_key: draft.creators.len() as u64,
             people_names,
-            publisher: DetailsValueControl::new(
-                ibex_core::ResourceTextField::Publisher,
-                draft.publisher,
-                &value_suggestions,
-                window,
-                cx,
-            ),
             fields: BibliographicField::ALL
                 .iter()
                 .map(|field| {
@@ -3341,7 +3333,11 @@ impl EditForm {
                         input.update(cx, |input, cx| input.set_value(value, window, cx));
                         BibliographicInput::Multiline(input)
                     } else {
-                        BibliographicInput::Single(prefill_input(value, field.label(), window, cx))
+                        let placeholder = match field {
+                            BibliographicField::SeriesNumber => "e.g. LCL 26",
+                            _ => field.label(),
+                        };
+                        BibliographicInput::Single(prefill_input(value, placeholder, window, cx))
                     };
                     (*field, input)
                 })
@@ -3356,11 +3352,9 @@ impl EditForm {
             series_loading: true,
             series_error: None,
             series_creating: false,
-            series_number: prefill_input(draft.series_number, "e.g. LCL 26", window, cx),
             tags,
             collections,
             author_creating: false,
-            favorite: record.favorite,
             record: Box::new(record),
             error: None,
             saving: false,
@@ -3418,12 +3412,10 @@ impl EditForm {
                 .copied()
                 .unwrap_or(self.record.kind),
             parent: self.parent.read(cx).selected_values().first().cloned(),
-            publisher: self.publisher.staged.borrow().clone(),
             series: self
                 .series_selected
                 .map(|id| id.to_string())
                 .unwrap_or_default(),
-            series_number: value(&self.series_number),
             creators: self.creator_rows.iter().map(|row| row.spec(cx)).collect(),
             tag_ids: self.tags.iter().map(|tag| tag.id).collect(),
             collection_ids: self.collections.iter().map(|c| c.id).collect(),
@@ -5479,11 +5471,8 @@ impl LibraryApp {
 
     /// Toggle by stored identity even when the detail panel is still loading.
     fn toggle_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(EditFetch::Ready(form)) = &mut self.edit {
-            if !form.saving {
-                form.favorite = !form.favorite;
-                cx.notify();
-            }
+        // The edit panel has no favorite control; the detail header owns it.
+        if matches!(self.edit, Some(EditFetch::Ready(_))) {
             return;
         }
         if self.wait_for_library_write(window, cx) {
@@ -6939,15 +6928,14 @@ impl LibraryApp {
             return;
         }
         let record = form.record.clone();
-        let favorite = form.favorite;
         let form_identity = form.title.clone();
         let draft = form.draft(cx);
         let input_error = form.fields.iter().find_map(|(field, input)| match input {
             BibliographicInput::Date(input) => input.read(cx).precision_error(cx).map(|error| {
-                FieldError::at(ErrorTarget::Field(*field), format!("{}: {error}", field.label()))
+                FieldError::at(FormField::for_bib(*field), format!("{}: {error}", field.label()))
             }),
             BibliographicInput::Tokens(input) => input.read(cx).pending_error(cx).map(|error| {
-                FieldError::at(ErrorTarget::Field(*field), format!("{}: {error}", field.label()))
+                FieldError::at(FormField::for_bib(*field), format!("{}: {error}", field.label()))
             }),
             _ => None,
         });
@@ -6980,14 +6968,14 @@ impl LibraryApp {
                                         .transpose()
                                         .map_err(|error| {
                                             FieldError::at(
-                                                ErrorTarget::Field(field),
+                                                FormField::Bib(field),
                                                 error.to_string(),
                                             )
                                         })?,
                                 )
                                 .map_err(|error| {
                                     FieldError::at(
-                                        ErrorTarget::Field(field),
+                                        FormField::Bib(field),
                                         format!("{}: {error}", field.label()),
                                     )
                                 })?,
@@ -7018,11 +7006,7 @@ impl LibraryApp {
         self.focus_table(window, cx);
         let worker = self.table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
-            let reply = match worker.update_resource(id, new).await {
-                Ok(resource) if favorite != resource.favorite => worker.set_resource_favorite(id, favorite).await
-                    .map_err(|err| format!("Bibliography saved, but favorite could not be saved: {err}. Retry Save.")),
-                other => other,
-            };
+            let reply = worker.update_resource(id, new).await;
             _ = app.update_in(window, |app, window, cx| {
                 if !matches!(&app.edit, Some(EditFetch::Ready(form)) if form.title == form_identity) { return; }
                 match reply {
@@ -7908,15 +7892,42 @@ impl LibraryApp {
         });
     }
 
-    /// The form: Save/Cancel above, one labelled row per scalar, the error
-    /// line under the buttons. Scrollable like the detail sidebar, so a
-    /// short window still reaches every row. Parent is a searchable
-    /// dropdown of library titles, not an id to type: users pick the
-    /// containing work by name.
+    /// The form: Save/Cancel above, then the registry's rows grouped under
+    /// section headers, with form-level errors first. Scrollable like the
+    /// detail sidebar, so a short window still reaches every row. Parent is
+    /// a searchable dropdown of library titles, not an id to type: users
+    /// pick the containing work by name.
     fn render_edit_panel(&self, form: &EditForm, cx: &mut Context<Self>) -> Div {
         let saving = form.saving;
         let error = form.error.clone().filter(|error| error.field.is_none());
         let danger = cx.theme().danger;
+        let muted = cx.theme().muted_foreground;
+        let mut sections = Vec::new();
+        for section in Section::ALL {
+            let rows: Vec<Div> = FormField::ORDER
+                .iter()
+                .copied()
+                .filter(|field| field.section() == section)
+                .map(|field| self.render_form_row(form, field, cx))
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            sections.push(
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("edit-section-{section:?}")))
+                            .test_support()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(section.title()),
+                    )
+                    .children(rows),
+            );
+        }
 
         v_flex()
             .h_full()
@@ -7951,253 +7962,231 @@ impl LibraryApp {
                             ),
                     )
             .child(
-                v_flex().id("edit-panel").test_support().flex_1().min_h_0().w_full().p_3().gap_2().overflow_y_scroll()
+                v_flex().id("edit-panel").test_support().flex_1().min_h_0().w_full().p_3().gap_4().overflow_y_scroll()
                     .capture_action(cx.listener(|app, action: &Enter, window, cx| {
                         if action.secondary { app.save_edit(window, cx); } else { cx.propagate(); }
                     }))
                     .when_some(error, |el, error| {
                         el.child(div().id("edit-form-error").test_support().aria_label(error.message.clone()).text_xs().text_color(danger).child(error.message))
                     })
-                    .child(edit_field("Title", div().id("edit-field-Title").test_support().w_full()
-                        .child(Input::new(&form.title).small().id("edit-title").aria_label("Title").disabled(saving).w_full())
-                        .children(field_error(form, ErrorTarget::Title, danger))))
-                    .children(render_bibliographic_fields(form, &[BibliographicField::Subtitle, BibliographicField::TitleAddon, BibliographicField::ShortTitle], saving, danger))
-                    .child(edit_field(
-                        "Kind",
-                        Combobox::new(&form.kind)
-                            .small()
-                            .placeholder("Kind")
-                            .search_placeholder("Search kinds")
-                            .disabled(saving)
-                            .w_full(),
-                    ))
-                    .child(edit_field("Creators",
-                        v_flex().w_full().gap_2()
-                            .children(form.creator_rows.iter().enumerate().map(|(ix, row)| {
-                                let key = row.key;
-                                let identity = form.title.entity_id();
-                                v_flex().id(SharedString::from(format!("creator-row-{key}"))).test_support().gap_1().w_full()
-                                    .can_drop(move |dragged, _, _| !saving && dragged.downcast_ref::<CreatorDrag>().is_some_and(|drag| drag.form == identity && drag.key != key))
-                                    .on_drop(cx.listener(move |app, drag: &CreatorDrag, _, cx| app.drop_creator(drag, key, cx)))
-                                    .drag_over::<CreatorDrag>(move |style, drag, _, cx| {
-                                        if saving || drag.form != identity || drag.key == key { return style; }
-                                        let style = style.border_color(cx.theme().accent).bg(cx.theme().muted);
-                                        if drag.position < ix { style.border_b_2() } else { style.border_t_2() }
-                                    })
-                                    .child(div().id(SharedString::from(format!("creator-drag-{key}"))).test_support()
-                                        .aria_label(format!("Drag to reorder {}", row.name))
-                                        .tooltip(|window, cx| Tooltip::new("Drag to reorder creator; or use Move up / Move down").build(window, cx))
-                                        .child(h_flex().gap_1().items_center()
-                                            .child(symbol("line.3.horizontal", AssetIconName::GripVertical).small().text_color(cx.theme().muted_foreground))
-                                            .child(row.name.clone()))
-                                        .when(!saving, |header| header.cursor_grab().on_drag(
-                                            CreatorDrag { form: identity, key, position: ix, name: row.name.clone().into() },
-                                            |drag, _, _, cx| cx.new(|_| drag.clone()),
-                                        )))
-                                    .child(div().id(SharedString::from(format!("creator-role-{key}"))).test_support().w_full().child(
-                                        Combobox::new(&row.role).small().placeholder("Role").search_placeholder("Search roles").disabled(saving).w_full()
-                                    ))
-                                    .child(div().id(SharedString::from(format!("creator-credit-{key}"))).test_support().w_full().child(
-                                        Input::new(&row.credited_as).small().aria_label("Credited as").disabled(saving).w_full()
-                                    ))
-                                    .child(h_flex().gap_1()
-                                        .child(Button::new(SharedString::from(format!("creator-up-{key}"))).ghost().xsmall().label("Move up").disabled(saving || ix == 0)
-                                            .on_click(cx.listener(move |app, _, _, cx| app.move_creator(key, -1, cx))))
-                                        .child(Button::new(SharedString::from(format!("creator-down-{key}"))).ghost().xsmall().label("Move down").disabled(saving || ix + 1 == form.creator_rows.len())
-                                            .on_click(cx.listener(move |app, _, _, cx| app.move_creator(key, 1, cx))))
-                                        .child(Button::new(SharedString::from(format!("creator-remove-{key}"))).ghost().xsmall().label("Remove").tooltip("Remove creator").disabled(saving)
-                                            .on_click(cx.listener(move |app, _, _, cx| {
-                                                if let Some(EditFetch::Ready(form)) = &mut app.edit && !form.saving { form.creator_rows.retain(|r| r.key != key); cx.notify(); }
-                                            })))
-                                    )
-                            }))
-                            .child(div().id("add-creator-person").test_support().w_full().child(
-                                Combobox::new(&form.creators).small().placeholder("Select or create person").search_placeholder("Search people").disabled(saving).w_full()
-                            ))
-                            .child(Button::new("add-creator").ghost().small().label("Add creator").disabled(saving)
-                                .on_click(cx.listener(|app, _, window, cx| app.add_creator(window, cx))))
-                    ))
-                    .child(edit_field(
-                        "Publisher",
-                        div().id("edit-field-Publisher").test_support().w_full().child(form.publisher.render(saving))
-                            .children(field_error(form, ErrorTarget::Publisher, danger)),
-                    ))
-                    .children(render_bibliographic_fields(form, &[BibliographicField::Place, BibliographicField::Edition, BibliographicField::Language, BibliographicField::DocumentType, BibliographicField::PublicationMethod, BibliographicField::Institution, BibliographicField::Organization], saving, danger))
-                    .children(render_bibliographic_fields(form, &[BibliographicField::Published, BibliographicField::PublishedDisplay, BibliographicField::OriginalDate, BibliographicField::OriginalDateDisplay, BibliographicField::EventDate, BibliographicField::EventDateDisplay], saving, danger))
-                    .child(edit_field(
-                        "Parent",
-                        Combobox::new(&form.parent)
-                            .small()
-                            .placeholder("Parent")
-                            .search_placeholder("Search resources")
-                            .cleanable(true)
-                            .disabled(saving)
-                            .w_full(),
-                    ))
-                    .children(render_bibliographic_fields(form, &[BibliographicField::Volume, BibliographicField::Issue, BibliographicField::Pages, BibliographicField::TotalPages, BibliographicField::ArticleNumber], saving, danger))
-                    .child(edit_field(
-                        "Series",
-                        div().id("edit-series").test_support().w_full().child(
-                            Combobox::new(&form.series)
-                                .small()
-                                .placeholder(if form.series_loading {
-                                    "Loading series…"
-                                } else {
-                                    "Select series"
-                                })
-                                .search_placeholder("Search or create series")
-                                .cleanable(true)
-                                .disabled(saving || form.series_loading || form.series_creating)
-                                .w_full(),
-                        ).children(field_error(form, ErrorTarget::Series, danger)).when_some(form.series_error.as_ref(), |field, error| field.child(div().text_xs().child(error.clone())).child(
-                            Button::new("retry-series").ghost().small().label("Retry").disabled(saving).on_click(cx.listener(|app, _, window, cx| {
-                                let Some(EditFetch::Ready(form)) = &app.edit else { return; };
-                                app.load_series_options(form.series.clone(), window, cx);
-                            }))
-                        )),
-                    ))
-                    .child(edit_field(
-                        "Series no.",
-                        div().id("edit-field-SeriesNumber").test_support().w_full()
-                            .child(Input::new(&form.series_number).small().id("edit-series-number").aria_label("Series number").disabled(saving).w_full())
-                            .children(field_error(form, ErrorTarget::SeriesNumber, danger)),
-                    ))
-                    .children(render_bibliographic_fields(form, &[BibliographicField::Doi, BibliographicField::Url, BibliographicField::Eprint], saving, danger))
-                    .children(render_bibliographic_fields(form, &[BibliographicField::Isbns, BibliographicField::Issns, BibliographicField::Isrns], saving, danger))
-                    .children(render_bibliographic_fields(form, &[BibliographicField::Accessed, BibliographicField::AccessedDisplay], saving, danger))
-                    .children(render_bibliographic_fields(form, &[BibliographicField::AbstractText], saving, danger))
-                    .children(render_bibliographic_fields(form, &[BibliographicField::Keywords], saving, danger))
-                    .child(edit_field("Favorite", gpui_kit::component::checkbox::Checkbox::new("edit-favorite")
-                        .accessibility_label("Favorite").checked(form.favorite).disabled(saving)
-                        .on_change(cx.listener(|app, checked, _, cx| {
-                            if let Some(EditFetch::Ready(form)) = &mut app.edit && !form.saving { form.favorite = *checked; cx.notify(); }
-                        }))))
-                    .child(edit_field(
-                        "Tags",
-                        v_flex()
-                            .gap_1()
-                            .w_full()
-                            .child(
-                                Combobox::new(&self.tag_picker)
-                                    .small()
-                                    .placeholder("Add tag")
-                                    .search_placeholder("Search or create...")
-                                    .disabled(saving)
-                                    .w_full(),
-                            )
-                            .children(form.tags.iter().map(|tag| {
-                                let tag_id = tag.id;
-                                h_flex()
-                                    .w_full()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(tag.text.as_str().to_owned()),
-                                    )
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "unstage-tag-{tag_id}"
-                                        )))
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(Icon::new(IconName::Close).xsmall())
-                                        .tooltip("Remove tag")
-                                        .accessibility_label("Detach tag").disabled(saving)
-                                        .on_click(
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.unstage_tag_on_edit_form(tag_id, window, cx)
-                                            }),
-                                        ),
-                                    )
-                            })),
-                    ))
-                    .child(edit_field(
-                        "Collections",
-                        v_flex()
-                            .gap_1()
-                            .w_full()
-                            .child(
-                                Combobox::new(&self.collection_picker)
-                                    .small()
-                                    .placeholder("Add collection")
-                                    .search_placeholder("Search collections...")
-                                    .disabled(saving)
-                                    .w_full(),
-                            )
-                            .children(form.collections.iter().map(|collection| {
-                                let collection_id = collection.id;
-                                h_flex()
-                                    .w_full()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(collection.name.as_str().to_owned()),
-                                    )
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "unstage-collection-{collection_id}"
-                                        )))
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(Icon::new(IconName::Close).xsmall())
-                                        .tooltip("Remove collection")
-                                        .accessibility_label("Detach collection").disabled(saving)
-                                        .on_click(
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.unstage_collection_on_edit_form(
-                                                    collection_id,
-                                                    window,
-                                                    cx,
-                                                )
-                                            }),
-                                        ),
-                                    )
-                            })),
-                    ))
-                    .children(render_bibliographic_fields(form, &[BibliographicField::Citekey, BibliographicField::Venue], saving, danger)),
+                    .children(sections),
             )
+    }
+
+    /// One registry row: the label column plus the control that edits
+    /// `field`, with the form's error underneath when it targets the row.
+    fn render_form_row(&self, form: &EditForm, field: FormField, cx: &mut Context<Self>) -> Div {
+        let saving = form.saving;
+        let danger = cx.theme().danger;
+        let label = field.label(form.record.kind);
+        match field {
+            FormField::Kind => edit_field(
+                label,
+                Combobox::new(&form.kind)
+                    .small()
+                    .placeholder("Kind")
+                    .search_placeholder("Search kinds")
+                    .disabled(saving)
+                    .w_full(),
+            ),
+            FormField::Title => edit_field(label, div().id("edit-field-Title").test_support().w_full()
+                .child(Input::new(&form.title).small().id("edit-title").aria_label("Title").disabled(saving).w_full())
+                .children(field_error(form, field, danger))),
+            FormField::Creators => edit_field(label,
+                v_flex().w_full().gap_2()
+                    .children(form.creator_rows.iter().enumerate().map(|(ix, row)| {
+                        let key = row.key;
+                        let identity = form.title.entity_id();
+                        v_flex().id(SharedString::from(format!("creator-row-{key}"))).test_support().gap_1().w_full()
+                            .can_drop(move |dragged, _, _| !saving && dragged.downcast_ref::<CreatorDrag>().is_some_and(|drag| drag.form == identity && drag.key != key))
+                            .on_drop(cx.listener(move |app, drag: &CreatorDrag, _, cx| app.drop_creator(drag, key, cx)))
+                            .drag_over::<CreatorDrag>(move |style, drag, _, cx| {
+                                if saving || drag.form != identity || drag.key == key { return style; }
+                                let style = style.border_color(cx.theme().accent).bg(cx.theme().muted);
+                                if drag.position < ix { style.border_b_2() } else { style.border_t_2() }
+                            })
+                            .child(div().id(SharedString::from(format!("creator-drag-{key}"))).test_support()
+                                .aria_label(format!("Drag to reorder {}", row.name))
+                                .tooltip(|window, cx| Tooltip::new("Drag to reorder creator; or use Move up / Move down").build(window, cx))
+                                .child(h_flex().gap_1().items_center()
+                                    .child(symbol("line.3.horizontal", AssetIconName::GripVertical).small().text_color(cx.theme().muted_foreground))
+                                    .child(row.name.clone()))
+                                .when(!saving, |header| header.cursor_grab().on_drag(
+                                    CreatorDrag { form: identity, key, position: ix, name: row.name.clone().into() },
+                                    |drag, _, _, cx| cx.new(|_| drag.clone()),
+                                )))
+                            .child(div().id(SharedString::from(format!("creator-role-{key}"))).test_support().w_full().child(
+                                Combobox::new(&row.role).small().placeholder("Role").search_placeholder("Search roles").disabled(saving).w_full()
+                            ))
+                            .child(div().id(SharedString::from(format!("creator-credit-{key}"))).test_support().w_full().child(
+                                Input::new(&row.credited_as).small().aria_label("Credited as").disabled(saving).w_full()
+                            ))
+                            .child(h_flex().gap_1()
+                                .child(Button::new(SharedString::from(format!("creator-up-{key}"))).ghost().xsmall().label("Move up").disabled(saving || ix == 0)
+                                    .on_click(cx.listener(move |app, _, _, cx| app.move_creator(key, -1, cx))))
+                                .child(Button::new(SharedString::from(format!("creator-down-{key}"))).ghost().xsmall().label("Move down").disabled(saving || ix + 1 == form.creator_rows.len())
+                                    .on_click(cx.listener(move |app, _, _, cx| app.move_creator(key, 1, cx))))
+                                .child(Button::new(SharedString::from(format!("creator-remove-{key}"))).ghost().xsmall().label("Remove").tooltip("Remove creator").disabled(saving)
+                                    .on_click(cx.listener(move |app, _, _, cx| {
+                                        if let Some(EditFetch::Ready(form)) = &mut app.edit && !form.saving { form.creator_rows.retain(|r| r.key != key); cx.notify(); }
+                                    })))
+                            )
+                    }))
+                    .child(div().id("add-creator-person").test_support().w_full().child(
+                        Combobox::new(&form.creators).small().placeholder("Select or create person").search_placeholder("Search people").disabled(saving).w_full()
+                    ))
+                    .child(Button::new("add-creator").ghost().small().label("Add creator").disabled(saving)
+                        .on_click(cx.listener(|app, _, window, cx| app.add_creator(window, cx))))
+            ),
+            FormField::Parent => edit_field(
+                label,
+                Combobox::new(&form.parent)
+                    .small()
+                    .placeholder("Parent")
+                    .search_placeholder("Search resources")
+                    .cleanable(true)
+                    .disabled(saving)
+                    .w_full(),
+            ),
+            FormField::Series => edit_field(
+                label,
+                div().id("edit-series").test_support().w_full().child(
+                    Combobox::new(&form.series)
+                        .small()
+                        .placeholder(if form.series_loading {
+                            "Loading series…"
+                        } else {
+                            "Select series"
+                        })
+                        .search_placeholder("Search or create series")
+                        .cleanable(true)
+                        .disabled(saving || form.series_loading || form.series_creating)
+                        .w_full(),
+                ).children(field_error(form, field, danger)).when_some(form.series_error.as_ref(), |field, error| field.child(div().text_xs().child(error.clone())).child(
+                    Button::new("retry-series").ghost().small().label("Retry").disabled(saving).on_click(cx.listener(|app, _, window, cx| {
+                        let Some(EditFetch::Ready(form)) = &app.edit else { return; };
+                        app.load_series_options(form.series.clone(), window, cx);
+                    }))
+                )),
+            ),
+            FormField::Identifiers => {
+                use BibliographicField as F;
+                let muted = cx.theme().muted_foreground;
+                edit_field(
+                    label,
+                    v_flex().id("edit-field-Identifiers").test_support().w_full().gap_1()
+                        .children([F::Doi, F::Eprint, F::Isbns, F::Issns, F::Isrns].into_iter().map(|bib| {
+                            v_flex().w_full().gap_1()
+                                .child(div().text_xs().text_color(muted).child(bib.label()))
+                                .child(div().id(SharedString::from(format!("edit-field-{bib:?}"))).test_support().w_full()
+                                    .child(form.fields[&bib].render(bib, saving)))
+                        }))
+                        .children(field_error(form, field, danger)),
+                )
+            }
+            FormField::Tags => edit_field(
+                label,
+                v_flex()
+                    .gap_1()
+                    .w_full()
+                    .child(
+                        Combobox::new(&self.tag_picker)
+                            .small()
+                            .placeholder("Add tag")
+                            .search_placeholder("Search or create...")
+                            .disabled(saving)
+                            .w_full(),
+                    )
+                    .children(form.tags.iter().map(|tag| {
+                        let tag_id = tag.id;
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(tag.text.as_str().to_owned()),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "unstage-tag-{tag_id}"
+                                )))
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Close).xsmall())
+                                .tooltip("Remove tag")
+                                .accessibility_label("Detach tag").disabled(saving)
+                                .on_click(
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.unstage_tag_on_edit_form(tag_id, window, cx)
+                                    }),
+                                ),
+                            )
+                    })),
+            ),
+            FormField::Collections => edit_field(
+                label,
+                v_flex()
+                    .gap_1()
+                    .w_full()
+                    .child(
+                        Combobox::new(&self.collection_picker)
+                            .small()
+                            .placeholder("Add collection")
+                            .search_placeholder("Search collections...")
+                            .disabled(saving)
+                            .w_full(),
+                    )
+                    .children(form.collections.iter().map(|collection| {
+                        let collection_id = collection.id;
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(collection.name.as_str().to_owned()),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "unstage-collection-{collection_id}"
+                                )))
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Close).xsmall())
+                                .tooltip("Remove collection")
+                                .accessibility_label("Detach collection").disabled(saving)
+                                .on_click(
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.unstage_collection_on_edit_form(
+                                            collection_id,
+                                            window,
+                                            cx,
+                                        )
+                                    }),
+                                ),
+                            )
+                    })),
+            ),
+            FormField::Bib(bib) => edit_field(
+                label,
+                div()
+                    .id(SharedString::from(format!("edit-field-{bib:?}")))
+                    .test_support()
+                    .w_full()
+                    .child(form.fields[&bib].render(bib, saving))
+                    .children(field_error(form, field, danger)),
+            ),
+        }
     }
 }
 
-fn render_bibliographic_fields(
-    form: &EditForm,
-    fields: &[BibliographicField],
-    saving: bool,
-    danger: Hsla,
-) -> Vec<Div> {
-    fields
-        .iter()
-        .filter(|field| {
-            !matches!(
-                field,
-                BibliographicField::PublishedDisplay
-                    | BibliographicField::OriginalDateDisplay
-                    | BibliographicField::EventDateDisplay
-                    | BibliographicField::AccessedDisplay
-            )
-        })
-        .map(|field| {
-            edit_field(
-                field.label(),
-                div()
-                    .id(SharedString::from(format!("edit-field-{field:?}")))
-                    .test_support()
-                    .w_full()
-                    .child(form.fields[field].render(*field, saving))
-                    .children(field_error(form, ErrorTarget::Field(*field), danger)),
-            )
-        })
-        .collect()
-}
-
 /// The form's error when it names `target`, for display under that row.
-fn field_error(form: &EditForm, target: ErrorTarget, danger: Hsla) -> Option<impl IntoElement> {
+fn field_error(form: &EditForm, target: FormField, danger: Hsla) -> Option<impl IntoElement> {
     form.error
         .as_ref()
         .filter(|error| error.field == Some(target))
@@ -12542,9 +12531,16 @@ mod classification_tests {
         })
         .unwrap();
         for (target, row) in [
-            (super::ErrorTarget::SeriesNumber, "edit-field-SeriesNumber"),
-            (super::ErrorTarget::Publisher, "edit-field-Publisher"),
-            (super::ErrorTarget::Series, "edit-series"),
+            (
+                super::FormField::Bib(super::BibliographicField::SeriesNumber),
+                "edit-field-SeriesNumber",
+            ),
+            (
+                super::FormField::Bib(super::BibliographicField::Publisher),
+                "edit-field-Publisher",
+            ),
+            (super::FormField::Series, "edit-series"),
+            (super::FormField::Identifiers, "edit-field-Identifiers"),
         ] {
             f.app.update(cx, |app, cx| {
                 let Some(super::EditFetch::Ready(form)) = &mut app.edit else {
@@ -12693,7 +12689,7 @@ mod classification_tests {
     }
 
     #[gpui_kit::test]
-    fn details_labels_use_extra_sidebar_width_without_section_headings(cx: &mut TestAppContext) {
+    fn details_labels_use_extra_sidebar_width(cx: &mut TestAppContext) {
         let f = fixture(cx);
         select_first(&f, cx);
         cx.update_window(f.handle, |_, window, cx| {
@@ -12704,12 +12700,6 @@ mod classification_tests {
         settle(cx, &f.worker);
         cx.update_window(f.handle, |_, window, cx| {
             window.render_frame(cx);
-            let panel = window.find("edit-panel").bounds();
-            let title = window.find("edit-label-Title").bounds();
-            assert!(
-                title.top() - panel.top() < gpui_kit::px(24.),
-                "Start with Title, not a section heading"
-            );
             reveal_edit_control("edit-field-PublicationMethod", window, cx);
             let narrow = window.find("edit-label-Publication method").bounds();
             let handle = window.find("resize-right-sidebar").bounds().center();
@@ -12782,47 +12772,14 @@ mod classification_tests {
                             .max(addon.bottom())
                         < gpui_kit::px(20.)
             );
-            let labels = [
-                "Title",
-                "Subtitle",
-                "Title addon",
-                "Short title",
-                "Kind",
-                "Creators",
-                "Publisher",
-                "Place",
-                "Edition",
-                "Language",
-                "Document type",
-                "Publication method",
-                "Institution",
-                "Organization",
-                "Published date",
-                "Original date",
-                "Event date",
-                "Parent",
-                "Volume",
-                "Issue",
-                "Pages",
-                "Total pages",
-                "Article number",
-                "Series",
-                "Series no.",
-                "DOI",
-                "URL",
-                "Eprint",
-                "ISBNs",
-                "ISSNs",
-                "ISRNs",
-                "Accessed date",
-                "Abstract",
-                "Keywords",
-                "Favorite",
-                "Tags",
-                "Collections",
-                "Citekey",
-                "Venue",
-            ];
+            let kind = match &f.app.read(cx).edit {
+                Some(super::EditFetch::Ready(form)) => form.record.kind,
+                _ => panic!("form"),
+            };
+            let labels: Vec<&str> = super::FormField::ORDER
+                .iter()
+                .map(|field| field.label(kind))
+                .collect();
             for pair in labels.windows(2) {
                 let before = window
                     .find(gpui_kit::SharedString::from(format!(
@@ -12922,7 +12879,7 @@ mod classification_tests {
             assert_eq!(
                 form.error,
                 Some(super::FieldError::at(
-                    super::ErrorTarget::Field(F::Published),
+                    super::FormField::Bib(F::Published),
                     "Published date: Choose or enter a DateTime for the start"
                 ))
             );
@@ -13561,7 +13518,7 @@ mod classification_tests {
             assert!(error.message.contains("Keywords"));
             assert_eq!(
                 error.field,
-                Some(super::ErrorTarget::Field(super::BibliographicField::Keywords))
+                Some(super::FormField::Bib(super::BibliographicField::Keywords))
             );
         });
         assert_eq!(
@@ -13802,6 +13759,8 @@ mod classification_tests {
         settle(cx, &f.worker);
         let values: Vec<_> = F::ALL
             .iter()
+            // A series number is rejected without a series; edit.rs covers it.
+            .filter(|field| **field != F::SeriesNumber)
             .map(|field| {
                 (
                     *field,
@@ -13843,6 +13802,11 @@ mod classification_tests {
         })
         .unwrap();
         settle(cx, &f.worker);
+        f.app.read_with(cx, |app, _| {
+            if let Some(super::EditFetch::Ready(form)) = &app.edit {
+                panic!("save failed: {:?}", form.error);
+            }
+        });
         let rt = tokio::runtime::Runtime::new().unwrap();
         let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
         let draft = prefill_draft(&saved);
@@ -14119,10 +14083,12 @@ mod classification_tests {
     }
 
     #[gpui_kit::test]
-    fn details_favorite_is_staged_until_save(cx: &mut TestAppContext) {
+    fn details_edit_save_keeps_the_stored_favorite(cx: &mut TestAppContext) {
         let f = fixture(cx);
-        select_first(&f, cx);
         let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(f.worker.set_resource_favorite(f.resource, true))
+            .unwrap();
+        select_first(&f, cx);
         cx.update_window(f.handle, |_, window, cx| {
             window.render_frame(cx);
             window.click("edit-resource", cx);
@@ -14131,27 +14097,69 @@ mod classification_tests {
         settle(cx, &f.worker);
         cx.update_window(f.handle, |_, window, cx| {
             window.render_frame(cx);
-            reveal_edit_control("edit-favorite", window, cx);
-            window.click("edit-favorite", cx);
-            window.click("cancel-edit", cx);
-        })
-        .unwrap();
-        assert!(!rt.block_on(f.worker.resource(f.resource)).unwrap().favorite);
-        cx.update_window(f.handle, |_, window, cx| {
-            window.render_frame(cx);
-            window.click("edit-resource", cx);
-        })
-        .unwrap();
-        settle(cx, &f.worker);
-        cx.update_window(f.handle, |_, window, cx| {
-            window.render_frame(cx);
-            reveal_edit_control("edit-favorite", window, cx);
-            window.click("edit-favorite", cx);
+            assert!(window.try_find("edit-favorite").is_none());
             window.click("save-edit", cx);
         })
         .unwrap();
         settle(cx, &f.worker);
+        f.app.read_with(cx, |app, _| assert!(app.edit.is_none()));
         assert!(rt.block_on(f.worker.resource(f.resource)).unwrap().favorite);
+    }
+
+    #[gpui_kit::test]
+    fn details_sections_follow_the_registry_order(cx: &mut TestAppContext) {
+        use super::{FormField, Section};
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            let kind = match &f.app.read(cx).edit {
+                Some(super::EditFetch::Ready(form)) => form.record.kind,
+                _ => panic!("form"),
+            };
+            let header = |section: Section| {
+                window
+                    .find(gpui_kit::SharedString::from(format!(
+                        "edit-section-{section:?}"
+                    )))
+                    .bounds()
+            };
+            let headers: Vec<_> = Section::ALL.into_iter().map(header).collect();
+            for pair in headers.windows(2) {
+                assert!(pair[0].bottom() <= pair[1].top());
+            }
+            let row = |field: FormField| {
+                window
+                    .find(gpui_kit::SharedString::from(format!(
+                        "edit-label-{}",
+                        field.label(kind)
+                    )))
+                    .bounds()
+            };
+            let kind_row = row(FormField::Kind);
+            assert!(headers[0].bottom() <= kind_row.top());
+            for field in &FormField::ORDER[1..] {
+                assert!(kind_row.bottom() <= row(*field).top(), "Kind precedes {field:?}");
+            }
+            for field in FormField::ORDER {
+                let ix = Section::ALL
+                    .iter()
+                    .position(|section| *section == field.section())
+                    .unwrap();
+                let bounds = row(*field);
+                assert!(headers[ix].bottom() <= bounds.top(), "{field:?} under its header");
+                if let Some(next) = headers.get(ix + 1) {
+                    assert!(bounds.bottom() <= next.top(), "{field:?} before the next section");
+                }
+            }
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]
@@ -14291,7 +14299,7 @@ mod classification_tests {
                 };
                 assert!(form.error.as_ref().is_some_and(|error| {
                     error.message.contains("Published")
-                        && error.field == Some(super::ErrorTarget::Field(F::Published))
+                        && error.field == Some(super::FormField::Bib(F::Published))
                 }));
             });
             assert_eq!(
