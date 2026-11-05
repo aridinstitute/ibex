@@ -2827,12 +2827,24 @@ impl SearchableListItem for CreatorRoleItem {
         &self.0
     }
 }
+/// A creator menu item with an element id, which `PopupMenuItem::new`
+/// cannot carry, so tests can click it.
+fn creator_menu_item(id: String, label: &'static str) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .id(SharedString::from(id.clone()))
+            .test_support()
+            .child(label)
+    })
+}
+
 struct CreatorRow {
     key: u64,
     person_id: PersonId,
     name: String,
     role: Entity<ComboboxState<SearchableVec<CreatorRoleItem>>>,
     credited_as: Entity<InputState>,
+    show_credit: bool,
 }
 impl CreatorRow {
     fn new(
@@ -2845,6 +2857,7 @@ impl CreatorRow {
         use ibex_core::CreatorRole::*;
         let roles = vec![Author, Editor, Translator, Contributor, Host, Director];
         let selected = roles.iter().position(|role| *role == spec.role).unwrap();
+        let show_credit = spec.credited_as.is_some();
         Self {
             key,
             person_id: spec.person_id,
@@ -2866,6 +2879,7 @@ impl CreatorRow {
                 window,
                 cx,
             ),
+            show_credit,
         }
     }
     fn spec(&self, cx: &App) -> ibex_core::CreatorSpec {
@@ -3062,6 +3076,24 @@ impl EditForm {
                 if matches!(event, ComboboxEvent::Change(_)) {
                     app.load_inherited(window, cx);
                 }
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &creators,
+            window,
+            |app, picker, event: &ComboboxEvent<PersonDelegate>, window, cx| {
+                let ComboboxEvent::Change(choices) = event else {
+                    return;
+                };
+                if !choices
+                    .iter()
+                    .any(|choice| matches!(choice, PersonChoice::Existing(_)))
+                {
+                    return;
+                }
+                app.add_creator(window, cx);
+                picker.update(cx, |state, cx| state.set_selected_values(&[], window, cx));
             },
         )
         .detach();
@@ -6018,6 +6050,47 @@ impl LibraryApp {
         }
     }
 
+    fn remove_creator(&mut self, key: u64, cx: &mut Context<Self>) {
+        if let Some(EditFetch::Ready(form)) = &mut self.edit
+            && !form.saving
+        {
+            form.creator_rows.retain(|row| row.key != key);
+            cx.notify();
+        }
+    }
+
+    fn show_creator_credit(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        let Some(row) = form.creator_rows.iter_mut().find(|row| row.key == key) else {
+            return;
+        };
+        row.show_credit = true;
+        let input = row.credited_as.clone();
+        // The menu restores focus as it dismisses; focus after it.
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx))
+        });
+        cx.notify();
+    }
+
+    fn hide_creator_credit(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        if form.saving {
+            return;
+        }
+        let Some(row) = form.creator_rows.iter_mut().find(|row| row.key == key) else {
+            return;
+        };
+        row.show_credit = false;
+        row.credited_as
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        cx.notify();
+    }
+
     fn add_creator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(EditFetch::Ready(form)) = &mut self.edit else {
             return;
@@ -6177,9 +6250,20 @@ impl LibraryApp {
                                     cx.notify();
                                 }
                             });
-                        } else if let Some(EditFetch::Ready(form)) = &mut app.edit {
-                            form.author_creating = false;
-                            form.error = error.map(FieldError::form);
+                        } else {
+                            let created = error.is_none();
+                            if let Some(EditFetch::Ready(form)) = &mut app.edit {
+                                form.author_creating = false;
+                                form.error = error.map(FieldError::form);
+                            }
+                            // Programmatic selection emits no Change, so the
+                            // add-on-select subscription never sees this person.
+                            if created {
+                                app.add_creator(window, cx);
+                                picker.update(cx, |state, cx| {
+                                    state.set_selected_values(&[], window, cx)
+                                });
+                            }
                         }
                         cx.notify();
                     });
@@ -7979,6 +8063,9 @@ impl LibraryApp {
                     .children(form.creator_rows.iter().enumerate().map(|(ix, row)| {
                         let key = row.key;
                         let identity = form.title.entity_id();
+                        let first = ix == 0;
+                        let last = ix + 1 == form.creator_rows.len();
+                        let app = cx.entity().downgrade();
                         v_flex().id(SharedString::from(format!("creator-row-{key}"))).test_support().gap_1().w_full()
                             .can_drop(move |dragged, _, _| !saving && dragged.downcast_ref::<CreatorDrag>().is_some_and(|drag| drag.form == identity && drag.key != key))
                             .on_drop(cx.listener(move |app, drag: &CreatorDrag, _, cx| app.drop_creator(drag, key, cx)))
@@ -7987,38 +8074,47 @@ impl LibraryApp {
                                 let style = style.border_color(cx.theme().accent).bg(cx.theme().muted);
                                 if drag.position < ix { style.border_b_2() } else { style.border_t_2() }
                             })
-                            .child(div().id(SharedString::from(format!("creator-drag-{key}"))).test_support()
-                                .aria_label(format!("Drag to reorder {}", row.name))
-                                .tooltip(|window, cx| Tooltip::new("Drag to reorder creator; or use Move up / Move down").build(window, cx))
-                                .child(h_flex().gap_1().items_center()
-                                    .child(symbol("line.3.horizontal", AssetIconName::GripVertical).small().text_color(cx.theme().muted_foreground))
-                                    .child(row.name.clone()))
-                                .when(!saving, |header| header.cursor_grab().on_drag(
-                                    CreatorDrag { form: identity, key, position: ix, name: row.name.clone().into() },
-                                    |drag, _, _, cx| cx.new(|_| drag.clone()),
-                                )))
-                            .child(div().id(SharedString::from(format!("creator-role-{key}"))).test_support().w_full().child(
-                                Combobox::new(&row.role).small().placeholder("Role").search_placeholder("Search roles").disabled(saving).w_full()
-                            ))
-                            .child(div().id(SharedString::from(format!("creator-credit-{key}"))).test_support().w_full().child(
-                                Input::new(&row.credited_as).small().aria_label("Credited as").disabled(saving).w_full()
-                            ))
-                            .child(h_flex().gap_1()
-                                .child(Button::new(SharedString::from(format!("creator-up-{key}"))).ghost().xsmall().label("Move up").disabled(saving || ix == 0)
-                                    .on_click(cx.listener(move |app, _, _, cx| app.move_creator(key, -1, cx))))
-                                .child(Button::new(SharedString::from(format!("creator-down-{key}"))).ghost().xsmall().label("Move down").disabled(saving || ix + 1 == form.creator_rows.len())
-                                    .on_click(cx.listener(move |app, _, _, cx| app.move_creator(key, 1, cx))))
-                                .child(Button::new(SharedString::from(format!("creator-remove-{key}"))).ghost().xsmall().label("Remove").tooltip("Remove creator").disabled(saving)
-                                    .on_click(cx.listener(move |app, _, _, cx| {
-                                        if let Some(EditFetch::Ready(form)) = &mut app.edit && !form.saving { form.creator_rows.retain(|r| r.key != key); cx.notify(); }
+                            .child(h_flex().gap_1().items_center().w_full()
+                                .child(div().id(SharedString::from(format!("creator-drag-{key}"))).test_support().flex_1().min_w_0()
+                                    .aria_label(format!("Drag to reorder {}", row.name))
+                                    .tooltip(|window, cx| Tooltip::new("Drag to reorder creator, or use the creator menu").build(window, cx))
+                                    .child(h_flex().gap_1().items_center()
+                                        .child(symbol("line.3.horizontal", AssetIconName::GripVertical).small().text_color(cx.theme().muted_foreground))
+                                        .child(div().min_w_0().truncate().child(row.name.clone())))
+                                    .when(!saving, |header| header.cursor_grab().on_drag(
+                                        CreatorDrag { form: identity, key, position: ix, name: row.name.clone().into() },
+                                        |drag, _, _, cx| cx.new(|_| drag.clone()),
+                                    )))
+                                .child(div().id(SharedString::from(format!("creator-role-{key}"))).test_support().w(rems(8.)).flex_none().child(
+                                    Combobox::new(&row.role).small().placeholder("Role").search_placeholder("Search roles").disabled(saving).w_full()
+                                ))
+                                .child(Button::new(SharedString::from(format!("creator-menu-{key}"))).ghost().xsmall()
+                                    .icon(symbol("ellipsis", AssetIconName::Ellipsis)).tooltip("Creator options").disabled(saving)
+                                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, _cx| {
+                                        let Some(app) = app.upgrade() else {
+                                            return menu;
+                                        };
+                                        menu.item(creator_menu_item(format!("creator-credit-as-{key}"), "Credited as…")
+                                                .on_click(window.listener_for(&app, move |this, _, window, cx| this.show_creator_credit(key, window, cx))))
+                                            .item(creator_menu_item(format!("creator-up-{key}"), "Move up").disabled(first)
+                                                .on_click(window.listener_for(&app, move |this, _, _, cx| this.move_creator(key, -1, cx))))
+                                            .item(creator_menu_item(format!("creator-down-{key}"), "Move down").disabled(last)
+                                                .on_click(window.listener_for(&app, move |this, _, _, cx| this.move_creator(key, 1, cx))))
+                                            .item(PopupMenuItem::separator())
+                                            .item(creator_menu_item(format!("creator-remove-{key}"), "Remove")
+                                                .on_click(window.listener_for(&app, move |this, _, _, cx| this.remove_creator(key, cx))))
                                     })))
-                            )
+                            .when(row.show_credit, |el| el.child(h_flex().gap_1().items_center().w_full()
+                                .child(div().id(SharedString::from(format!("creator-credit-{key}"))).test_support().flex_1().min_w_0().child(
+                                    Input::new(&row.credited_as).small().aria_label("Credited as").disabled(saving).w_full()
+                                ))
+                                .child(Button::new(SharedString::from(format!("creator-credit-clear-{key}"))).ghost().xsmall()
+                                    .icon(symbol("xmark", AssetIconName::X)).tooltip("Clear credited as").disabled(saving)
+                                    .on_click(cx.listener(move |app, _, window, cx| app.hide_creator_credit(key, window, cx))))))
                     }))
                     .child(div().id("add-creator-person").test_support().w_full().child(
-                        Combobox::new(&form.creators).small().placeholder("Select or create person").search_placeholder("Search people").disabled(saving).w_full()
+                        Combobox::new(&form.creators).small().placeholder("Add creator…").search_placeholder("Search people").disabled(saving).w_full()
                     ))
-                    .child(Button::new("add-creator").ghost().small().label("Add creator").disabled(saving)
-                        .on_click(cx.listener(|app, _, window, cx| app.add_creator(window, cx))))
             ),
             FormField::Parent => edit_field(
                 label,
@@ -13983,7 +14079,14 @@ mod classification_tests {
         settle(cx, &f.worker);
         cx.update_window(f.handle, |_, window, cx| {
             window.render_frame(cx);
-            window.click("creator-up-1", cx);
+            window.click("creator-menu-0", cx);
+            window.render_frame(cx);
+            window.click("creator-down-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
             window.click("save-edit", cx);
         })
         .unwrap();
@@ -14315,7 +14418,13 @@ mod classification_tests {
         settle(cx, &f.worker);
         cx.update_window(f.handle, |_, window, cx| {
             window.render_frame(cx);
+            window.click("creator-menu-0", cx);
+            window.render_frame(cx);
             window.click("creator-remove-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.handle, |_, window, cx| {
             reveal_edit_control("add-creator-person", window, cx);
             window.click("add-creator-person", cx);
             window.input("Grace Hopper", cx);
@@ -14329,8 +14438,6 @@ mod classification_tests {
         .unwrap();
         settle(cx, &f.worker);
         cx.update_window(f.handle, |_, window, cx| {
-            reveal_edit_control("add-creator", window, cx);
-            window.click("add-creator", cx);
             window.click("save-edit", cx);
         })
         .unwrap();
@@ -14345,6 +14452,102 @@ mod classification_tests {
             .unwrap();
         assert_eq!(saved.creators[5].person_id, grace.id);
         assert_eq!(saved.creators[5].role, Author);
+    }
+
+    #[gpui_kit::test]
+    fn details_creator_credit_line_and_add_on_select(cx: &mut TestAppContext) {
+        use ibex_core::{CreatorRole as R, CreatorSpec, Name};
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let person =
+            rt.block_on(f.worker.create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            ))
+            .unwrap();
+        let mut new = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        new.creators = vec![
+            CreatorSpec {
+                person_id: person.id,
+                role: R::Editor,
+                credited_as: Some(NonEmptyStr::try_new("A. L.").unwrap()),
+            },
+            CreatorSpec {
+                person_id: person.id,
+                role: R::Translator,
+                credited_as: None,
+            },
+        ];
+        rt.block_on(f.worker.update_resource(f.resource, new))
+            .unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("creator-credit-0").is_some(),
+                "A credited creator shows its credit line on open"
+            );
+            assert!(
+                window.try_find("creator-credit-1").is_none(),
+                "An uncredited creator hides the credit line"
+            );
+            window.click("creator-menu-1", cx);
+            window.render_frame(cx);
+            window.click("creator-credit-as-1", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("creator-credit-1").is_some());
+            window.click("creator-credit-clear-0", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("creator-credit-0").is_none());
+            reveal_edit_control("add-creator-person", window, cx);
+            window.click("add-creator-person", cx);
+            window.input("Ada Lovelace", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        f.app.read_with(cx, |app, cx| {
+            let Some(super::EditFetch::Ready(form)) = &app.edit else {
+                panic!("form")
+            };
+            assert_eq!(form.creator_rows.len(), 3, "Selecting a person adds a row");
+            assert!(
+                form.creators.read(cx).selected_values().is_empty(),
+                "The picker clears after adding"
+            );
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        assert_eq!(
+            saved.creators,
+            [R::Editor, R::Translator, R::Author]
+                .into_iter()
+                .map(|role| CreatorSpec {
+                    person_id: person.id,
+                    role,
+                    credited_as: None,
+                })
+                .collect::<Vec<_>>()
+        );
     }
 
     /// Opens every row the kind hides, for tests that reach all fields.
