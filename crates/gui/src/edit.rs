@@ -19,8 +19,11 @@ use crate::kind::kind_label;
 use std::collections::BTreeMap;
 
 /// Registry for generic bibliographic text inputs. Lists use one entry per line,
-/// never commas. Dates accept a year, YYYY-MM, YYYY-MM-DD, or RFC3339 instant,
-/// optionally a slash-separated range and a trailing `?` or `~`. Display fields
+/// never commas. Dates accept a year, YYYY-MM, YYYY-MM-DD, RFC3339 instant or
+/// month-name form (`March 1991`, `4 March 1991`, `March 4, 1991`),
+/// optionally a range (`/`, `–`, `—`, ` to `, or `-` between bare years),
+/// a trailing `?` (uncertain), or a trailing `~` or leading `c.`, `ca.`,
+/// `circa` or `about` (approximate). Display fields
 /// independently override a date's label; they require a corresponding date.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BibliographicField {
@@ -814,6 +817,17 @@ fn instant_text(instant: UtcMillis, precision: DatePrecision) -> String {
             u8::from(at.month()),
             at.day()
         ),
+        // Imports without precision often store a bare year or day as
+        // midnight; show it as one so the narrow inline cell stays readable.
+        // `merge_date` compares against this same text, so an untouched
+        // prefill still keeps the stored precision.
+        DatePrecision::Unspecified if at.time() == time::Time::MIDNIGHT => {
+            if (at.month(), at.day()) == (time::Month::January, 1) {
+                instant_text(instant, DatePrecision::Year)
+            } else {
+                instant_text(instant, DatePrecision::Day)
+            }
+        }
         DatePrecision::DateTime | DatePrecision::Unspecified => at
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_else(|_| at.to_string()),
@@ -865,97 +879,230 @@ fn merge_date(
     *date = changed;
     Ok(())
 }
+
+/// A parsed date before it becomes a [`BibliographicDate`]. Each endpoint
+/// keeps the precision its own text spelled, which only the preview uses for
+/// the end.
+struct DateParts {
+    start: (UtcMillis, DatePrecision),
+    end: Option<(UtcMillis, DatePrecision)>,
+    certainty: DateCertainty,
+}
+
 // Partial display precision is not permission to round an imported instant.
-// Merge endpoint edits independently, including a certainty-only edit.
+// An endpoint whose text still reads the same as the stored one keeps its
+// stored instant (and, for the start, precision), so a certainty-only edit
+// or a respelling such as `March 1991` for `1991-03` changes nothing else.
 fn parse_date_preserving_endpoints(
     field: BibliographicField,
     text: &str,
     original: Option<&BibliographicDate>,
 ) -> Result<Option<BibliographicDate>, FieldError> {
-    let parsed = parse_date(field, text)?;
-    let (Some(original), Some(parsed)) = (original, parsed.as_ref()) else {
-        return Ok(parsed);
+    let Some(mut parts) = date_parts(field, text)? else {
+        return Ok(None);
     };
-    let old = date_text(Some(original));
-    let endpoints = |text: &str| {
-        let text = text.trim().trim_end_matches(['?', '~']);
-        let (start, end) = text.split_once('/').unwrap_or((text, ""));
-        (start.to_owned(), end.to_owned())
+    if let Some(original) = original
+        && let Some(old) = parse_date_parts(&date_text(Some(original)))
+    {
+        if parts.start == old.start {
+            parts.start = (original.instant(), original.precision());
+        }
+        if let (Some(end), Some(old_end), Some(stored)) =
+            (parts.end.as_mut(), old.end, original.end())
+            && end.0 == old_end.0
+        {
+            end.0 = stored;
+        }
+    }
+    date_from_parts(field, &parts).map(Some)
+}
+
+/// How the date input's text reads back: `1991`, `March 1991`,
+/// `4 March 1991` or an RFC3339 instant, `A – B` for a range, then
+/// ` · approximate` or ` · uncertain`. Empty text previews as empty.
+pub fn date_preview(field: BibliographicField, text: &str) -> Result<String, FieldError> {
+    let Some(parts) = date_parts(field, text)? else {
+        return Ok(String::new());
     };
-    let (old_start, old_end) = endpoints(&old);
-    let (start, end) = endpoints(text);
-    BibliographicDate::try_new_precise(
-        if start == old_start {
-            original.instant()
-        } else {
-            parsed.instant()
-        },
-        if end == old_end {
-            original.end()
-        } else {
-            parsed.end()
-        },
-        if start == old_start {
-            original.precision()
-        } else {
-            parsed.precision()
-        },
-        parsed.certainty(),
-        None,
-    )
-    .map(Some)
-    .map_err(|error| {
+    date_from_parts(field, &parts)?;
+    let mut preview = endpoint_preview(parts.start);
+    if let Some(end) = parts.end {
+        preview.push_str(" – ");
+        preview.push_str(&endpoint_preview(end));
+    }
+    preview.push_str(match parts.certainty {
+        DateCertainty::Approximate => " · approximate",
+        DateCertainty::Uncertain => " · uncertain",
+        DateCertainty::Exact => "",
+    });
+    Ok(preview)
+}
+
+fn endpoint_preview((instant, precision): (UtcMillis, DatePrecision)) -> String {
+    let Ok(at) = time::OffsetDateTime::from_unix_timestamp_nanos(
+        i128::from(instant.as_unix_ms()) * 1_000_000,
+    ) else {
+        return instant.as_unix_ms().to_string();
+    };
+    match precision {
+        DatePrecision::Year => at.year().to_string(),
+        DatePrecision::Month => format!("{} {}", at.month(), at.year()),
+        DatePrecision::Day => format!("{} {} {}", at.day(), at.month(), at.year()),
+        DatePrecision::DateTime | DatePrecision::Unspecified => {
+            instant_text(instant, DatePrecision::DateTime)
+        }
+    }
+}
+
+fn date_parts(field: BibliographicField, text: &str) -> Result<Option<DateParts>, FieldError> {
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    parse_date_parts(text).map(Some).ok_or_else(|| {
         FieldError::at(
             FormField::for_bib(field),
-            format!("{}: {error}", field.label()),
+            format!(
+                "{} must be a date such as 1991, March 1991, 4 March 1991, 1991-03-04 or 1990–1995; end with ? if uncertain, or ~ (or start with c.) if approximate",
+                field.label()
+            ),
         )
     })
 }
 
-fn parse_date(
+fn date_from_parts(
     field: BibliographicField,
-    text: &str,
-) -> Result<Option<BibliographicDate>, FieldError> {
+    parts: &DateParts,
+) -> Result<BibliographicDate, FieldError> {
     let at = |message: String| FieldError::at(FormField::for_bib(field), message);
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok(None);
-    }
-    let (text, certainty) = if let Some(text) = text.strip_suffix('?') {
-        (text, DateCertainty::Uncertain)
-    } else if let Some(text) = text.strip_suffix('~') {
-        (text, DateCertainty::Approximate)
-    } else {
-        (text, DateCertainty::Exact)
-    };
-    let error = || {
-        at(format!(
-            "{} must be a year, YYYY-MM, YYYY-MM-DD or RFC3339 date, optionally a range with / and suffix ? or ~",
-            field.label()
-        ))
-    };
-    let (start, end) = text
-        .split_once('/')
-        .map_or((text, None), |(start, end)| (start, Some(end)));
-    let (instant, precision) = parse_date_instant(start).ok_or_else(error)?;
-    let end = end
-        .map(|end| {
-            parse_date_instant(end)
-                .map(|(instant, _)| instant)
-                .ok_or_else(error)
-        })
-        .transpose()?;
+    let (instant, precision) = parts.start;
+    let end = parts.end.map(|(end, _)| end);
     if end.is_some_and(|end| end.as_unix_ms() < instant.as_unix_ms()) {
         return Err(at(format!(
             "{} range end must not precede its start",
             field.label()
         )));
     }
-    BibliographicDate::try_new_precise(instant, end, precision, certainty, None)
-        .map(Some)
+    BibliographicDate::try_new_precise(instant, end, precision, parts.certainty, None)
         .map_err(|e| at(format!("{}: {e}", field.label())))
 }
 
+fn parse_date_parts(text: &str) -> Option<DateParts> {
+    let text = text.trim();
+    let (text, certainty) = if let Some(text) = text.strip_suffix('?') {
+        (text, DateCertainty::Uncertain)
+    } else if let Some(text) = text.strip_suffix('~') {
+        (text, DateCertainty::Approximate)
+    } else if let Some(text) = strip_approximate_prefix(text) {
+        (text, DateCertainty::Approximate)
+    } else {
+        (text, DateCertainty::Exact)
+    };
+    let (start, end) = split_date_range(text.trim());
+    Some(DateParts {
+        start: parse_date_endpoint(start)?,
+        end: match end {
+            Some(end) => Some(parse_date_endpoint(end)?),
+            None => None,
+        },
+        certainty,
+    })
+}
+
+fn strip_approximate_prefix(text: &str) -> Option<&str> {
+    ["circa", "about", "ca.", "c."].iter().find_map(|prefix| {
+        let rest = text
+            .get(..prefix.len())
+            .filter(|head| head.eq_ignore_ascii_case(prefix))
+            .map(|_| &text[prefix.len()..])?;
+        // A word prefix needs a space after it; `c.1850` is fine.
+        (prefix.ends_with('.') || rest.starts_with(char::is_whitespace)).then(|| rest.trim_start())
+    })
+}
+
+fn split_date_range(text: &str) -> (&str, Option<&str>) {
+    let split = ["/", "–", "—"]
+        .iter()
+        .find_map(|separator| text.split_once(separator))
+        .or_else(|| {
+            let at = text.to_ascii_lowercase().find(" to ")?;
+            Some((&text[..at], &text[at + " to ".len()..]))
+        })
+        .or_else(|| {
+            // `-` also separates months and days, so it is a range only
+            // between two bare years.
+            let (start, end) = text.split_once('-')?;
+            let year = |part: &str| part.len() == 4 && part.bytes().all(|b| b.is_ascii_digit());
+            (year(start.trim()) && year(end.trim())).then_some((start, end))
+        });
+    match split {
+        Some((start, end)) => (start.trim(), Some(end.trim())),
+        None => (text, None),
+    }
+}
+
+fn parse_date_endpoint(text: &str) -> Option<(UtcMillis, DatePrecision)> {
+    parse_date_instant(text).or_else(|| parse_named_date(text))
+}
+
+/// `March 1991`, `4 March 1991`, `March 4, 1991` or `March 4 1991`, with
+/// full or three-letter month names in any case and an optional `.`.
+fn parse_named_date(text: &str) -> Option<(UtcMillis, DatePrecision)> {
+    let words = text
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let (month, day, year) = match words[..] {
+        [month, year] => (month, None, year),
+        [day, month, year] if month_number(month).is_some() => (month, Some(day), year),
+        [month, day, year] => (month, Some(day), year),
+        _ => return None,
+    };
+    let digits = |word: &str, max: usize| {
+        (!word.is_empty() && word.len() <= max && word.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| word.parse::<i32>().ok())
+            .flatten()
+    };
+    let month = month_number(month)?;
+    let year = digits(year, 9)?;
+    let day = match day {
+        Some(day) => Some(digits(day, 2)?),
+        None => None,
+    };
+    let at = time::Date::from_calendar_date(year, month, u8::try_from(day.unwrap_or(1)).ok()?)
+        .ok()?
+        .midnight()
+        .assume_utc();
+    Some((
+        UtcMillis::from_unix_ms(at.unix_timestamp() * 1000),
+        if day.is_some() {
+            DatePrecision::Day
+        } else {
+            DatePrecision::Month
+        },
+    ))
+}
+
+fn month_number(word: &str) -> Option<time::Month> {
+    const MONTHS: [&str; 12] = [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+    let word = word.strip_suffix('.').unwrap_or(word).to_ascii_lowercase();
+    let ix = MONTHS
+        .iter()
+        .position(|month| *month == word || (word.len() == 3 && month.starts_with(&word)))?;
+    time::Month::try_from(u8::try_from(ix + 1).ok()?).ok()
+}
 fn parse_date_instant(text: &str) -> Option<(UtcMillis, DatePrecision)> {
     if text.contains(['T', 't']) {
         let at = time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
@@ -1494,6 +1641,144 @@ mod tests {
         }
     }
     #[test]
+    fn unspecified_midnight_dates_prefill_short_and_round_trip_unchanged() {
+        use super::BibliographicField as F;
+        use ibex_core::DatePrecision as P;
+        for (instant, text) in [
+            (UtcMillis::jan_1_utc(1991).unwrap(), "1991"),
+            (UtcMillis::from_unix_ms(668_044_800_000), "1991-03-04"),
+        ] {
+            let mut record = loaded_record();
+            record.published = Some(BibliographicDate::try_new(instant, None).unwrap());
+            let draft = prefill_draft(&record);
+            assert_eq!(draft.fields[&F::Published], text);
+            let updated = build_update(&record, &draft).unwrap();
+            assert_eq!(updated, record.to_new());
+            assert_eq!(updated.published.unwrap().precision(), P::Unspecified);
+        }
+    }
+    #[test]
+    fn respelled_endpoints_keep_stored_instant_and_precision() {
+        use super::BibliographicField as F;
+        use ibex_core::{DateCertainty as C, DatePrecision as P};
+        let mut record = loaded_record();
+        // Mid-March: the stored instant is finer than its Month text.
+        let stored = UtcMillis::from_unix_ms(668_563_200_000);
+        record.published = Some(
+            BibliographicDate::try_new_precise(stored, None, P::Month, C::Exact, None).unwrap(),
+        );
+        let mut draft = prefill_draft(&record);
+        assert_eq!(draft.fields[&F::Published], "1991-03");
+        for (text, certainty) in [("March 1991", C::Exact), ("c. Mar. 1991", C::Approximate)] {
+            draft.fields.insert(F::Published, text.into());
+            let date = build_update(&record, &draft).unwrap().published.unwrap();
+            assert_eq!(date.instant(), stored, "{text}");
+            assert_eq!(date.precision(), P::Month);
+            assert_eq!(date.certainty(), certainty);
+        }
+        draft.fields.insert(F::Published, "April 1991".into());
+        let date = build_update(&record, &draft).unwrap().published.unwrap();
+        assert_eq!(date.instant(), UtcMillis::from_unix_ms(670_464_000_000));
+    }
+    #[test]
+    fn smart_date_forms_parse() {
+        use super::BibliographicField as F;
+        use ibex_core::{DateCertainty as C, DatePrecision as P};
+        let march = 667_785_600_000; // 1991-03-01
+        let march_4 = 668_044_800_000; // 1991-03-04
+        let y1990 = UtcMillis::jan_1_utc(1990).unwrap().as_unix_ms();
+        let y1995 = UtcMillis::jan_1_utc(1995).unwrap().as_unix_ms();
+        let cases: [(&str, i64, Option<i64>, P, C); 21] = [
+            ("March 1991", march, None, P::Month, C::Exact),
+            ("mar 1991", march, None, P::Month, C::Exact),
+            ("MAR. 1991", march, None, P::Month, C::Exact),
+            ("4 March 1991", march_4, None, P::Day, C::Exact),
+            ("March 4, 1991", march_4, None, P::Day, C::Exact),
+            ("March 4 1991", march_4, None, P::Day, C::Exact),
+            ("4 mar. 1991", march_4, None, P::Day, C::Exact),
+            ("1990/1995", y1990, Some(y1995), P::Year, C::Exact),
+            ("1990–1995", y1990, Some(y1995), P::Year, C::Exact),
+            ("1990 — 1995", y1990, Some(y1995), P::Year, C::Exact),
+            ("1990 to 1995", y1990, Some(y1995), P::Year, C::Exact),
+            ("1990-1995", y1990, Some(y1995), P::Year, C::Exact),
+            ("1990-12", 660_009_600_000, None, P::Month, C::Exact),
+            ("March 1991 to 1995", march, Some(y1995), P::Month, C::Exact),
+            ("1991?", 662_688_000_000, None, P::Year, C::Uncertain),
+            ("1991~", 662_688_000_000, None, P::Year, C::Approximate),
+            ("c. 1850", -3_786_825_600_000, None, P::Year, C::Approximate),
+            ("c.1850", -3_786_825_600_000, None, P::Year, C::Approximate),
+            (
+                "ca. 1850",
+                -3_786_825_600_000,
+                None,
+                P::Year,
+                C::Approximate,
+            ),
+            (
+                "Circa 1850",
+                -3_786_825_600_000,
+                None,
+                P::Year,
+                C::Approximate,
+            ),
+            (
+                "about 1990-1995",
+                y1990,
+                Some(y1995),
+                P::Year,
+                C::Approximate,
+            ),
+        ];
+        for (text, instant, end, precision, certainty) in cases {
+            let mut draft = empty_create_draft();
+            draft.title = "Dates".into();
+            draft.fields.insert(F::Published, text.into());
+            let date = build_create(&draft)
+                .unwrap_or_else(|e| panic!("{text}: {e}"))
+                .published
+                .unwrap();
+            assert_eq!(date.instant().as_unix_ms(), instant, "{text}");
+            assert_eq!(date.end().map(UtcMillis::as_unix_ms), end, "{text}");
+            assert_eq!(date.precision(), precision, "{text}");
+            assert_eq!(date.certainty(), certainty, "{text}");
+        }
+        for text in [
+            "Marchember 1991",
+            "32 March 1991",
+            "March",
+            "1991 March 4 5",
+            "aboutx 1991",
+            "c. 1991?",
+            "1995-1990",
+            "1990-199",
+        ] {
+            let mut draft = empty_create_draft();
+            draft.title = "Dates".into();
+            draft.fields.insert(F::Published, text.into());
+            assert!(build_create(&draft).is_err(), "{text}");
+        }
+    }
+    #[test]
+    fn date_preview_reads_back_the_parsed_date() {
+        use super::{BibliographicField as F, date_preview};
+        for (text, preview) in [
+            ("", ""),
+            ("  ", ""),
+            ("1991", "1991"),
+            ("1991-03", "March 1991"),
+            ("c. March 1991", "March 1991 · approximate"),
+            ("March 4, 1991?", "4 March 1991 · uncertain"),
+            ("1990-1995", "1990 – 1995"),
+            ("2024-02-29T12:34:56Z", "2024-02-29T12:34:56Z"),
+        ] {
+            assert_eq!(date_preview(F::Published, text).unwrap(), preview);
+        }
+        let err = date_preview(F::Accessed, "soon").unwrap_err();
+        assert_eq!(err.field, Some(FormField::Bib(F::Accessed)));
+        assert!(err.message.contains(F::Accessed.label()), "{err}");
+        assert!(date_preview(F::Published, "1995/1990").is_err());
+    }
+    #[test]
     fn prefill_copies_every_stored_field() {
         use super::BibliographicField as F;
         let record = loaded_record();
@@ -1502,8 +1787,8 @@ mod tests {
         assert_eq!(draft.kind, ResourceKind::BookSection);
         assert_eq!(draft.parent, record.parent_id);
         assert_eq!(draft.fields[&F::Publisher], "MIT Press");
-        assert_eq!(draft.fields[&F::Published], "1991-01-01T00:00:00Z");
-        assert_eq!(draft.fields[&F::Accessed], "2020-01-01T00:00:00Z");
+        assert_eq!(draft.fields[&F::Published], "1991");
+        assert_eq!(draft.fields[&F::Accessed], "2020");
         assert_eq!(
             draft.series,
             record.series_id.expect("series set").to_string()

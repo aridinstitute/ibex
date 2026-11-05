@@ -1978,558 +1978,180 @@ enum EditFetch {
     Ready(Box<EditForm>),
 }
 
-/// Composed dates keep the exact draft spelling until an explicit edit. Each
-/// endpoint has its own precision and calendar, including date-time ranges.
+/// One text input for a date, in any form `date_preview` reads. The draft
+/// keeps the exact spelling, so an untouched imported date saves back
+/// unchanged; the preview row shows how the text will be stored.
 struct DetailsDateInput {
     owner: WeakEntity<LibraryApp>,
-    endpoints: [Entity<InputState>; 2],
-    calendars: [Entity<gpui_kit::component::date_picker::DatePickerState>; 2],
-    timed_calendars: [Entity<gpui_kit::component::date_picker::DatePickerState>; 2],
-    precision: [usize; 2],
-    precision_edited: bool,
-    choose_precision: Option<usize>,
-    certainty: usize,
-    choose_certainty: bool,
-    range: bool,
-    advanced: bool,
-    raw: Entity<InputState>,
-    expanded: bool,
+    field: BibliographicField,
+    input: Entity<InputState>,
+    calendar: Entity<gpui_kit::component::calendar::CalendarState>,
+    show_calendar: bool,
     display: Option<Entity<InputState>>,
+    show_display: bool,
     _subscriptions: Vec<Subscription>,
 }
 impl DetailsDateInput {
-    const PRECISIONS: [&'static str; 5] = ["Year", "Month", "Day", "DateTime", "Unspecified"];
-    const CERTAINTIES: [&'static str; 3] = ["Exact", "Approximate", "Uncertain"];
     fn new(
+        field: BibliographicField,
         value: String,
-        stored_precision: Option<ibex_core::DatePrecision>,
         owner: WeakEntity<LibraryApp>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        use gpui_kit::component::{date_picker::DatePickerState, time_field::TimePrecision};
-        let certainty = if value.ends_with('~') {
-            1
-        } else if value.ends_with('?') {
-            2
-        } else {
-            0
-        };
-        let text = value.trim_end_matches(['~', '?']);
-        let (start, end) = text.split_once('/').unwrap_or((text, ""));
-        let precision_of = |s: &str| {
-            if s.contains('T') {
-                3
-            } else {
-                match s.len() {
-                    4 => 0,
-                    7 => 1,
-                    _ => 2,
-                }
-            }
-        };
-        let mut precision = [precision_of(start), precision_of(end)];
-        if let Some(stored) = stored_precision {
-            use ibex_core::DatePrecision as P;
-            precision[0] = match stored {
-                P::Year => 0,
-                P::Month => 1,
-                P::Day => 2,
-                P::DateTime => 3,
-                P::Unspecified => 4,
-            };
-        }
-        let endpoints = [start, end].map(|s| {
-            cx.new(|cx| {
-                InputState::new(window, cx)
-                    .default_value(s)
-                    .placeholder("Year or year-month")
-            })
-        });
-        let raw = cx.new(|cx| {
+        use gpui_kit::component::calendar::{CalendarEvent, CalendarState};
+        let input = cx.new(|cx| {
             InputState::new(window, cx)
-                .default_value(value.clone())
-                .placeholder("ISO date, range, ? or ~")
+                .default_value(value)
+                .placeholder("e.g. 1991, March 1991, 1990–1995, c. 1850")
         });
-        let calendars = std::array::from_fn(|_| {
-            cx.new(|cx| DatePickerState::new(window, cx).date_format("%Y-%m-%d"))
-        });
-        let timed_calendars = std::array::from_fn(|_| {
-            cx.new(|cx| DatePickerState::new(window, cx).time_precision(TimePrecision::Second))
-        });
-        let mut this = Self {
-            owner,
-            endpoints,
-            calendars,
-            timed_calendars,
-            precision,
-            precision_edited: false,
-            choose_precision: None,
-            certainty,
-            choose_certainty: false,
-            range: text.contains('/'),
-            advanced: false,
-            raw,
-            expanded: false,
-            display: None,
-            _subscriptions: Vec::new(),
-        };
-        this._subscriptions.push(cx.subscribe_in(
-            &this.raw,
-            window,
-            |this, _, event, window, cx| {
-                if !this.expanded && matches!(event, InputEvent::Change) {
-                    this.absorb_raw(window, cx);
+        let calendar = cx.new(|cx| CalendarState::new(window, cx));
+        let subscriptions = vec![
+            cx.subscribe(&input, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
                 }
-            },
-        ));
-        for ix in 0..2 {
-            this.sync_calendar(ix, window, cx);
-            for calendar in [&this.calendars[ix], &this.timed_calendars[ix]] {
-                this._subscriptions.push(cx.subscribe_in(
-                    calendar,
-                    window,
-                    move |this, _, event, window, cx| {
-                        let gpui_kit::component::date_picker::DatePickerEvent::Change(value) =
-                            event;
-                        let text = value
-                            .start()
-                            .map(|at| {
-                                if this.precision[ix] == 3 {
-                                    // Second-precision controls cannot edit fractions; only raw ISO
-                                    // input may replace/remove the endpoint's imported subseconds.
-                                    let nanos = time::OffsetDateTime::parse(
-                                        &this.endpoints[ix].read(cx).value(),
-                                        &time::format_description::well_known::Rfc3339,
-                                    )
-                                    .map(|at| at.nanosecond())
-                                    .unwrap_or(0);
-                                    let fraction = if nanos == 0 {
-                                        String::new()
-                                    } else {
-                                        format!(".{nanos:09}").trim_end_matches('0').to_string()
-                                    };
-                                    format!("{}{fraction}Z", at.format("%Y-%m-%dT%H:%M:%S"))
-                                } else {
-                                    at.date().to_string()
-                                }
-                            })
-                            .unwrap_or_default();
-                        this.endpoints[ix]
-                            .update(cx, |input, cx| input.set_value(text, window, cx));
-                        cx.notify();
-                    },
-                ));
-            }
+            }),
+            cx.subscribe_in(&calendar, window, |this, _, event, window, cx| {
+                let CalendarEvent::Selected(date) = event;
+                if let Some(day) = date.start() {
+                    this.input.update(cx, |input, cx| {
+                        input.set_value(day.format("%Y-%m-%d").to_string(), window, cx)
+                    });
+                }
+                this.show_calendar = false;
+                cx.notify();
+            }),
+        ];
+        Self {
+            owner,
+            field,
+            input,
+            calendar,
+            show_calendar: false,
+            display: None,
+            show_display: false,
+            _subscriptions: subscriptions,
         }
-        this
-    }
-    fn absorb_raw(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let raw = self.raw.read(cx).value().to_string();
-        let text = raw.trim_end_matches(['~', '?']);
-        let (start, end) = text.split_once('/').unwrap_or((text, ""));
-        self.certainty = if raw.ends_with('~') {
-            1
-        } else if raw.ends_with('?') {
-            2
-        } else {
-            0
-        };
-        self.range = text.contains('/');
-        for (ix, text) in [start, end].iter().enumerate() {
-            if self.endpoints[ix].read(cx).value().as_ref() != *text {
-                self.precision[ix] = if text.contains('T') {
-                    3
-                } else {
-                    match text.len() {
-                        4 => 0,
-                        7 => 1,
-                        10 => 2,
-                        _ => 4,
-                    }
-                };
-                self.endpoints[ix].update(cx, |input, cx| {
-                    input.set_value(text.to_string(), window, cx)
-                });
-                self.sync_calendar(ix, window, cx);
-            }
-        }
-        cx.notify();
-    }
-    fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for input in self
-            .endpoints
-            .iter()
-            .chain(std::iter::once(&self.raw))
-            .chain(self.display.iter())
-        {
-            input.update(cx, |input, cx| input.set_value("", window, cx));
-        }
-        self.range = false;
-        self.certainty = 0;
-        self.precision_edited = false;
-        for ix in 0..2 {
-            self.sync_calendar(ix, window, cx);
-        }
-        cx.notify();
-    }
-    fn sync_calendar(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        use gpui_kit::component::{calendar::Date, date_picker::DateTime};
-        let text = self.endpoints[ix].read(cx).value();
-        // Incompatible drafts must clear cached selections, not display an old date.
-        // These programmatic setters do not emit Change, so the draft stays authoritative.
-        self.calendars[ix].update(cx, |picker, cx| {
-            picker.set_date(Date::Single(text.parse().ok()), window, cx)
-        });
-        let at = time::OffsetDateTime::parse(&text, &time::format_description::well_known::Rfc3339)
-            .ok()
-            .and_then(|at| {
-                at.to_offset(time::UtcOffset::UTC)
-                    .format(&time::format_description::well_known::Rfc3339)
-                    .ok()?
-                    .trim_end_matches('Z')
-                    .parse()
-                    .ok()
-            });
-        self.timed_calendars[ix].update(cx, |picker, cx| {
-            picker.set_date_time(DateTime::Single(at), window, cx)
-        });
-    }
-    fn precision_error(&self, cx: &App) -> Option<String> {
-        if self.advanced || self.value(cx).is_empty() {
-            return None;
-        }
-        for ix in 0..if self.range { 2 } else { 1 } {
-            let text = self.endpoints[ix].read(cx).value();
-            let matches = match self.precision[ix] {
-                0 => text.parse::<i32>().is_ok(),
-                1 => text.len() == 7,
-                2 => text.len() == 10,
-                3 => text.contains('T'),
-                _ => true,
-            };
-            if !matches {
-                return Some(format!(
-                    "Choose or enter a {} for the {}",
-                    Self::PRECISIONS[self.precision[ix]],
-                    if ix == 0 { "start" } else { "range end" }
-                ));
-            }
-        }
-        None
     }
     fn value(&self, cx: &App) -> String {
-        if self.advanced || !self.expanded {
-            return self.raw.read(cx).value().to_string();
-        }
-        let mut value = self.endpoints[0].read(cx).value().to_string();
-        if value.is_empty() && !self.range {
-            return value;
-        }
-        if self.range {
-            value.push('/');
-            value.push_str(&self.endpoints[1].read(cx).value());
-        }
-        value.push_str(["", "~", "?"][self.certainty]);
-        value
+        self.input.read(cx).value().to_string()
     }
 }
 impl Render for DetailsDateInput {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        use gpui_kit::component::date_picker::DatePicker;
+        use gpui_kit::component::calendar::{Calendar, Date};
         let disabled = self.owner.upgrade().is_none_or(
             |owner| matches!(&owner.read(cx).edit, Some(EditFetch::Ready(form)) if form.saving),
         );
-        let header = h_flex()
+        let preview = crate::edit::date_preview(self.field, &self.value(cx));
+        let (preview, color) = match preview {
+            Ok(preview) => (preview, cx.theme().muted_foreground),
+            Err(error) => (error.message, cx.theme().danger),
+        };
+        v_flex()
             .gap_1()
             .w_full()
-            .when(!self.expanded, |row| {
-                row.child(
-                    Input::new(&self.raw)
-                        .id("date-compact")
-                        .small()
-                        .aria_label("Date")
-                        .disabled(disabled)
-                        .w_full(),
+            .min_w_0()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .w_full()
+                    .child(
+                        Input::new(&self.input)
+                            .id("date-input")
+                            .small()
+                            .aria_label(self.field.label())
+                            .disabled(disabled)
+                            .w_full(),
+                    )
+                    .child(
+                        Button::new("date-calendar")
+                            .ghost()
+                            .small()
+                            .icon(Icon::new(IconName::Calendar).small())
+                            .accessibility_label("Pick a day")
+                            .tooltip("Pick a day")
+                            .selected(self.show_calendar)
+                            .disabled(disabled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_calendar = !this.show_calendar;
+                                if this.show_calendar {
+                                    let day = this.value(cx).trim().parse().ok();
+                                    this.calendar.update(cx, |calendar, cx| {
+                                        calendar.set_date(Date::Single(day), window, cx)
+                                    });
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("date-clear")
+                            .ghost()
+                            .small()
+                            .icon(Icon::new(IconName::Close).small())
+                            .accessibility_label("Clear date")
+                            .tooltip("Clear date")
+                            .disabled(disabled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                for input in std::iter::once(&this.input).chain(this.display.iter())
+                                {
+                                    input.update(cx, |input, cx| input.set_value("", window, cx));
+                                }
+                                this.show_calendar = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(self.show_calendar && !disabled, |content| {
+                content.child(Calendar::new(&self.calendar).small())
+            })
+            .when(!preview.is_empty(), |content| {
+                content.child(
+                    div()
+                        .id("date-preview")
+                        .test_support()
+                        .aria_label(preview.clone())
+                        .text_xs()
+                        .text_color(color)
+                        .child(preview),
                 )
             })
-            .child(
-                Button::new("date-disclosure")
-                    .ghost()
-                    .small()
-                    .icon(
-                        Icon::new(if self.expanded {
-                            IconName::ChevronUp
-                        } else {
-                            IconName::ChevronDown
-                        })
-                        .small(),
-                    )
-                    .accessibility_label("Date details")
-                    .tooltip("Date details")
-                    .disabled(disabled)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if this.expanded {
-                            let value = this.value(cx);
-                            this.raw
-                                .update(cx, |input, cx| input.set_value(value, window, cx));
-                        }
-                        this.expanded = !this.expanded;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("date-clear-compact")
-                    .ghost()
-                    .small()
-                    .icon(Icon::new(IconName::Close).small())
-                    .accessibility_label("Clear date")
-                    .tooltip("Clear date")
-                    .disabled(disabled)
-                    .on_click(cx.listener(|this, _, window, cx| this.clear(window, cx))),
-            );
-        let mut content = v_flex().gap_1().w_full().min_w_0().child(header);
-        if !self.expanded {
-            return content.into_any_element();
-        }
-        content =
-            content.capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" {
-                    let value = this.value(cx);
-                    this.raw
-                        .update(cx, |input, cx| input.set_value(value, window, cx));
-                    this.expanded = false;
-                    cx.stop_propagation();
-                    cx.notify();
+            .when_some(self.display.clone(), |content, display| {
+                if !self.show_display {
+                    return content.child(
+                        Button::new("date-display-toggle")
+                            .ghost()
+                            .xsmall()
+                            .label("Display as…")
+                            .disabled(disabled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_display = true;
+                                if let Some(display) = &this.display {
+                                    display.update(cx, |input, cx| input.focus(window, cx));
+                                }
+                                cx.notify();
+                            })),
+                    );
                 }
-            }));
-        if let Some(display) = &self.display {
-            content =
                 content.child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().id("display-help").child("Display as").tooltip(
-                            |window, cx| {
-                                Tooltip::new("Changes citation text, not stored date")
-                                    .build(window, cx)
-                            },
-                        ))
+                    div()
+                        .id("date-display-help")
+                        .w_full()
+                        .tooltip(|window, cx| {
+                            Tooltip::new("Changes citation text, not the stored date")
+                                .build(window, cx)
+                        })
                         .child(
-                            Input::new(display)
+                            Input::new(&display)
                                 .id("date-display")
                                 .small()
                                 .aria_label("Display as")
                                 .disabled(disabled)
                                 .w_full(),
                         ),
-                );
-        }
-        if self.advanced {
-            content = content.child(
-                Input::new(&self.raw)
-                    .id("date-raw")
-                    .small()
-                    .disabled(disabled)
-                    .w_full(),
-            );
-        } else {
-            for ix in 0..if self.range { 2 } else { 1 } {
-                let suffix = if ix == 0 { "start" } else { "end" };
-                content = content.child(
-                    Button::new(SharedString::from(format!("precision-{suffix}")))
-                        .small()
-                        .outline()
-                        .label(format!(
-                            "{}: {}",
-                            if ix == 0 { "Start" } else { "End" },
-                            Self::PRECISIONS[self.precision[ix]]
-                        ))
-                        .disabled(disabled)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.choose_precision = Some(ix);
-                            cx.notify();
-                        })),
-                );
-                if self.choose_precision == Some(ix) {
-                    content = content.child(
-                        h_flex().flex_wrap().gap_1().children(
-                            Self::PRECISIONS
-                                .iter()
-                                .enumerate()
-                                .map(|(precision, name)| {
-                                    Button::new(SharedString::from(format!("precision-{name}")))
-                                        .small()
-                                        .label(*name)
-                                        .selected(precision == self.precision[ix])
-                                        .disabled(disabled)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.precision[ix] = precision;
-                                            if ix == 0 {
-                                                this.precision_edited = true;
-                                            }
-                                            this.choose_precision = None;
-                                            let text =
-                                                this.endpoints[ix].read(cx).value().to_string();
-                                            let len = [4, 7, 10, usize::MAX, usize::MAX][precision];
-                                            if text.len() > len {
-                                                this.endpoints[ix].update(cx, |input, cx| {
-                                                    input.set_value(
-                                                        text[..len].to_string(),
-                                                        window,
-                                                        cx,
-                                                    )
-                                                });
-                                            }
-                                            this.sync_calendar(ix, window, cx);
-                                            cx.notify();
-                                        }))
-                                }),
-                        ),
-                    );
-                }
-                if matches!(self.precision[ix], 2 | 3) {
-                    let calendar = if self.precision[ix] == 3 {
-                        &self.timed_calendars[ix]
-                    } else {
-                        &self.calendars[ix]
-                    };
-                    content = content.child(
-                        DatePicker::new(calendar)
-                            .small()
-                            .cleanable(true)
-                            .disabled(disabled)
-                            .w_full(),
-                    );
-                } else {
-                    content = content.child(
-                        Input::new(&self.endpoints[ix])
-                            .id(SharedString::from(format!("date-{suffix}")))
-                            .small()
-                            .disabled(disabled)
-                            .w_full(),
-                    );
-                }
-            }
-            content = content.child(
-                Button::new("certainty")
-                    .small()
-                    .outline()
-                    .label(Self::CERTAINTIES[self.certainty])
-                    .disabled(disabled)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.choose_certainty = !this.choose_certainty;
-                        cx.notify();
-                    })),
-            );
-            if self.choose_certainty {
-                content = content.child(
-                    h_flex().flex_wrap().gap_1().children(
-                        Self::CERTAINTIES
-                            .iter()
-                            .enumerate()
-                            .map(|(certainty, name)| {
-                                Button::new(SharedString::from(format!("certainty-{name}")))
-                                    .small()
-                                    .label(*name)
-                                    .selected(certainty == self.certainty)
-                                    .disabled(disabled)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.certainty = certainty;
-                                        this.choose_certainty = false;
-                                        cx.notify();
-                                    }))
-                            }),
-                    ),
-                );
-            }
-            content = content.child(
-                Button::new("date-range")
-                    .small()
-                    .outline()
-                    .label(if self.range {
-                        "Remove range end"
-                    } else {
-                        "Add range end"
-                    })
-                    .disabled(disabled)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.range = !this.range;
-                        if this.range {
-                            this.precision[1] = this.precision[0];
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
-        content
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .child(
-                        Button::new("date-advanced")
-                            .small()
-                            .ghost()
-                            .label(if self.advanced {
-                                "Use controls"
-                            } else {
-                                "Advanced ISO input"
-                            })
-                            .disabled(disabled)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if !this.advanced {
-                                    let value = this.value(cx);
-                                    this.raw
-                                        .update(cx, |input, cx| input.set_value(value, window, cx));
-                                } else {
-                                    let raw = this.raw.read(cx).value().to_string();
-                                    let text = raw.trim_end_matches(['~', '?']);
-                                    let (start, end) = text.split_once('/').unwrap_or((text, ""));
-                                    this.certainty = if raw.ends_with('~') {
-                                        1
-                                    } else if raw.ends_with('?') {
-                                        2
-                                    } else {
-                                        0
-                                    };
-                                    this.range = text.contains('/');
-                                    for (ix, text) in [start, end].iter().enumerate() {
-                                        if this.endpoints[ix].read(cx).value().as_ref() != *text {
-                                            this.precision[ix] = if text.contains('T') {
-                                                3
-                                            } else {
-                                                match text.len() {
-                                                    4 => 0,
-                                                    7 => 1,
-                                                    10 => 2,
-                                                    _ => 4,
-                                                }
-                                            };
-                                        }
-                                        this.endpoints[ix].update(cx, |input, cx| {
-                                            input.set_value(text.to_string(), window, cx)
-                                        });
-                                        this.sync_calendar(ix, window, cx);
-                                    }
-                                }
-                                this.advanced = !this.advanced;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("date-clear")
-                            .small()
-                            .ghost()
-                            .icon(Icon::new(IconName::Close).small())
-                            .accessibility_label("Clear date")
-                            .tooltip("Clear date")
-                            .disabled(disabled)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.clear(window, cx);
-                            })),
-                    ),
-            )
-            .into_any_element()
+                )
+            })
     }
 }
 struct DetailsTokens {
@@ -3469,15 +3091,8 @@ impl EditForm {
                             | BibliographicField::EventDate
                     ) {
                         let owner = cx.entity().downgrade();
-                        let stored = match field {
-                            BibliographicField::Published => record.published.as_ref(),
-                            BibliographicField::Accessed => record.accessed.as_ref(),
-                            BibliographicField::OriginalDate => record.original_date.as_ref(),
-                            _ => record.event_date.as_ref(),
-                        }
-                        .map(ibex_core::BibliographicDate::precision);
                         BibliographicInput::Date(
-                            cx.new(|cx| DetailsDateInput::new(value, stored, owner, window, cx)),
+                            cx.new(|cx| DetailsDateInput::new(*field, value, owner, window, cx)),
                         )
                     } else if *field == BibliographicField::Keywords {
                         let owner = cx.entity().downgrade();
@@ -3558,7 +3173,7 @@ impl EditForm {
                 (&form.fields[&date], &form.fields[&display])
             {
                 date.update(cx, |date, cx| {
-                    date.expanded = !display.read(cx).value().is_empty();
+                    date.show_display = !display.read(cx).value().is_empty();
                     date.display = Some(display.clone());
                 });
             }
@@ -7267,60 +6882,15 @@ impl LibraryApp {
         let form_identity = form.title.clone();
         let draft = form.draft(cx);
         let input_error = form.fields.iter().find_map(|(field, input)| match input {
-            BibliographicInput::Date(input) => input.read(cx).precision_error(cx).map(|error| {
-                FieldError::at(FormField::for_bib(*field), format!("{}: {error}", field.label()))
-            }),
             BibliographicInput::Tokens(input) => input.read(cx).pending_error(cx).map(|error| {
                 FieldError::at(FormField::for_bib(*field), format!("{}: {error}", field.label()))
             }),
             _ => None,
         });
-        let payload = input_error
-            .map_or_else(|| draft.and_then(|draft| build_update(&record, &draft)), Err)
-            .and_then(|mut new| {
-                use ibex_core::{BibliographicDate, DatePrecision as P};
-                for (field, date) in [
-                    (BibliographicField::Published, &mut new.published),
-                    (BibliographicField::Accessed, &mut new.accessed),
-                    (BibliographicField::OriginalDate, &mut new.original_date),
-                    (BibliographicField::EventDate, &mut new.event_date),
-                ] {
-                    if let BibliographicInput::Date(input) = &form.fields[&field] {
-                        let input = input.read(cx);
-                        if input.precision_edited
-                            && !input.advanced
-                            && let Some(value) = date
-                        {
-                            *date = Some(
-                                BibliographicDate::try_new_precise(
-                                    value.instant(),
-                                    value.end(),
-                                    [P::Year, P::Month, P::Day, P::DateTime, P::Unspecified]
-                                        [input.precision[0]],
-                                    value.certainty(),
-                                    value
-                                        .display()
-                                        .map(NonEmptyStr::try_new)
-                                        .transpose()
-                                        .map_err(|error| {
-                                            FieldError::at(
-                                                FormField::Bib(field),
-                                                error.to_string(),
-                                            )
-                                        })?,
-                                )
-                                .map_err(|error| {
-                                    FieldError::at(
-                                        FormField::Bib(field),
-                                        format!("{}: {error}", field.label()),
-                                    )
-                                })?,
-                            );
-                        }
-                    }
-                }
-                Ok(new)
-            });
+        let payload = input_error.map_or_else(
+            || draft.and_then(|draft| build_update(&record, &draft)),
+            Err,
+        );
         let new = match payload {
             Ok(new) => new,
             Err(message) => {
@@ -8371,6 +7941,7 @@ impl LibraryApp {
             FormField::Identifiers => Some(form.identifiers.read(cx).pending.clone()),
             FormField::Bib(bib) => match &form.fields[&bib] {
                 BibliographicInput::Single(input) => Some(input.clone()),
+                BibliographicInput::Date(date) => Some(date.read(cx).input.clone()),
                 _ => None,
             },
             _ => None,
@@ -12902,7 +12473,9 @@ mod classification_tests {
     }
 
     #[gpui_kit::test]
-    fn details_dates_start_compact_and_disclose(cx: &mut TestAppContext) {
+    fn details_date_previews_approximate_month_and_saves_it(cx: &mut TestAppContext) {
+        use crate::edit::BibliographicField as F;
+        use ibex_core::{DateCertainty as C, DatePrecision as P, UtcMillis};
         let f = fixture(cx);
         select_first(&f, cx);
         cx.update_window(f.handle, |_, window, cx| {
@@ -12912,27 +12485,28 @@ mod classification_tests {
         .unwrap();
         settle(cx, &f.worker);
         cx.update_window(f.handle, |_, window, cx| {
-            reveal_edit_control("edit-field-Published", window, cx);
-            let date = window.find("edit-field-Published").bounds();
-            assert!(
-                date.size.height <= gpui_kit::px(32.),
-                "Ordinary dates occupy one small row"
-            );
-            window
-                .within("edit-field-Published")
-                .click("date-disclosure", cx);
+            enter_details_field(F::Published, "c. March 1991", window, cx);
             window.render_frame(cx);
-            assert!(
+            assert_eq!(
                 window
                     .within("edit-field-Published")
-                    .find("precision-start")
-                    .bounds()
-                    .size
-                    .height
-                    > gpui_kit::px(0.)
+                    .find("date-preview")
+                    .label(),
+                Some("March 1991 · approximate")
             );
+            window.click("save-edit", cx);
         })
         .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let date = rt
+            .block_on(f.worker.resource(f.resource))
+            .unwrap()
+            .published
+            .unwrap();
+        assert_eq!(date.instant(), UtcMillis::from_unix_ms(667_785_600_000));
+        assert_eq!(date.precision(), P::Month);
+        assert_eq!(date.certainty(), C::Approximate);
     }
     #[gpui_kit::test]
     fn details_field_errors_render_inside_their_rows(cx: &mut TestAppContext) {
@@ -13004,7 +12578,8 @@ mod classification_tests {
             assert!(window.find_all("edit-field-error").is_empty());
         })
         .unwrap();
-    }    #[gpui_kit::test]
+    }
+    #[gpui_kit::test]
     fn details_stock_geometry_and_title_freeze(cx: &mut TestAppContext) {
         let f = fixture(cx);
         select_first(&f, cx);
@@ -13245,9 +12820,7 @@ mod classification_tests {
         .unwrap();
     }
     #[gpui_kit::test]
-    fn details_date_incompatible_precision_clears_picker_without_changing_draft(
-        cx: &mut TestAppContext,
-    ) {
+    fn details_invalid_date_previews_error_and_blocks_save(cx: &mut TestAppContext) {
         use crate::edit::BibliographicField as F;
         let f = fixture(cx);
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -13259,47 +12832,16 @@ mod classification_tests {
         })
         .unwrap();
         settle(cx, &f.worker);
-        let ids = f.app.read_with(cx, |app, cx| {
-            let Some(super::EditFetch::Ready(form)) = &app.edit else {
-                panic!("form")
-            };
-            let super::BibliographicInput::Date(date) = &form.fields[&F::Published] else {
-                panic!("date")
-            };
-            let date = date.read(cx);
-            [
-                date.calendars[0].entity_id(),
-                date.timed_calendars[0].entity_id(),
-            ]
-            .map(|id| ("date-picker", id))
-        });
         cx.update_window(f.handle, |_, window, cx| {
-            enter_details_field(F::Published, "2026-09-15T08:00:00.123Z", window, cx);
-            window
-                .within("edit-field-Published")
-                .click("date-advanced", cx);
-            window
-                .within("edit-field-Published")
-                .click("precision-start", cx);
-            window.click("precision-Month", cx);
-            window
-                .within("edit-field-Published")
-                .click("date-start", cx);
-            window.press("cmd-a", cx);
-            window.input("2027-02", cx);
-            window
-                .within("edit-field-Published")
-                .click("precision-start", cx);
-            window.click("precision-DateTime", cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-        cx.update_window(f.handle, |_, window, cx| {
+            enter_details_field(F::Published, "soon", window, cx);
             window.render_frame(cx);
-            assert_eq!(
-                window.within("edit-field-Published").find(ids[1]).value(),
-                None
-            );
+            let preview = window
+                .within("edit-field-Published")
+                .find("date-preview")
+                .label()
+                .unwrap_or_default()
+                .to_owned();
+            assert!(preview.contains("must be a date"), "{preview}");
             window.click("save-edit", cx);
         })
         .unwrap();
@@ -13309,57 +12851,18 @@ mod classification_tests {
                 panic!("form")
             };
             assert_eq!(
-                form.error,
-                Some(super::FieldError::at(
-                    super::FormField::Bib(F::Published),
-                    "Published date: Choose or enter a DateTime for the start"
-                ))
+                form.error.as_ref().and_then(|error| error.field),
+                Some(super::FormField::Bib(F::Published))
             );
-            let super::BibliographicInput::Date(date) = &form.fields[&F::Published] else {
-                panic!("date")
-            };
-            assert_eq!(date.read(cx).value(cx), "2027-02");
+            assert_eq!(form.fields[&F::Published].value(cx), "soon");
         });
         assert_eq!(
             rt.block_on(f.worker.resource(f.resource)).unwrap().to_new(),
             original.to_new()
         );
-        cx.update_window(f.handle, |_, window, cx| {
-            reveal_edit_control("edit-field-Published", window, cx);
-            open_date_details("edit-field-Published", window, cx);
-            // Raw-to-controls must also discard both cached picker values.
-            enter_details_field(F::Published, "2028", window, cx);
-            window
-                .within("edit-field-Published")
-                .click("date-advanced", cx);
-            window
-                .within("edit-field-Published")
-                .click("precision-start", cx);
-            window.click("precision-Day", cx);
-            assert_eq!(
-                window.within("edit-field-Published").find(ids[0]).value(),
-                None
-            );
-            window
-                .within("edit-field-Published")
-                .click("precision-start", cx);
-            window.click("precision-DateTime", cx);
-            assert_eq!(
-                window.within("edit-field-Published").find(ids[1]).value(),
-                None
-            );
-            window
-                .within("edit-field-Published")
-                .click("date-clear", cx);
-            assert_eq!(
-                window.within("edit-field-Published").find(ids[1]).value(),
-                None
-            );
-        })
-        .unwrap();
     }
     #[gpui_kit::test]
-    fn details_datetime_range_has_independent_calendars_and_keyboard_time(cx: &mut TestAppContext) {
+    fn details_date_calendar_writes_a_day(cx: &mut TestAppContext) {
         use crate::edit::BibliographicField as F;
         let f = fixture(cx);
         select_first(&f, cx);
@@ -13370,90 +12873,44 @@ mod classification_tests {
         .unwrap();
         settle(cx, &f.worker);
         cx.update_window(f.handle, |_, window, cx| {
-            enter_details_field(
-                F::Published,
-                "2026-09-15T08:00:00.123Z/2026-09-20T12:30:00.456Z~",
-                window,
-                cx,
-            );
+            enter_details_field(F::Published, "2026-09-15", window, cx);
             window
                 .within("edit-field-Published")
-                .click("date-advanced", cx);
-        })
-        .unwrap();
-        let ids = f.app.read_with(cx, |app, cx| {
-            let Some(super::EditFetch::Ready(form)) = &app.edit else {
-                panic!("form")
-            };
-            let super::BibliographicInput::Date(date) = &form.fields[&F::Published] else {
-                panic!("date")
-            };
-            date.read(cx)
-                .timed_calendars
-                .each_ref()
-                .map(|picker| ("date-picker", picker.entity_id()))
-        });
-        cx.update_window(f.handle, |_, window, cx| {
-            reveal_edit_control("edit-field-Published", window, cx);
-            open_date_details("edit-field-Published", window, cx);
-            window.click(ids[0], cx);
+                .click("date-calendar", cx);
+            reveal_edit_control("calendar-2026-09-16-0-2", window, cx);
             window.click("calendar-2026-09-16-0-2", cx);
-            window.press("escape", cx);
         })
         .unwrap();
         cx.run_until_parked();
         cx.update_window(f.handle, |_, window, cx| {
             window.render_frame(cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Published")
+                    .find("date-input")
+                    .value(),
+                Some("2026-09-16")
+            );
+            assert!(
+                window.try_find("calendar-2026-09-16-0-2").is_none(),
+                "Picking a day hides the calendar"
+            );
             window.click("save-edit", cx);
         })
         .unwrap();
         settle(cx, &f.worker);
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let first = rt.block_on(f.worker.resource(f.resource)).unwrap();
-        let text = crate::edit::prefill_draft(&first).fields[&F::Published].clone();
-        assert_eq!(text, "2026-09-16T08:00:00.123Z/2026-09-20T12:30:00.456Z~");
-        cx.update_window(f.handle, |_, window, cx| {
-            window.render_frame(cx);
-            window.click("edit-resource", cx);
-        })
-        .unwrap();
-        settle(cx, &f.worker);
-        let end = f.app.read_with(cx, |app, cx| {
-            let Some(super::EditFetch::Ready(form)) = &app.edit else {
-                panic!("form")
-            };
-            let super::BibliographicInput::Date(date) = &form.fields[&F::Published] else {
-                panic!("date")
-            };
-            ("date-picker", date.read(cx).timed_calendars[1].entity_id())
-        });
-        cx.update_window(f.handle, |_, window, cx| {
-            reveal_edit_control("edit-field-Published", window, cx);
-            open_date_details("edit-field-Published", window, cx);
-            window.click(end, cx);
-            window.click("calendar-2026-09-21-0-3", cx);
-            window.within("time").click("minute", cx);
-            window.press("up", cx);
-            window.press("escape", cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-        cx.update_window(f.handle, |_, window, cx| {
-            window.render_frame(cx);
-            window.click("save-edit", cx);
-        })
-        .unwrap();
-        settle(cx, &f.worker);
-        let second = rt.block_on(f.worker.resource(f.resource)).unwrap();
         assert_eq!(
-            second.published.as_ref().unwrap().instant(),
-            first.published.as_ref().unwrap().instant()
+            crate::edit::prefill_draft(&rt.block_on(f.worker.resource(f.resource)).unwrap()).fields
+                [&F::Published],
+            "2026-09-16"
         );
-        let text = crate::edit::prefill_draft(&second).fields[&F::Published].clone();
-        assert_eq!(text, "2026-09-16T08:00:00.123Z/2026-09-21T12:31:00.456Z~");
-        // Explicit ISO edits may replace or remove fractions, including after
-        // returning to controls (which must not resurrect cached subseconds).
-        for raw in ["2026-09-16T08:00:00.789Z", "2026-09-16T08:00:00Z"] {
+        // Typed ISO instants may add, replace or remove fractions.
+        for raw in [
+            "2026-09-16T08:00:00.123Z/2026-09-21T12:31:00.456Z~",
+            "2026-09-16T08:00:00.789Z",
+            "2026-09-16T08:00:00Z",
+        ] {
             cx.update_window(f.handle, |_, window, cx| {
                 window.render_frame(cx);
                 window.click("edit-resource", cx);
@@ -13462,9 +12919,6 @@ mod classification_tests {
             settle(cx, &f.worker);
             cx.update_window(f.handle, |_, window, cx| {
                 enter_details_field(F::Published, raw, window, cx);
-                window
-                    .within("edit-field-Published")
-                    .click("date-advanced", cx);
                 window.click("save-edit", cx);
             })
             .unwrap();
@@ -13489,10 +12943,6 @@ mod classification_tests {
         reveal_all_fields(&f, cx);
         cx.update_window(f.handle, |_, window, cx| {
             reveal_edit_control("edit-field-Published", window, cx);
-            open_date_details("edit-field-Published", window, cx);
-            window
-                .within("edit-field-Published")
-                .click("precision-start", cx);
         })
         .unwrap();
         f.app.update(cx, |app, cx| {
@@ -13504,19 +12954,22 @@ mod classification_tests {
         });
         cx.update_window(f.handle, |_, window, cx| {
             window.render_frame(cx);
+            for id in ["date-calendar", "date-clear"] {
+                assert_eq!(
+                    window.within("edit-field-Published").find(id).disabled(),
+                    Some(true)
+                );
+            }
+            window
+                .within("edit-field-Published")
+                .click("date-input", cx);
+            window.input("1991", cx);
             assert_eq!(
                 window
                     .within("edit-field-Published")
-                    .find("date-range")
-                    .disabled(),
-                Some(true)
-            );
-            assert_eq!(
-                window
-                    .within("edit-field-Published")
-                    .find("precision-Day")
-                    .disabled(),
-                Some(true)
+                    .find("date-input")
+                    .value(),
+                Some("")
             );
             reveal_edit_control("edit-field-Keywords", window, cx);
             window
@@ -13549,7 +13002,7 @@ mod classification_tests {
         .unwrap();
     }
     #[gpui_kit::test]
-    fn details_explicit_datetime_precision_and_clear(cx: &mut TestAppContext) {
+    fn details_date_clear_removes_the_date_and_its_label(cx: &mut TestAppContext) {
         use ibex_core::{BibliographicDate, DateCertainty, DatePrecision as P, UtcMillis};
         let f = fixture(cx);
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -13560,7 +13013,7 @@ mod classification_tests {
                 None,
                 P::Unspecified,
                 DateCertainty::Exact,
-                None,
+                Some(NonEmptyStr::try_new("Spring 2024").unwrap()),
             )
             .unwrap(),
         );
@@ -13575,48 +13028,29 @@ mod classification_tests {
         settle(cx, &f.worker);
         cx.update_window(f.handle, |_, window, cx| {
             reveal_edit_control("edit-field-Published", window, cx);
-            open_date_details("edit-field-Published", window, cx);
-            window
-                .within("edit-field-Published")
-                .click("precision-start", cx);
-            window
-                .within("edit-field-Published")
-                .click("precision-DateTime", cx);
-            window.click("save-edit", cx);
-        })
-        .unwrap();
-        settle(cx, &f.worker);
-        let saved = rt
-            .block_on(f.worker.resource(f.resource))
-            .unwrap()
-            .published
-            .unwrap();
-        assert_eq!(saved.precision(), P::DateTime);
-        assert_eq!(saved.instant(), UtcMillis::from_unix_ms(1712345678123));
-        cx.update_window(f.handle, |_, window, cx| {
-            window.render_frame(cx);
-            window.click("edit-resource", cx);
-        })
-        .unwrap();
-        settle(cx, &f.worker);
-        let picker = f.app.read_with(cx, |app, cx| {
-            let Some(super::EditFetch::Ready(form)) = &app.edit else {
-                panic!("form")
-            };
-            let super::BibliographicInput::Date(date) =
-                &form.fields[&crate::edit::BibliographicField::Published]
-            else {
-                panic!("date")
-            };
-            ("date-picker", date.read(cx).timed_calendars[0].entity_id())
-        });
-        cx.update_window(f.handle, |_, window, cx| {
-            reveal_edit_control("edit-field-Published", window, cx);
-            open_date_details("edit-field-Published", window, cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Published")
+                    .find("date-input")
+                    .value(),
+                Some("2024-04-05T19:34:38.123Z")
+            );
             window
                 .within("edit-field-Published")
                 .click("date-clear", cx);
-            assert_eq!(window.find(picker).value(), None);
+            window.render_frame(cx);
+            for id in ["date-input", "date-display"] {
+                assert_eq!(
+                    window.within("edit-field-Published").find(id).value(),
+                    Some("")
+                );
+            }
+            assert!(
+                window
+                    .within("edit-field-Published")
+                    .try_find("date-preview")
+                    .is_none()
+            );
             window.click("save-edit", cx);
         })
         .unwrap();
@@ -13630,6 +13064,7 @@ mod classification_tests {
     }
     #[gpui_kit::test]
     fn details_imported_dates_keep_instants_and_unspecified_precision(cx: &mut TestAppContext) {
+        use crate::edit::BibliographicField as F;
         use ibex_core::{BibliographicDate, DateCertainty as C, DatePrecision as P, UtcMillis};
         let f = fixture(cx);
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -13673,22 +13108,12 @@ mod classification_tests {
         })
         .unwrap();
         settle(cx, &f.worker);
-        for field in ["Published", "Accessed", "OriginalDate", "EventDate"] {
+        // A certainty-only edit keeps each endpoint's stored instant and precision.
+        let texts =
+            crate::edit::prefill_draft(&rt.block_on(f.worker.resource(f.resource)).unwrap()).fields;
+        for field in [F::Published, F::Accessed, F::OriginalDate, F::EventDate] {
             cx.update_window(f.handle, |_, window, cx| {
-                let scope = gpui_kit::SharedString::from(format!("edit-field-{field}"));
-                reveal_edit_control(scope.as_ref(), window, cx);
-                open_date_details(scope.as_ref(), window, cx);
-                if field == "Published" {
-                    window.within(scope.clone()).click("date-advanced", cx);
-                    window.within(scope.clone()).click("date-advanced", cx);
-                    reveal_edit_control(scope.as_ref(), window, cx);
-                    assert_eq!(
-                        window.within(scope.clone()).find("precision-start").label(),
-                        Some("Start: Unspecified")
-                    );
-                }
-                window.within(scope.clone()).click("certainty", cx);
-                window.within(scope).click("certainty-Exact", cx);
+                enter_details_field(field, texts[&field].trim_end_matches('?'), window, cx);
             })
             .unwrap();
         }
@@ -14051,7 +13476,8 @@ mod classification_tests {
         );
     }
     #[gpui_kit::test]
-    fn details_date_precision_requires_calendar_selection(cx: &mut TestAppContext) {
+    fn details_typed_date_range_saves_and_clear_cancels(cx: &mut TestAppContext) {
+        use crate::edit::BibliographicField as F;
         let f = fixture(cx);
         select_first(&f, cx);
         cx.update_window(f.handle, |_, window, cx| {
@@ -14061,95 +13487,15 @@ mod classification_tests {
         .unwrap();
         settle(cx, &f.worker);
         cx.update_window(f.handle, |_, window, cx| {
-            enter_details_field(
-                crate::edit::BibliographicField::Published,
-                "2026-09-15",
-                window,
-                cx,
+            enter_details_field(F::Published, "February 2024 to March 2024~", window, cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Published")
+                    .find("date-preview")
+                    .label(),
+                Some("February 2024 – March 2024 · approximate")
             );
-            window
-                .within("edit-field-Published")
-                .click("date-advanced", cx);
-            window
-                .within("edit-field-Published")
-                .click("precision-start", cx);
-            window.click("precision-Month", cx);
-            window
-                .within("edit-field-Published")
-                .click("precision-start", cx);
-            window.click("precision-Day", cx);
-            window.click("save-edit", cx);
-        })
-        .unwrap();
-        settle(cx, &f.worker);
-        f.app.read_with(cx, |app, _| {
-            assert!(
-                app.edit.is_some(),
-                "A day must be selected, not inferred from a month"
-            )
-        });
-        let picker = f.app.read_with(cx, |app, cx| {
-            let Some(super::EditFetch::Ready(form)) = &app.edit else {
-                panic!("date form")
-            };
-            let super::BibliographicInput::Date(date) =
-                &form.fields[&crate::edit::BibliographicField::Published]
-            else {
-                panic!("date editor")
-            };
-            ("date-picker", date.read(cx).calendars[0].entity_id())
-        });
-        cx.update_window(f.handle, |_, window, cx| {
-            reveal_edit_control("edit-field-Published", window, cx);
-            open_date_details("edit-field-Published", window, cx);
-            window.click(picker, cx);
-            window.click("calendar-2026-09-16-0-2", cx);
-        })
-        .unwrap();
-        cx.run_until_parked();
-        cx.update_window(f.handle, |_, window, cx| {
-            window.render_frame(cx);
-            window.click("save-edit", cx);
-        })
-        .unwrap();
-        settle(cx, &f.worker);
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        assert_eq!(
-            crate::edit::prefill_draft(&rt.block_on(f.worker.resource(f.resource)).unwrap()).fields
-                [&crate::edit::BibliographicField::Published],
-            "2026-09-16"
-        );
-    }
-    #[gpui_kit::test]
-    fn details_date_controls_stage_precision_certainty_range_and_clear(cx: &mut TestAppContext) {
-        let f = fixture(cx);
-        select_first(&f, cx);
-        cx.update_window(f.handle, |_, window, cx| {
-            window.render_frame(cx);
-            window.click("edit-resource", cx);
-        })
-        .unwrap();
-        settle(cx, &f.worker);
-        cx.update_window(f.handle, |_, window, cx| {
-            reveal_edit_control("edit-field-Published", window, cx);
-            open_date_details("edit-field-Published", window, cx);
-            window
-                .within("edit-field-Published")
-                .click("precision-start", cx);
-            window.click("precision-Month", cx);
-            window
-                .within("edit-field-Published")
-                .click("date-start", cx);
-            window.press("cmd-a", cx);
-            window.input("2024-02", cx);
-            window.within("edit-field-Published").click("certainty", cx);
-            window.click("certainty-Approximate", cx);
-            window
-                .within("edit-field-Published")
-                .click("date-range", cx);
-            reveal_edit_control("date-end", window, cx);
-            window.within("edit-field-Published").click("date-end", cx);
-            window.input("2024-03", cx);
             window.click("save-edit", cx);
         })
         .unwrap();
@@ -14157,7 +13503,7 @@ mod classification_tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
         assert_eq!(
-            crate::edit::prefill_draft(&saved).fields[&crate::edit::BibliographicField::Published],
+            crate::edit::prefill_draft(&saved).fields[&F::Published],
             "2024-02/2024-03~"
         );
         cx.update_window(f.handle, |_, window, cx| {
@@ -14168,11 +13514,71 @@ mod classification_tests {
         settle(cx, &f.worker);
         cx.update_window(f.handle, |_, window, cx| {
             reveal_edit_control("edit-field-Published", window, cx);
-            open_date_details("edit-field-Published", window, cx);
             window
                 .within("edit-field-Published")
                 .click("date-clear", cx);
             window.click("cancel-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource)).unwrap().to_new(),
+            saved.to_new()
+        );
+    }
+    #[gpui_kit::test]
+    fn details_date_display_as_round_trips_the_label(cx: &mut TestAppContext) {
+        use crate::edit::BibliographicField as F;
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            enter_details_field(F::Published, "1991", window, cx);
+            assert!(
+                window
+                    .within("edit-field-Published")
+                    .try_find("date-display")
+                    .is_none(),
+                "An empty label stays behind Display as…"
+            );
+            enter_details_field(F::PublishedDisplay, "Spring 1991", window, cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+        assert_eq!(
+            saved.published.as_ref().and_then(|date| date.display()),
+            Some("Spring 1991")
+        );
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("edit-field-Published", window, cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Published")
+                    .find("date-display")
+                    .value(),
+                Some("Spring 1991")
+            );
+            assert!(
+                window
+                    .within("edit-field-Published")
+                    .try_find("date-display-toggle")
+                    .is_none()
+            );
+            window.click("save-edit", cx);
         })
         .unwrap();
         settle(cx, &f.worker);
@@ -14363,12 +13769,19 @@ mod classification_tests {
             _ => None,
         };
         if let Some(date) = date {
-            let scope = format!("edit-field-{date:?}");
+            let scope = gpui_kit::SharedString::from(format!("edit-field-{date:?}"));
             reveal_edit_control(&scope, window, cx);
-            open_date_details(&scope, window, cx);
-            window
-                .within(gpui_kit::SharedString::from(scope))
-                .click("date-display", cx);
+            if window
+                .within(scope.clone())
+                .try_find("date-display")
+                .is_none()
+            {
+                window
+                    .within(scope.clone())
+                    .click("date-display-toggle", cx);
+                reveal_edit_control(&scope, window, cx);
+            }
+            window.within(scope).click("date-display", cx);
             window.press("cmd-a", cx);
             window.input(text, cx);
             return;
@@ -14385,19 +13798,9 @@ mod classification_tests {
             field,
             F::Published | F::Accessed | F::OriginalDate | F::EventDate
         ) {
-            open_date_details(&id, window, cx);
-            if window
-                .within(gpui_kit::SharedString::from(id.clone()))
-                .try_find("date-raw")
-                .is_none()
-            {
-                window
-                    .within(gpui_kit::SharedString::from(id.clone()))
-                    .click("date-advanced", cx);
-            }
             window
                 .within(gpui_kit::SharedString::from(id))
-                .click("date-raw", cx);
+                .click("date-input", cx);
         } else if field == F::Keywords {
             let scope = gpui_kit::SharedString::from(id);
             while window
@@ -14944,15 +14347,6 @@ mod classification_tests {
         assert_eq!(saved.creators[5].role, Author);
     }
 
-    fn open_date_details(id: &str, window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
-        let id = gpui_kit::SharedString::from(id.to_owned());
-        window.render_frame(cx);
-        if window.within(id.clone()).try_find("date-compact").is_some() {
-            window.within(id.clone()).click("date-disclosure", cx);
-            window.render_frame(cx);
-        }
-        reveal_edit_control(id.as_ref(), window, cx);
-    }
     /// Opens every row the kind hides, for tests that reach all fields.
     fn reveal_all_fields(f: &Fixture, cx: &mut TestAppContext) {
         f.app.update(cx, |app, cx| {
@@ -15493,6 +14887,41 @@ mod classification_tests {
         });
     }
 
+    #[gpui_kit::test]
+    fn inline_edit_prefills_unspecified_new_year_as_year_and_keeps_it(cx: &mut TestAppContext) {
+        use ibex_core::{BibliographicDate, DatePrecision as P, UtcMillis};
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut source = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        source.published =
+            Some(BibliographicDate::try_new(UtcMillis::jan_1_utc(1991).unwrap(), None).unwrap());
+        rt.block_on(f.worker.update_resource(f.resource, source.clone()))
+            .unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| window.press("e", cx))
+            .unwrap();
+        settle(cx, &f.worker);
+        let published = f.app.read_with(cx, |app, cx| {
+            app.table
+                .read(cx)
+                .delegate()
+                .inline
+                .as_ref()
+                .and_then(|session| session.ready_form())
+                .map(|form| form.published.read(cx).value().to_string())
+        });
+        assert_eq!(published.as_deref(), Some("1991"));
+        cx.update_window(f.handle, |_, window, cx| window.press("cmd-enter", cx))
+            .unwrap();
+        settle(cx, &f.worker);
+        let saved = rt
+            .block_on(f.worker.resource(f.resource))
+            .unwrap()
+            .published
+            .unwrap();
+        assert_eq!(Some(&saved), source.published.as_ref());
+        assert_eq!(saved.precision(), P::Unspecified);
+    }
     #[gpui_kit::test]
     fn inline_content_edit_invalidates_jev_and_rejects_old_reply(cx: &mut TestAppContext) {
         let f = fixture(cx);
