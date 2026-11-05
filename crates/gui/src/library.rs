@@ -1215,7 +1215,7 @@ impl TableDelegate for LibraryDelegate {
                         .w_full(),
                 ),
                 COL_PUBLISHED => cell.child(
-                    Input::new(&form.published_year)
+                    Input::new(&form.published)
                         .appearance(false)
                         .text_size(INLINE_CELL_TEXT_SIZE)
                         .text_color(muted)
@@ -1697,7 +1697,7 @@ fn step_inline_field(
                 form.kind.clone(),
                 form.title.clone(),
                 form.creators.clone(),
-                form.published_year.clone(),
+                form.published.clone(),
                 form.publisher.clone(),
             ),
             form.active_field,
@@ -3404,7 +3404,6 @@ impl EditForm {
     /// parent.
     fn draft(&self, cx: &App) -> EditDraft {
         let value = |input: &Entity<InputState>| input.read(cx).value().to_string();
-        let original = prefill_draft(&self.record);
         EditDraft {
             fields: self
                 .fields
@@ -3421,8 +3420,6 @@ impl EditForm {
                 .unwrap_or(self.record.kind),
             parent: self.parent.read(cx).selected_values().first().cloned(),
             publisher: self.publisher.staged.borrow().clone(),
-            published_year: original.published_year,
-            accessed_year: original.accessed_year,
             series: self
                 .series_selected
                 .map(|id| id.to_string())
@@ -6055,7 +6052,7 @@ impl LibraryApp {
     ) {
         for (field, input) in [
             (InlineField::Title, &form.title),
-            (InlineField::Published, &form.published_year),
+            (InlineField::Published, &form.published),
             (InlineField::Publisher, &form.publisher),
         ] {
             cx.subscribe_in(input, window, move |this, _, event: &InputEvent, _, cx| {
@@ -6299,7 +6296,7 @@ impl LibraryApp {
                     f.kind.clone(),
                     f.title.clone(),
                     f.creators.clone(),
-                    f.published_year.clone(),
+                    f.published.clone(),
                     f.publisher.clone(),
                     f.active_field,
                 )

@@ -10,7 +10,7 @@ use gpui_kit::component::searchable_list::SearchableListItem;
 use ibex_core::{
     BibliographicDate, CollectionId, CreatorRole, CreatorSpec, DateCertainty, DatePrecision,
     NewResource, NonEmptyStr, PersonId, Resource, ResourceId, ResourceKind, SeriesId, TagId,
-    UtcMillis, utc_year_from_millis,
+    UtcMillis,
 };
 
 use crate::kind::kind_label;
@@ -187,15 +187,13 @@ impl std::fmt::Display for FieldError {
 /// One value per scalar the form edits. The panel reads its input entities
 /// into this plain shape at save time, so the payload build below stays
 /// window-free and unit-testable. Parent and series arrive as selected ids.
-/// Legacy year strings support the compact inline editor; the detail panel uses
-/// full dates in `fields`. Creator specs preserve roles, credits, and order.
+/// Dates live in `fields` as ISO text. Creator specs preserve roles, credits,
+/// and order.
 pub struct EditDraft {
     pub title: String,
     pub kind: ResourceKind,
     pub parent: Option<ResourceId>,
     pub publisher: String,
-    pub published_year: String,
-    pub accessed_year: String,
     pub series: String,
     pub series_number: String,
     pub creators: Vec<CreatorSpec>,
@@ -216,8 +214,6 @@ pub fn prefill_draft(record: &Resource) -> EditDraft {
         kind: record.kind,
         parent: record.parent_id,
         publisher: record.publisher.clone().unwrap_or_default(),
-        published_year: date_year(record.published.as_ref()),
-        accessed_year: date_year(record.accessed.as_ref()),
         series: record
             .series_id
             .map(|id| id.to_string())
@@ -317,8 +313,6 @@ pub fn empty_create_draft() -> EditDraft {
         kind: ResourceKind::Book,
         parent: None,
         publisher: String::new(),
-        published_year: String::new(),
-        accessed_year: String::new(),
         series: String::new(),
         series_number: String::new(),
         creators: Vec::new(),
@@ -408,28 +402,19 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), F
         draft,
         F::Published,
         F::PublishedDisplay,
-        Some(("Published year", &draft.published_year)),
     )?;
-    merge_date(
-        &mut edit.accessed,
-        draft,
-        F::Accessed,
-        F::AccessedDisplay,
-        Some(("Accessed year", &draft.accessed_year)),
-    )?;
+    merge_date(&mut edit.accessed, draft, F::Accessed, F::AccessedDisplay)?;
     merge_date(
         &mut edit.original_date,
         draft,
         F::OriginalDate,
         F::OriginalDateDisplay,
-        None,
     )?;
     merge_date(
         &mut edit.event_date,
         draft,
         F::EventDate,
         F::EventDateDisplay,
-        None,
     )?;
 
     let series = draft.series.trim();
@@ -660,14 +645,13 @@ fn instant_text(instant: UtcMillis, precision: DatePrecision) -> String {
     }
 }
 
-// Compare against the original date before applying either representation. An
-// unchanged full-date input must not undo an inline year edit, or infer precision.
+// Compare against the original date text: an unchanged input must keep the
+// stored date exactly rather than re-infer its precision from the text.
 fn merge_date(
     date: &mut Option<BibliographicDate>,
     draft: &EditDraft,
     field: BibliographicField,
     display_field: BibliographicField,
-    legacy: Option<(&str, &str)>,
 ) -> Result<(), FieldError> {
     let at = |message: String| FieldError::at(ErrorTarget::Field(field), message);
     let old_display = display_text(date.as_ref());
@@ -677,10 +661,6 @@ fn merge_date(
         .filter(|text| text.trim() != date_text(date.as_ref()));
     let mut changed = if let Some(text) = edited_full {
         parse_date_preserving_endpoints(field, text, date.as_ref())?
-    } else if let Some((label, year)) =
-        legacy.filter(|(_, year)| year.trim() != date_year(date.as_ref()))
-    {
-        year_field(field, label, year)?
     } else {
         date.clone()
     };
@@ -855,40 +835,6 @@ fn parse_date_instant(text: &str) -> Option<(UtcMillis, DatePrecision)> {
         precision,
     ))
 }
-/// The stored date's UTC year as text; empty when no date is set. The form
-/// Legacy inputs edit whole years; display labels never enter these inputs.
-fn date_year(date: Option<&BibliographicDate>) -> String {
-    date.map(|date| utc_year_from_millis(date.instant().as_unix_ms()).to_string())
-        .unwrap_or_default()
-}
-
-/// Year text to the year's January 1 UTC date; empty clears the field,
-/// anything unparseable is the form's error to show.
-fn year_field(
-    field: BibliographicField,
-    label: &str,
-    text: &str,
-) -> Result<Option<BibliographicDate>, FieldError> {
-    let at = |message: String| FieldError::at(ErrorTarget::Field(field), message);
-    let text = text.trim();
-    if text.is_empty() {
-        return Ok(None);
-    }
-    let year: i64 = text
-        .parse()
-        .map_err(|_| at(format!("{label} must be a whole year, got '{text}'")))?;
-    let instant =
-        UtcMillis::jan_1_utc(year).ok_or_else(|| at(format!("{label} is outside the calendar")))?;
-    BibliographicDate::try_new_precise(
-        instant,
-        None,
-        DatePrecision::Year,
-        DateCertainty::Exact,
-        None,
-    )
-    .map(Some)
-    .map_err(|_| at(format!("{label} is outside the calendar")))
-}
 
 #[cfg(test)]
 mod tests {
@@ -974,8 +920,6 @@ mod tests {
             kind: ResourceKind::BookSection,
             parent: None,
             publisher: "MIT Press".into(),
-            published_year: "1991".into(),
-            accessed_year: "2020".into(),
             series: "".into(),
             series_number: "".into(),
             creators,
@@ -1111,7 +1055,7 @@ mod tests {
         }
     }
     #[test]
-    fn edited_full_dates_win_but_unchanged_full_dates_allow_year_edits() {
+    fn year_edit_of_a_datetime_sets_year_precision() {
         use super::BibliographicField as F;
         use ibex_core::DatePrecision as P;
         let mut record = loaded_record();
@@ -1125,50 +1069,39 @@ mod tests {
             )
             .unwrap(),
         );
-        record.accessed = record.published.clone();
-        for (field, year_is_published) in [(F::Published, true), (F::Accessed, false)] {
-            let mut draft = prefill_draft(&record);
-            if year_is_published {
-                draft.published_year = "2025".into();
-            } else {
-                draft.accessed_year = "2025".into();
-            }
-            let updated = build_update(&record, &draft).unwrap();
-            let date = if year_is_published {
-                updated.published
-            } else {
-                updated.accessed
-            }
-            .unwrap();
-            assert_eq!(date.instant(), UtcMillis::jan_1_utc(2025).unwrap());
-            assert_eq!(date.precision(), P::Year);
-            draft.fields.insert(field, "2026-03-04".into());
-            // Even an invalid legacy input is irrelevant when the full date is edited.
-            if year_is_published {
-                draft.published_year = "invalid".into();
-            } else {
-                draft.accessed_year = "invalid".into();
-            }
-            let updated = build_update(&record, &draft).unwrap();
-            let date = if year_is_published {
-                updated.published
-            } else {
-                updated.accessed
-            }
-            .unwrap();
-            assert_eq!(date.instant().as_unix_ms(), 1772582400000);
-            assert_eq!(date.precision(), P::Day);
-            draft.fields.insert(field, String::new());
-            let updated = build_update(&record, &draft).unwrap();
-            assert!(
-                if year_is_published {
-                    updated.published
-                } else {
-                    updated.accessed
-                }
-                .is_none()
-            );
-        }
+        let mut draft = prefill_draft(&record);
+        draft.fields.insert(F::Published, "2024".into());
+        let date = build_update(&record, &draft).unwrap().published.unwrap();
+        assert_eq!(date.instant(), UtcMillis::jan_1_utc(2024).unwrap());
+        assert_eq!(date.precision(), P::Year);
+    }
+    #[test]
+    fn published_only_draft_leaves_other_dates_untouched() {
+        use super::BibliographicField as F;
+        let mut record = loaded_record();
+        record.accessed = Some(
+            BibliographicDate::try_new_precise(
+                UtcMillis::from_unix_ms(1709201096123),
+                None,
+                ibex_core::DatePrecision::DateTime,
+                ibex_core::DateCertainty::Exact,
+                Some(NonEmptyStr::try_new("Leap day").unwrap()),
+            )
+            .unwrap(),
+        );
+        record.original_date = record.published.clone();
+        record.event_date = record.accessed.clone();
+        // The inline editor's draft carries only the Published field.
+        let mut draft = draft_with("Citation Networks", record.to_new().creators);
+        draft.fields.insert(F::Published, "2024".into());
+        let updated = build_update(&record, &draft).unwrap();
+        assert_eq!(
+            updated.published.map(|date| date.instant()),
+            UtcMillis::jan_1_utc(2024)
+        );
+        assert_eq!(updated.accessed, record.accessed);
+        assert_eq!(updated.original_date, record.original_date);
+        assert_eq!(updated.event_date, record.event_date);
     }
     #[test]
     fn full_dates_edit_prefill_display_and_clear() {
@@ -1362,7 +1295,7 @@ mod tests {
         }
     }
     #[test]
-    fn unchanged_legacy_year_preserves_exact_date_data() {
+    fn unchanged_dates_preserve_exact_date_data() {
         use ibex_core::DatePrecision as P;
         for precision in [P::Unspecified, P::Year, P::Month, P::Day, P::DateTime] {
             let mut record = loaded_record();
@@ -1387,14 +1320,15 @@ mod tests {
     }
     #[test]
     fn prefill_copies_every_stored_field() {
+        use super::BibliographicField as F;
         let record = loaded_record();
         let draft = prefill_draft(&record);
         assert_eq!(draft.title, "Citation Networks");
         assert_eq!(draft.kind, ResourceKind::BookSection);
         assert_eq!(draft.parent, record.parent_id);
         assert_eq!(draft.publisher, "MIT Press");
-        assert_eq!(draft.published_year, "1991");
-        assert_eq!(draft.accessed_year, "2020");
+        assert_eq!(draft.fields[&F::Published], "1991-01-01T00:00:00Z");
+        assert_eq!(draft.fields[&F::Accessed], "2020-01-01T00:00:00Z");
         assert_eq!(
             draft.series,
             record.series_id.expect("series set").to_string()
@@ -1406,6 +1340,7 @@ mod tests {
 
     #[test]
     fn prefill_empties_absent_optionals() {
+        use super::BibliographicField as F;
         let mut record = loaded_record();
         let mut edit = record.to_new();
         edit.publisher = None;
@@ -1420,8 +1355,8 @@ mod tests {
         let draft = prefill_draft(&record);
         assert_eq!(draft.parent, None);
         assert_eq!(draft.publisher, "");
-        assert_eq!(draft.published_year, "");
-        assert_eq!(draft.accessed_year, "");
+        assert_eq!(draft.fields[&F::Published], "");
+        assert_eq!(draft.fields[&F::Accessed], "");
         assert_eq!(draft.series, "");
         assert_eq!(draft.series_number, "");
         assert!(draft.creators.is_empty());
@@ -1431,13 +1366,14 @@ mod tests {
 
     #[test]
     fn build_update_applies_edits_and_clears_emptied() {
+        use super::BibliographicField as F;
         let record = loaded_record();
         let mut draft = draft_with("Retitled", record.to_new().creators);
         draft.kind = ResourceKind::Book;
         draft.parent = Some(ResourceId::generate());
         draft.publisher = "Penguin".into();
-        draft.published_year = "2024".into();
-        draft.accessed_year = "".into();
+        draft.fields.insert(F::Published, "2024".into());
+        draft.fields.insert(F::Accessed, "".into());
         // Series rides through untouched text.
         draft.series = record.series_id.expect("series set").to_string();
         draft.series_number = "XL 1".into();
@@ -1503,7 +1439,9 @@ mod tests {
         let mut draft = empty_create_draft();
         draft.title = "Unsigned dictionary".into();
         draft.publisher = "OUP".into();
-        draft.published_year = "2020".into();
+        draft
+            .fields
+            .insert(super::BibliographicField::Published, "2020".into());
         draft.creators = vec![CreatorSpec {
             person_id: author,
             role: CreatorRole::Author,
@@ -1515,6 +1453,10 @@ mod tests {
         assert_eq!(new.title.as_str(), "Unsigned dictionary");
         assert_eq!(new.publisher.as_deref(), Some("OUP"));
         assert_eq!(new.creators.len(), 1);
+        assert_eq!(
+            new.published.map(|date| date.instant()),
+            UtcMillis::jan_1_utc(2020)
+        );
         assert_eq!(new.parent_id, None);
         assert_eq!(new.accessed, None);
         assert_eq!(new.series_id, None);
@@ -1568,10 +1510,12 @@ mod tests {
         );
 
         let mut draft = draft_with("Retitled", creators.clone());
-        draft.published_year = "soon".into();
-        let err = build_update(&record, &draft).expect_err("bad year rejects");
+        draft
+            .fields
+            .insert(super::BibliographicField::Published, "soon".into());
+        let err = build_update(&record, &draft).expect_err("bad date rejects");
         assert!(
-            err.message.contains("Published year"),
+            err.message.contains("Published"),
             "message names the field: {err}"
         );
         assert_eq!(
