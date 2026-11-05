@@ -23,8 +23,9 @@ pub use person::{
 };
 pub use resource::{
     AddAttachment, CountResources, CreateResource, GetResource, GetResourceDetail,
-    ListResourceGridPage, ListResources, ListResourcesPage, ListResourcesQueryPage,
-    SetResourceFavorite, SuggestFieldValues, UpdateResource,
+    InheritancePreview, ListResourceGridPage, ListResources, ListResourcesPage,
+    ListResourcesQueryPage, PreviewInheritance, SetResourceFavorite, SuggestFieldValues,
+    UpdateResource,
 };
 pub use series::{CreateSeries, ListSeries};
 pub use tag::{CreateTag, FindTagByText, GetTag, ListTags};
@@ -79,6 +80,7 @@ pub enum Command {
     ListResourceGridPage(ListResourceGridPage),
     CountResources(CountResources),
     SuggestFieldValues(SuggestFieldValues),
+    PreviewInheritance(PreviewInheritance),
 }
 
 /// The result of a successful command. One variant per [`Command`] variant.
@@ -123,6 +125,7 @@ pub enum Outcome {
     ResourceGridPage(ResourceGridPage),
     CountResources(ResourceCounts),
     SuggestFieldValues(Vec<String>),
+    PreviewInheritance(InheritancePreview),
 }
 
 /// A command plus per-call transport context.
@@ -194,6 +197,7 @@ impl Command {
             Command::ListResourceGridPage(_) => ListResourceGridPage::NAME,
             Command::CountResources(_) => CountResources::NAME,
             Command::SuggestFieldValues(_) => SuggestFieldValues::NAME,
+            Command::PreviewInheritance(_) => PreviewInheritance::NAME,
         }
     }
 }
@@ -255,6 +259,7 @@ pub(crate) async fn dispatch(
         Command::ListResourceGridPage(c) => drive(c, state, ev).await,
         Command::CountResources(c) => drive(c, state, ev).await,
         Command::SuggestFieldValues(c) => drive(c, state, ev).await,
+        Command::PreviewInheritance(c) => drive(c, state, ev).await,
     }
 }
 

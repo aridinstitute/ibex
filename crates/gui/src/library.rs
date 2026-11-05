@@ -43,8 +43,8 @@ use ibex_core::{
     NonEmptyStr, ParentRule, Person, PersonChoice as ImportPersonChoice, PersonId,
     PersonMatchPreview, PublishedRange, Resource, ResourceCounts, ResourceDetail, ResourceFilter,
     ResourceGridPage, ResourceGridParent, ResourceId, ResourceKind, ResourceQuery, ResourceSort,
-    ResourceSummary, SortDirection, Tag, TagId, UtcMillis, format_recorded_date,
-    keyword_suggestions,
+    ResourceSummary, SortDirection, Tag, TagId, UtcMillis, ValueOrigin, format_published_label,
+    format_recorded_date, keyword_suggestions,
 };
 
 use crate::classification_rules::{ClassificationRules, ClassificationRulesSaved};
@@ -76,7 +76,7 @@ use crate::tags::{TagChoice, TagDelegate};
 use crate::theme_editor::{ThemeEditor, ThemeEditorEvent};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::popover::Popover;
-use ibex_app::command::ImportReport;
+use ibex_app::command::{ImportReport, InheritancePreview};
 
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
 /// enough that the demo library spans several pages.
@@ -3154,6 +3154,10 @@ struct EditForm {
     /// Bumped on every options load; a reply carries the generation it was
     /// issued for, so a late fetch cannot clobber a newer kind's options.
     parent_gen: u64,
+    /// What empty rows would inherit from the selected parent, for hints.
+    inherited: Option<InheritancePreview>,
+    /// Same guard as `parent_gen`, for inheritance previews.
+    inherit_gen: u64,
 }
 
 impl EditForm {
@@ -3242,6 +3246,7 @@ impl EditForm {
                 let ComboboxEvent::Change(values) = event else {
                     return;
                 };
+                app.load_inherited(window, cx);
                 let Some(EditFetch::Ready(form)) = &app.edit else {
                     return;
                 };
@@ -3274,6 +3279,16 @@ impl EditForm {
                 app.load_parent_options(worker.clone(), id, rule, stored_parent, window, cx);
             }
         })
+        .detach();
+        cx.subscribe_in(
+            &parent,
+            window,
+            |app, _, event: &ComboboxEvent<SearchableVec<ParentItem>>, window, cx| {
+                if matches!(event, ComboboxEvent::Change(_)) {
+                    app.load_inherited(window, cx);
+                }
+            },
+        )
         .detach();
         let parent_options_kind = match draft.kind.parent_rule() {
             ParentRule::Optional { expected } | ParentRule::Required { expected } => Some(expected),
@@ -3365,6 +3380,8 @@ impl EditForm {
             saving: false,
             parent_options_kind,
             parent_gen: 0,
+            inherited: None,
+            inherit_gen: 0,
         };
         for (date, display) in [
             (
@@ -3437,11 +3454,71 @@ impl EditForm {
         }
     }
 
+    /// "From {parent}: {value}" for an empty row that inherits a value. The
+    /// identifiers row names inherited ISBNs and ISSNs whose own lists are
+    /// empty; other rows hide the hint once they hold a value.
+    fn inherited_hint(&self, field: FormField, cx: &App) -> Option<String> {
+        use BibliographicField as F;
+        let preview = self.inherited.as_ref()?;
+        let values = &preview.values;
+        let empty = |bib: F| self.fields[&bib].value(cx).trim().is_empty();
+        let from = |origin: ValueOrigin, value: String| match origin {
+            ValueOrigin::Inherited { parent_id } => preview
+                .sources
+                .get(&parent_id)
+                .map(|title| format!("From {}: {value}", title.as_str())),
+            ValueOrigin::Absent | ValueOrigin::Explicit => None,
+        };
+        let text = |effective: &ibex_core::Effective<String>| {
+            effective
+                .value
+                .clone()
+                .and_then(|value| from(effective.origin, value))
+        };
+        let ids = |effective: &ibex_core::Effective<Vec<ibex_core::Identifier>>| {
+            effective.value.as_ref().and_then(|ids| {
+                let joined = ids
+                    .iter()
+                    .map(ibex_core::Identifier::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                from(effective.origin, joined)
+            })
+        };
+        match field {
+            FormField::Identifiers => {
+                let hints: Vec<String> = [(F::Isbns, &values.isbns), (F::Issns, &values.issns)]
+                    .into_iter()
+                    .filter(|(bib, _)| empty(*bib))
+                    .filter_map(|(_, effective)| ids(effective))
+                    .collect();
+                (!hints.is_empty()).then(|| hints.join("; "))
+            }
+            FormField::Bib(bib) if empty(bib) => match bib {
+                F::Publisher => text(&values.publisher),
+                F::Published => values.published.value.as_ref().and_then(|date| {
+                    from(
+                        values.published.origin,
+                        format_published_label(date).as_str().to_owned(),
+                    )
+                }),
+                F::Place => text(&values.place),
+                F::Volume => text(&values.volume),
+                F::Issue => text(&values.issue),
+                F::Edition => text(&values.edition),
+                F::Language => text(&values.language),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Inherited hints count as values, so an inheriting row stays in view.
     fn visible(&self, field: FormField, cx: &App) -> bool {
         edit_layout::visible(
             self.current_kind(cx),
             field,
-            self.has_value(field, cx),
+            self.has_value(field, cx) || self.inherited_hint(field, cx).is_some(),
             self.revealed.contains(&field),
             self.parent_set(cx),
         )
@@ -6905,6 +6982,7 @@ impl LibraryApp {
                 state.set_items(SearchableVec::new(Vec::new()), window, cx);
                 state.set_selected_indices(Vec::new(), window, cx);
             });
+            self.load_inherited(window, cx);
             cx.notify();
             return;
         };
@@ -6962,6 +7040,38 @@ impl LibraryApp {
                         None => state.set_selected_indices(Vec::new(), window, cx),
                     }
                 });
+                // Setting the selection directly emits no change event,
+                // so the inherited hints follow the new options here.
+                app.load_inherited(window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Ask what the form's current kind would inherit from its selected
+    /// parent. A newer kind or parent change bumps the generation, so a
+    /// late reply cannot overwrite fresher hints.
+    fn load_inherited(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let worker = self.table.read(cx).delegate().worker().clone();
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        form.inherit_gen += 1;
+        let generation = form.inherit_gen;
+        let id = form.record.id;
+        let kind = form.current_kind(cx);
+        let parent_id = form.parent.read(cx).selected_values().first().copied();
+        cx.spawn_in(window, async move |app, window| {
+            let reply = worker.preview_inheritance(kind, parent_id).await;
+            _ = app.update_in(window, |app, _, cx| {
+                let Some(EditFetch::Ready(form)) = &mut app.edit else {
+                    return;
+                };
+                if form.record.id != id || form.inherit_gen != generation {
+                    return;
+                }
+                form.inherited = reply.ok();
                 cx.notify();
             });
         })
@@ -8215,6 +8325,7 @@ impl LibraryApp {
                                 .child(div().id(SharedString::from(format!("edit-field-{bib:?}"))).test_support().w_full()
                                     .child(form.fields[&bib].render(bib, saving)))
                         }))
+                        .children(inherited_note(form, field, cx))
                         .children(field_error(form, field, danger)),
                 )
             }
@@ -8326,10 +8437,24 @@ impl LibraryApp {
                             )
                         },
                     )
+                    .children(inherited_note(form, field, cx))
                     .children(field_error(form, field, danger)),
             ),
         }
     }
+}
+
+/// The value an empty row would inherit, shown muted under its control.
+fn inherited_note(form: &EditForm, field: FormField, cx: &App) -> Option<impl IntoElement> {
+    form.inherited_hint(field, cx).map(|hint| {
+        div()
+            .id(SharedString::from(format!("inherited-{field:?}")))
+            .test_support()
+            .aria_label(hint.clone())
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(hint)
+    })
 }
 
 /// The form's error when it names `target`, for display under that row.
@@ -14354,6 +14479,73 @@ mod classification_tests {
             assert!(window.try_find("edit-label-Parent").is_some());
             assert!(window.try_find("edit-field-Venue").is_some());
             assert!(window.try_find("edit-field-Edition").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn details_empty_rows_show_values_inherited_from_the_parent(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let issue = rt.block_on(async {
+            let mut journal =
+                crate::metadata::empty_resource("Nature", ResourceKind::Journal).unwrap();
+            journal.publisher = Some("Springer Nature".into());
+            let journal = f.worker.create_resource(journal).await.unwrap();
+            let mut issue =
+                crate::metadata::empty_resource("Vol. 12, no. 3", ResourceKind::Issue).unwrap();
+            issue.parent_id = Some(journal.id);
+            issue.volume = Some("12".into());
+            f.worker.create_resource(issue).await.unwrap()
+        });
+        open_edit_with(&f, cx, |source| {
+            source.kind = ResourceKind::JournalArticle;
+            source.parent_id = Some(issue.id);
+        });
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("inherited-Bib(Volume)").label(),
+                Some("From Vol. 12, no. 3: 12")
+            );
+            assert_eq!(
+                window.find("inherited-Bib(Publisher)").label(),
+                Some("From Nature: Springer Nature")
+            );
+            let Some(super::EditFetch::Ready(form)) = &f.app.read(cx).edit else {
+                panic!("form")
+            };
+            assert!(
+                !form.revealed.contains(&super::FormField::Bib(
+                    crate::edit::BibliographicField::Volume
+                )),
+                "Inherited rows are not pinned open"
+            );
+            let super::BibliographicInput::Single(volume) =
+                &form.fields[&crate::edit::BibliographicField::Volume]
+            else {
+                panic!("volume input")
+            };
+            let volume = volume.clone();
+            let parent = form.parent.clone();
+            volume.update(cx, |input, cx| input.set_value("7", window, cx));
+            window.render_frame(cx);
+            assert!(
+                window.try_find("inherited-Bib(Volume)").is_none(),
+                "An own value replaces the hint"
+            );
+            volume.update(cx, |input, cx| input.set_value("", window, cx));
+            window.render_frame(cx);
+            assert!(window.try_find("inherited-Bib(Volume)").is_some());
+            parent.update(cx, |state, cx| state.clear_selection(cx));
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("inherited-Bib(Volume)").is_none());
+            assert!(window.try_find("inherited-Bib(Publisher)").is_none());
         })
         .unwrap();
     }

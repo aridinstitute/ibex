@@ -12,6 +12,7 @@ use ibex_app::command::{
 };
 use ibex_app::command::{CreateSeries, ListSeries};
 use ibex_app::command::{ImportBiblatex, ImportReport, PreviewBiblatex};
+use ibex_app::command::{InheritancePreview, PreviewInheritance};
 use ibex_app::{AppState, Command, Outcome};
 #[cfg(test)]
 use ibex_core::ResourcePage;
@@ -38,6 +39,11 @@ pub enum DbRequest {
         query: String,
         limit: u32,
         reply: oneshot::Sender<Result<Vec<String>, String>>,
+    },
+    PreviewInheritance {
+        kind: ibex_core::ResourceKind,
+        parent_id: Option<ResourceId>,
+        reply: oneshot::Sender<Result<InheritancePreview, String>>,
     },
     PreviewBiblatex {
         path: PathBuf,
@@ -188,6 +194,23 @@ impl DbWorker {
                 field,
                 query,
                 limit,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+    /// What an empty `kind` record under `parent_id` would inherit.
+    pub async fn preview_inheritance(
+        &self,
+        kind: ibex_core::ResourceKind,
+        parent_id: Option<ResourceId>,
+    ) -> Result<InheritancePreview, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::PreviewInheritance {
+                kind,
+                parent_id,
                 reply: tx,
             })
             .map_err(|_| "db worker stopped".to_string())?;
@@ -374,6 +397,25 @@ impl DbWorker {
                                             Err("unexpected outcome from suggest_field_values"
                                                 .into())
                                         }
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::PreviewInheritance {
+                                kind,
+                                parent_id,
+                                reply,
+                            } => {
+                                let result = state
+                                    .execute(Command::PreviewInheritance(PreviewInheritance {
+                                        kind,
+                                        parent_id,
+                                    }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::PreviewInheritance(preview) => Ok(preview),
+                                        _ => Err("unexpected outcome from preview_inheritance"
+                                            .into()),
                                     });
                                 let _ = reply.send(result);
                             }

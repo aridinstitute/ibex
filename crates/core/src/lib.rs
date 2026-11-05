@@ -37,7 +37,7 @@ pub use import::{
 pub use inheritance::{
     Effective, EffectiveValues, INHERITANCE_MAX_DEPTH, InheritableField, InheritanceError,
     ValueOrigin, fields_inherited_from, gather_ancestors, is_never_inherited, never_inherited,
-    resolve_effective,
+    resolve_effective, resolve_inherited,
 };
 pub use pages::{PageBound, PageSpan, Pages, deserialize_pages_opt};
 pub use person::{Name, NameError, NameKey, NonEmptyStr, Person, PersonError, PersonId};

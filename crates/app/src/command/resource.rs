@@ -3,9 +3,10 @@ use std::path::PathBuf;
 
 use ibex_core::{Attachment, AttachmentId};
 use ibex_core::{
-    Creator, InheritanceError, NewResource, PersonId, Resource, ResourceCounts, ResourceDetail,
-    ResourceError, ResourceId, ResourcePage, ResourceQuery, ResourceSummary, SeriesId,
-    SortedResourcePage, StoreError, creator_label_name, detail_creator_groups, resolve_effective,
+    Creator, EffectiveValues, InheritanceError, NewResource, NonEmptyStr, PersonId, Resource,
+    ResourceCounts, ResourceDetail, ResourceError, ResourceId, ResourceKind, ResourcePage,
+    ResourceQuery, ResourceSummary, SeriesId, SortedResourcePage, StoreError, creator_label_name,
+    detail_creator_groups, resolve_effective, resolve_inherited,
 };
 use ibex_core::{ResourceGridPage, ResourceGridParent};
 
@@ -49,6 +50,59 @@ impl Handler for SuggestFieldValues {
             .await?;
         ev.set(event::RESOURCE_SUGGESTION_COUNT, values.len());
         Ok(SuggestedFieldValues(values))
+    }
+}
+
+/// What an empty resource of `kind` under `parent_id` would inherit, for
+/// showing hints in the edit form before the record is saved.
+#[derive(Debug, Clone)]
+pub struct PreviewInheritance {
+    pub kind: ResourceKind,
+    pub parent_id: Option<ResourceId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct InheritancePreview {
+    pub values: EffectiveValues,
+    /// Title of every ancestor in the chain, so callers can name the source.
+    pub sources: HashMap<ResourceId, NonEmptyStr>,
+}
+
+impl From<InheritancePreview> for Outcome {
+    fn from(preview: InheritancePreview) -> Self {
+        Outcome::PreviewInheritance(preview)
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for PreviewInheritance {
+    const NAME: &'static str = "preview_inheritance";
+    type Output = InheritancePreview;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::RESOURCE_KIND, self.kind.as_str());
+        if let Some(parent_id) = self.parent_id {
+            ev.set(event::RESOURCE_ID, parent_id.to_string());
+        }
+    }
+
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<Self::Output, CommandError> {
+        let ancestors = match self.parent_id {
+            Some(parent_id) => load_chain(state, Some(parent_id)).await?,
+            None => Vec::new(),
+        };
+        // A parent the kind cannot link to inherits nothing, rather than
+        // failing while the user is still choosing a kind or parent.
+        let ancestors = match ancestors.first() {
+            Some(parent) if self.kind.accept_parent(parent.kind).is_err() => Vec::new(),
+            _ => ancestors,
+        };
+        let values = resolve_inherited(self.kind, &ancestors).map_err(map_inheritance_err)?;
+        let sources = ancestors
+            .into_iter()
+            .map(|ancestor| (ancestor.id, ancestor.title))
+            .collect();
+        Ok(InheritancePreview { values, sources })
     }
 }
 #[derive(Debug, Clone)]
@@ -323,8 +377,16 @@ async fn load_ancestors(
     state: &AppState,
     resource: &Resource,
 ) -> Result<Vec<Resource>, CommandError> {
+    load_chain(state, resource.parent_id).await
+}
+
+/// Load `start` and its ancestors (nearest first).
+async fn load_chain(
+    state: &AppState,
+    start: Option<ResourceId>,
+) -> Result<Vec<Resource>, CommandError> {
     let mut chain = Vec::new();
-    let mut next = resource.parent_id;
+    let mut next = start;
     while let Some(parent_id) = next {
         if chain.len() >= ibex_core::INHERITANCE_MAX_DEPTH {
             return Err(map_inheritance_err(InheritanceError::DepthExceeded));
