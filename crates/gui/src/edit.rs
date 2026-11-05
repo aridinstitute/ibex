@@ -144,6 +144,46 @@ impl BibliographicField {
     }
 }
 
+/// A rejected draft, attached to the form row that caused it. Errors without
+/// a field (worker and save failures) belong to the whole form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldError {
+    pub field: Option<ErrorTarget>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorTarget {
+    Title,
+    Series,
+    SeriesNumber,
+    Publisher,
+    /// Display-label errors target their date's row, which hosts the display input.
+    Field(BibliographicField),
+}
+
+impl FieldError {
+    pub fn form(message: impl Into<String>) -> Self {
+        Self {
+            field: None,
+            message: message.into(),
+        }
+    }
+
+    pub fn at(target: ErrorTarget, message: impl Into<String>) -> Self {
+        Self {
+            field: Some(target),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for FieldError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// One value per scalar the form edits. The panel reads its input entities
 /// into this plain shape at save time, so the payload build below stays
 /// window-free and unit-testable. Parent and series arrive as selected ids.
@@ -290,10 +330,10 @@ pub fn empty_create_draft() -> EditDraft {
 
 /// Draft to full-replace payload, over the record's write-side twin: an
 /// emptied optional field clears exactly that field, the rest ride through
-/// as stored. The `String` errors are the form's to show. Parent arrives
+/// as stored. Errors name the row the form shows them on. Parent arrives
 /// already keyed by id from the dropdown, so it passes through unvalidated:
 /// the dropdown's options carry only stored ids.
-pub fn build_update(record: &Resource, draft: &EditDraft) -> Result<NewResource, String> {
+pub fn build_update(record: &Resource, draft: &EditDraft) -> Result<NewResource, FieldError> {
     let mut edit = record.to_new();
     apply_draft_fields(&mut edit, draft)?;
     Ok(edit)
@@ -302,7 +342,7 @@ pub fn build_update(record: &Resource, draft: &EditDraft) -> Result<NewResource,
 /// Draft to a create payload: same scalar rules as update, no stored
 /// record to ride through. Parent/series/accessed stay whatever the draft
 /// carries (inline create leaves them empty).
-pub fn build_create(draft: &EditDraft) -> Result<NewResource, String> {
+pub fn build_create(draft: &EditDraft) -> Result<NewResource, FieldError> {
     let mut new = NewResource {
         kind: draft.kind,
         title: NonEmptyStr::try_new("placeholder").expect("literal"),
@@ -348,9 +388,10 @@ pub fn build_create(draft: &EditDraft) -> Result<NewResource, String> {
 }
 
 /// Shared field merge for update and create payloads.
-fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), String> {
+fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), FieldError> {
     let title = draft.title.trim();
-    edit.title = NonEmptyStr::try_new(title).map_err(|_| "Title must not be empty".to_owned())?;
+    edit.title = NonEmptyStr::try_new(title)
+        .map_err(|_| FieldError::at(ErrorTarget::Title, "Title must not be empty"))?;
 
     edit.kind = draft.kind;
     edit.parent_id = draft.parent;
@@ -393,13 +434,18 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), S
 
     let series = draft.series.trim();
     edit.series_id = (!series.is_empty())
-        .then(|| SeriesId::parse(series).map_err(|_| "Series must be a series id".to_owned()))
+        .then(|| {
+            SeriesId::parse(series)
+                .map_err(|_| FieldError::at(ErrorTarget::Series, "Series must be a series id"))
+        })
         .transpose()?;
 
     let number = draft.series_number.trim();
     edit.series_number = (!number.is_empty())
         .then(|| {
-            NonEmptyStr::try_new(number).map_err(|_| "Series number must not be empty".to_owned())
+            NonEmptyStr::try_new(number).map_err(|_| {
+                FieldError::at(ErrorTarget::SeriesNumber, "Series number must not be empty")
+            })
         })
         .transpose()?;
 
@@ -409,24 +455,30 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), S
         }
         let text = text.trim();
         let value = (!text.is_empty()).then_some(text);
+        let invalid = |e: ibex_core::NameError| {
+            FieldError::at(
+                ErrorTarget::Field(*field),
+                format!("{}: {e}", field.label()),
+            )
+        };
         match field {
             BibliographicField::Subtitle => {
                 edit.subtitle = value
                     .map(NonEmptyStr::try_new)
                     .transpose()
-                    .map_err(|e| format!("{}: {e}", field.label()))?
+                    .map_err(invalid)?
             }
             BibliographicField::TitleAddon => {
                 edit.title_addon = value
                     .map(NonEmptyStr::try_new)
                     .transpose()
-                    .map_err(|e| format!("{}: {e}", field.label()))?
+                    .map_err(invalid)?
             }
             BibliographicField::ShortTitle => {
                 edit.short_title = value
                     .map(NonEmptyStr::try_new)
                     .transpose()
-                    .map_err(|e| format!("{}: {e}", field.label()))?
+                    .map_err(invalid)?
             }
             BibliographicField::Place => edit.place = value.map(str::to_owned),
             BibliographicField::Volume => edit.volume = value.map(str::to_owned),
@@ -435,7 +487,7 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), S
                 edit.pages = value
                     .map(ibex_core::Pages::parse)
                     .transpose()
-                    .map_err(|e| format!("{}: {e}", field.label()))?
+                    .map_err(invalid)?
             }
             BibliographicField::TotalPages => edit.total_pages = value.map(str::to_owned),
             BibliographicField::ArticleNumber => edit.article_number = value.map(str::to_owned),
@@ -471,7 +523,7 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), S
     Ok(())
 }
 
-fn list_field(field: BibliographicField, text: &str) -> Result<Vec<String>, String> {
+fn list_field(field: BibliographicField, text: &str) -> Result<Vec<String>, FieldError> {
     if text.is_empty() {
         return Ok(Vec::new());
     }
@@ -479,9 +531,12 @@ fn list_field(field: BibliographicField, text: &str) -> Result<Vec<String>, Stri
         .map(|line| {
             let line = line.trim();
             if line.is_empty() || line.chars().any(char::is_control) {
-                Err(format!(
-                    "{} must contain one non-empty entry per line",
-                    field.label()
+                Err(FieldError::at(
+                    ErrorTarget::Field(field),
+                    format!(
+                        "{} must contain one non-empty entry per line",
+                        field.label()
+                    ),
                 ))
             } else {
                 Ok(line.to_owned())
@@ -493,7 +548,7 @@ fn list_field(field: BibliographicField, text: &str) -> Result<Vec<String>, Stri
 fn identifier_field(
     field: BibliographicField,
     text: &str,
-) -> Result<Vec<ibex_core::Identifier>, String> {
+) -> Result<Vec<ibex_core::Identifier>, FieldError> {
     Ok(list_field(field, text)?
         .into_iter()
         .map(ibex_core::Identifier::new)
@@ -613,7 +668,8 @@ fn merge_date(
     field: BibliographicField,
     display_field: BibliographicField,
     legacy: Option<(&str, &str)>,
-) -> Result<(), String> {
+) -> Result<(), FieldError> {
+    let at = |message: String| FieldError::at(ErrorTarget::Field(field), message);
     let old_display = display_text(date.as_ref());
     let edited_full = draft
         .fields
@@ -624,7 +680,7 @@ fn merge_date(
     } else if let Some((label, year)) =
         legacy.filter(|(_, year)| year.trim() != date_year(date.as_ref()))
     {
-        year_field(label, year)?
+        year_field(field, label, year)?
     } else {
         date.clone()
     };
@@ -644,12 +700,12 @@ fn merge_date(
                 (!label.is_empty())
                     .then(|| NonEmptyStr::try_new(label))
                     .transpose()
-                    .map_err(|e| format!("{}: {e}", display_field.label()))?,
+                    .map_err(|e| at(format!("{}: {e}", display_field.label())))?,
             )
-            .map_err(|e| format!("{}: {e}", field.label()))?,
+            .map_err(|e| at(format!("{}: {e}", field.label())))?,
         );
     } else if !label.is_empty() && label != old_display {
-        return Err(format!("{} requires a date", display_field.label()));
+        return Err(at(format!("{} requires a date", display_field.label())));
     }
     *date = changed;
     Ok(())
@@ -660,7 +716,7 @@ fn parse_date_preserving_endpoints(
     field: BibliographicField,
     text: &str,
     original: Option<&BibliographicDate>,
-) -> Result<Option<BibliographicDate>, String> {
+) -> Result<Option<BibliographicDate>, FieldError> {
     let parsed = parse_date(field, text)?;
     let (Some(original), Some(parsed)) = (original, parsed.as_ref()) else {
         return Ok(parsed);
@@ -693,10 +749,19 @@ fn parse_date_preserving_endpoints(
         None,
     )
     .map(Some)
-    .map_err(|error| format!("{}: {error}", field.label()))
+    .map_err(|error| {
+        FieldError::at(
+            ErrorTarget::Field(field),
+            format!("{}: {error}", field.label()),
+        )
+    })
 }
 
-fn parse_date(field: BibliographicField, text: &str) -> Result<Option<BibliographicDate>, String> {
+fn parse_date(
+    field: BibliographicField,
+    text: &str,
+) -> Result<Option<BibliographicDate>, FieldError> {
+    let at = |message: String| FieldError::at(ErrorTarget::Field(field), message);
     let text = text.trim();
     if text.is_empty() {
         return Ok(None);
@@ -709,10 +774,10 @@ fn parse_date(field: BibliographicField, text: &str) -> Result<Option<Bibliograp
         (text, DateCertainty::Exact)
     };
     let error = || {
-        format!(
+        at(format!(
             "{} must be a year, YYYY-MM, YYYY-MM-DD or RFC3339 date, optionally a range with / and suffix ? or ~",
             field.label()
-        )
+        ))
     };
     let (start, end) = text
         .split_once('/')
@@ -726,14 +791,14 @@ fn parse_date(field: BibliographicField, text: &str) -> Result<Option<Bibliograp
         })
         .transpose()?;
     if end.is_some_and(|end| end.as_unix_ms() < instant.as_unix_ms()) {
-        return Err(format!(
+        return Err(at(format!(
             "{} range end must not precede its start",
             field.label()
-        ));
+        )));
     }
     BibliographicDate::try_new_precise(instant, end, precision, certainty, None)
         .map(Some)
-        .map_err(|e| format!("{}: {e}", field.label()))
+        .map_err(|e| at(format!("{}: {e}", field.label())))
 }
 
 fn parse_date_instant(text: &str) -> Option<(UtcMillis, DatePrecision)> {
@@ -799,16 +864,21 @@ fn date_year(date: Option<&BibliographicDate>) -> String {
 
 /// Year text to the year's January 1 UTC date; empty clears the field,
 /// anything unparseable is the form's error to show.
-fn year_field(label: &str, text: &str) -> Result<Option<BibliographicDate>, String> {
+fn year_field(
+    field: BibliographicField,
+    label: &str,
+    text: &str,
+) -> Result<Option<BibliographicDate>, FieldError> {
+    let at = |message: String| FieldError::at(ErrorTarget::Field(field), message);
     let text = text.trim();
     if text.is_empty() {
         return Ok(None);
     }
     let year: i64 = text
         .parse()
-        .map_err(|_| format!("{label} must be a whole year, got '{text}'"))?;
+        .map_err(|_| at(format!("{label} must be a whole year, got '{text}'")))?;
     let instant =
-        UtcMillis::jan_1_utc(year).ok_or_else(|| format!("{label} is outside the calendar"))?;
+        UtcMillis::jan_1_utc(year).ok_or_else(|| at(format!("{label} is outside the calendar")))?;
     BibliographicDate::try_new_precise(
         instant,
         None,
@@ -817,14 +887,14 @@ fn year_field(label: &str, text: &str) -> Result<Option<BibliographicDate>, Stri
         None,
     )
     .map(Some)
-    .map_err(|_| format!("{label} is outside the calendar"))
+    .map_err(|_| at(format!("{label} is outside the calendar")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        EditDraft, KindItem, SearchableListItem, build_create, build_update,
-        creators_from_person_ids, empty_create_draft, kind_items, prefill_draft,
+        EditDraft, ErrorTarget, FieldError, KindItem, SearchableListItem, build_create,
+        build_update, creators_from_person_ids, empty_create_draft, kind_items, prefill_draft,
     };
     use ibex_core::{
         BibliographicDate, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId, Resource,
@@ -1018,20 +1088,26 @@ mod tests {
                 let mut draft = prefill_draft(&record);
                 draft.fields.insert(field, text.into());
                 let err = build_update(&record, &draft).unwrap_err();
-                assert!(err.contains(field.label()), "{field:?}: {text}: {err}");
+                assert!(
+                    err.message.contains(field.label()),
+                    "{field:?}: {text}: {err}"
+                );
+                assert_eq!(err.field, Some(ErrorTarget::Field(field)));
                 assert!(build_create(&draft).is_err());
             }
         }
-        for field in [
-            F::PublishedDisplay,
-            F::AccessedDisplay,
-            F::OriginalDateDisplay,
-            F::EventDateDisplay,
+        for (date, display) in [
+            (F::Published, F::PublishedDisplay),
+            (F::Accessed, F::AccessedDisplay),
+            (F::OriginalDate, F::OriginalDateDisplay),
+            (F::EventDate, F::EventDateDisplay),
         ] {
             let mut draft = empty_create_draft();
             draft.title = "No date".into();
-            draft.fields.insert(field, "Orphan display".into());
-            assert!(build_create(&draft).unwrap_err().contains(field.label()));
+            draft.fields.insert(display, "Orphan display".into());
+            let err = build_create(&draft).unwrap_err();
+            assert!(err.message.contains(display.label()), "{err}");
+            assert_eq!(err.field, Some(ErrorTarget::Field(date)));
         }
     }
     #[test]
@@ -1175,7 +1251,8 @@ mod tests {
                 let mut draft = prefill_draft(&record);
                 draft.fields.insert(field, text.into());
                 let err = build_update(&record, &draft).unwrap_err();
-                assert!(err.contains(field.label()), "{err}");
+                assert!(err.message.contains(field.label()), "{err}");
+                assert_eq!(err.field, Some(ErrorTarget::Field(field)));
             }
         }
     }
@@ -1414,7 +1491,10 @@ mod tests {
     #[test]
     fn build_create_from_empty_draft_rejects_blank_title() {
         let err = build_create(&empty_create_draft()).expect_err("blank title");
-        assert_eq!(err, "Title must not be empty");
+        assert_eq!(
+            err,
+            FieldError::at(ErrorTarget::Title, "Title must not be empty")
+        );
     }
 
     #[test]
@@ -1482,20 +1562,30 @@ mod tests {
 
         let err = build_update(&record, &draft_with("   ", creators.clone()))
             .expect_err("blank title rejects");
-        assert_eq!(err, "Title must not be empty");
+        assert_eq!(
+            err,
+            FieldError::at(ErrorTarget::Title, "Title must not be empty")
+        );
 
         let mut draft = draft_with("Retitled", creators.clone());
         draft.published_year = "soon".into();
         let err = build_update(&record, &draft).expect_err("bad year rejects");
         assert!(
-            err.contains("Published year"),
+            err.message.contains("Published year"),
             "message names the field: {err}"
+        );
+        assert_eq!(
+            err.field,
+            Some(ErrorTarget::Field(super::BibliographicField::Published))
         );
 
         let mut draft = draft_with("Retitled", creators);
         draft.series = "not-an-id".into();
         let err = build_update(&record, &draft).expect_err("bad series rejects");
-        assert!(err.contains("Series"), "message names the field: {err}");
+        assert_eq!(
+            err,
+            FieldError::at(ErrorTarget::Series, "Series must be a series id")
+        );
     }
 
     #[test]
