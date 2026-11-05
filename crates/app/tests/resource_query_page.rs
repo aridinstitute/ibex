@@ -65,7 +65,6 @@ async fn search_matches_title_or_publisher_before_paging() {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -285,7 +284,6 @@ fn resource(kind: ResourceKind, author: Option<PersonId>, title: &str) -> NewRes
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     }
@@ -1107,7 +1105,6 @@ async fn create_book(state: &AppState, author_id: PersonId, title: &str) {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },

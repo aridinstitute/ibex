@@ -321,7 +321,6 @@ async fn imported_resource_write_rolls_back_new_deps_and_keeps_shared() {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -579,7 +578,6 @@ fn minimal_book(title: &str, creators: Vec<CreatorSpec>) -> NewResource {
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     }

@@ -222,7 +222,6 @@ pub(crate) fn blank_container(
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     }

@@ -238,7 +238,6 @@ async fn create_resource_round_trips_typed_pages_and_dates() {
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     };

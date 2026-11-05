@@ -36,7 +36,6 @@ fn bare_book(title: &str) -> NewResource {
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     }
@@ -48,7 +47,6 @@ async fn contract(store: &impl Store) {
         Publisher,
         Institution,
         Organization,
-        School,
         DocumentType,
         PublicationMethod,
         Language,
@@ -69,7 +67,6 @@ async fn contract(store: &impl Store) {
     blank.publisher = Some("  ".into());
     blank.institution = Some("  ".into());
     blank.organization = Some("  ".into());
-    blank.school = Some("  ".into());
     blank.document_type = Some("  ".into());
     blank.publication_method = Some("  ".into());
     blank.language = Some("  ".into());
@@ -87,7 +84,6 @@ async fn contract(store: &impl Store) {
         new.publisher = Some(value.into());
         new.institution = Some(format!("Institute {value}"));
         new.organization = Some(format!("Organization {value}"));
-        new.school = Some(format!("School {value}"));
         new.document_type = Some(format!("Type {value}"));
         new.publication_method = Some(format!("Method {value}"));
         new.language = Some(format!("Language {value}"));
@@ -97,7 +93,6 @@ async fn contract(store: &impl Store) {
         (Publisher, ""),
         (Institution, "Institute "),
         (Organization, "Organization "),
-        (School, "School "),
         (DocumentType, "Type "),
         (PublicationMethod, "Method "),
         (Language, "Language "),

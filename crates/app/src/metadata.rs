@@ -287,7 +287,6 @@ pub fn empty_resource(title: &str, kind: ResourceKind) -> Result<NewResource, St
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     })

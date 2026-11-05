@@ -1167,7 +1167,6 @@ mod tests {
             new.publisher = Some(value.into());
             new.institution = Some(value.into());
             new.organization = Some(value.into());
-            new.school = Some(value.into());
             new.document_type = Some(value.into());
             new.publication_method = Some(value.into());
             new.language = Some(value.into());
@@ -1182,7 +1181,6 @@ mod tests {
             Publisher,
             Institution,
             Organization,
-            School,
             DocumentType,
             PublicationMethod,
             Language,
@@ -1523,7 +1521,6 @@ mod tests {
             publication_method: None,
             institution: None,
             organization: None,
-            school: None,
             abstract_text: None,
             keywords: vec![],
         };
@@ -2013,7 +2010,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })

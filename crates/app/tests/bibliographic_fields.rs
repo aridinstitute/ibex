@@ -26,7 +26,7 @@ async fn bibliographic_fields_are_returned_in_detail_and_preserved_on_update() {
         "original_date": {"instant": 0, "display": "1970"},
         "event_date": {"instant": 86400000, "display": null},
         "language": "en", "document_type": "Research report", "publication_method": "Online",
-        "institution": "Example University", "organization": "Citation Society", "school": "History",
+        "institution": "Example University", "organization": "Citation Society",
         "abstract_text": "A summary.", "keywords": ["history", "bibliography"]
     });
     let new: NewResource = serde_json::from_value(input.clone()).unwrap();
@@ -75,7 +75,6 @@ async fn bibliographic_fields_are_returned_in_detail_and_preserved_on_update() {
         "publication_method",
         "institution",
         "organization",
-        "school",
         "abstract_text",
         "keywords",
     ] {

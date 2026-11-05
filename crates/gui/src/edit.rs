@@ -46,7 +46,6 @@ pub enum BibliographicField {
     PublicationMethod,
     Institution,
     Organization,
-    School,
     AbstractText,
     Keywords,
     Citekey,
@@ -84,7 +83,6 @@ impl BibliographicField {
         Self::PublicationMethod,
         Self::Institution,
         Self::Organization,
-        Self::School,
         Self::AbstractText,
         Self::Keywords,
         Self::Citekey,
@@ -122,7 +120,6 @@ impl BibliographicField {
             Self::PublicationMethod => "Publication method",
             Self::Institution => "Institution",
             Self::Organization => "Organization",
-            Self::School => "School",
             Self::AbstractText => "Abstract",
             Self::Keywords => "Keywords",
             Self::Citekey => "Citekey",
@@ -271,7 +268,6 @@ fn field_text(record: &NewResource, field: BibliographicField) -> String {
         }
         BibliographicField::Institution => record.institution.clone().unwrap_or_default(),
         BibliographicField::Organization => record.organization.clone().unwrap_or_default(),
-        BibliographicField::School => record.school.clone().unwrap_or_default(),
         BibliographicField::AbstractText => record.abstract_text.clone().unwrap_or_default(),
         BibliographicField::Citekey => record.metadata.citekey.clone().unwrap_or_default(),
         BibliographicField::Venue => record.metadata.venue.clone().unwrap_or_default(),
@@ -373,7 +369,6 @@ pub fn build_create(draft: &EditDraft) -> Result<NewResource, FieldError> {
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     };
@@ -487,7 +482,6 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), F
             }
             BibliographicField::Institution => edit.institution = value.map(str::to_owned),
             BibliographicField::Organization => edit.organization = value.map(str::to_owned),
-            BibliographicField::School => edit.school = value.map(str::to_owned),
             BibliographicField::AbstractText => edit.abstract_text = value.map(str::to_owned),
             BibliographicField::Citekey => edit.metadata.citekey = value.map(str::to_owned),
             BibliographicField::Venue => edit.metadata.venue = value.map(str::to_owned),
@@ -906,7 +900,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -956,7 +949,7 @@ mod tests {
         record.published = None;
         record.accessed = None;
         let draft = prefill_draft(&record);
-        assert_eq!(F::ALL.len(), 34);
+        assert_eq!(F::ALL.len(), 33);
         assert_eq!(draft.fields.len(), F::ALL.len());
         for field in F::ALL {
             assert_eq!(draft.fields[field], "");
@@ -1244,7 +1237,6 @@ mod tests {
             (F::PublicationMethod, "publication_method"),
             (F::Institution, "institution"),
             (F::Organization, "organization"),
-            (F::School, "school"),
             (F::AbstractText, "abstract_text"),
             (F::Citekey, "citekey"),
             (F::Venue, "venue"),

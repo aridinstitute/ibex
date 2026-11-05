@@ -2670,7 +2670,6 @@ fn details_suggestion_field(field: BibliographicField) -> Option<ibex_core::Reso
         F::Language => S::Language,
         F::Institution => S::Institution,
         F::Organization => S::Organization,
-        F::School => S::School,
         F::DocumentType => S::DocumentType,
         F::PublicationMethod => S::PublicationMethod,
         _ => return None,
@@ -8023,7 +8022,7 @@ impl LibraryApp {
                         div().id("edit-field-Publisher").test_support().w_full().child(form.publisher.render(saving))
                             .children(field_error(form, ErrorTarget::Publisher, danger)),
                     ))
-                    .children(render_bibliographic_fields(form, &[BibliographicField::Place, BibliographicField::Edition, BibliographicField::Language, BibliographicField::DocumentType, BibliographicField::PublicationMethod, BibliographicField::Institution, BibliographicField::Organization, BibliographicField::School], saving, danger))
+                    .children(render_bibliographic_fields(form, &[BibliographicField::Place, BibliographicField::Edition, BibliographicField::Language, BibliographicField::DocumentType, BibliographicField::PublicationMethod, BibliographicField::Institution, BibliographicField::Organization], saving, danger))
                     .children(render_bibliographic_fields(form, &[BibliographicField::Published, BibliographicField::PublishedDisplay, BibliographicField::OriginalDate, BibliographicField::OriginalDateDisplay, BibliographicField::EventDate, BibliographicField::EventDateDisplay], saving, danger))
                     .child(edit_field(
                         "Parent",
@@ -10566,7 +10565,6 @@ mod detail_prefetch_tests {
             publication_method: None,
             institution: None,
             organization: None,
-            school: None,
             abstract_text: None,
             keywords: vec![],
             id,
@@ -12799,7 +12797,6 @@ mod classification_tests {
                 "Publication method",
                 "Institution",
                 "Organization",
-                "School",
                 "Published date",
                 "Original date",
                 "Event date",
@@ -13334,7 +13331,6 @@ mod classification_tests {
         source.publisher = Some("Outside Publisher".into());
         source.institution = Some("Outside Institution".into());
         source.organization = Some("Outside Organization".into());
-        source.school = Some("Outside School".into());
         source.document_type = Some("Outside DocumentType".into());
         source.publication_method = Some("Outside PublicationMethod".into());
         rt.block_on(f.worker.create_resource(source)).unwrap();
@@ -13350,7 +13346,6 @@ mod classification_tests {
                 "Publisher",
                 "Institution",
                 "Organization",
-                "School",
                 "DocumentType",
                 "PublicationMethod",
             ] {
@@ -13395,7 +13390,6 @@ mod classification_tests {
                 (saved.publisher, "Publisher"),
                 (saved.institution, "Institution"),
                 (saved.organization, "Organization"),
-                (saved.school, "School"),
                 (saved.document_type, "DocumentType"),
                 (saved.publication_method, "PublicationMethod"),
             ] {

@@ -101,7 +101,6 @@ struct ResourceRow {
     publication_method: Option<String>,
     institution: Option<String>,
     organization: Option<String>,
-    school: Option<String>,
     abstract_text: Option<String>,
     keywords: Vec<String>,
     kind: ResourceKind,
@@ -166,7 +165,6 @@ impl ResourceRow {
         resource.publication_method = self.publication_method.clone();
         resource.institution = self.institution.clone();
         resource.organization = self.organization.clone();
-        resource.school = self.school.clone();
         resource.abstract_text = self.abstract_text.clone();
         resource.keywords = self.keywords.clone();
         resource.attachment_ids = self.attachment_ids.clone();
@@ -642,7 +640,6 @@ impl Store for MemoryStore {
                 Publisher => &row.publisher,
                 Institution => &row.institution,
                 Organization => &row.organization,
-                School => &row.school,
                 DocumentType => &row.document_type,
                 PublicationMethod => &row.publication_method,
                 Language => &row.language,
@@ -1037,7 +1034,6 @@ impl Store for MemoryStore {
             publication_method: resource.publication_method.clone(),
             institution: resource.institution.clone(),
             organization: resource.organization.clone(),
-            school: resource.school.clone(),
             abstract_text: resource.abstract_text.clone(),
             keywords: resource.keywords.clone(),
             favorite: resource.favorite,
@@ -1184,7 +1180,6 @@ impl Store for MemoryStore {
                         publication_method: dep.publication_method.clone(),
                         institution: dep.institution.clone(),
                         organization: dep.organization.clone(),
-                        school: dep.school.clone(),
                         abstract_text: dep.abstract_text.clone(),
                         keywords: dep.keywords.clone(),
                         favorite: dep.favorite,
@@ -1251,7 +1246,6 @@ impl Store for MemoryStore {
                 publication_method: resource.publication_method.clone(),
                 institution: resource.institution.clone(),
                 organization: resource.organization.clone(),
-                school: resource.school.clone(),
                 abstract_text: resource.abstract_text.clone(),
                 keywords: resource.keywords.clone(),
                 favorite: resource.favorite,
@@ -1369,7 +1363,6 @@ impl Store for MemoryStore {
                 publication_method: r.publication_method.clone(),
                 institution: r.institution.clone(),
                 organization: r.organization.clone(),
-                school: r.school.clone(),
                 abstract_text: r.abstract_text.clone(),
                 keywords: r.keywords.clone(),
                 favorite: r.favorite,
@@ -1435,7 +1428,6 @@ impl Store for MemoryStore {
         resource.publication_method = row.publication_method;
         resource.institution = row.institution;
         resource.organization = row.organization;
-        resource.school = row.school;
         resource.abstract_text = row.abstract_text;
         resource.keywords = row.keywords;
         resource.attachment_ids = row.attachment_ids;

@@ -221,7 +221,6 @@ pub(crate) mod tests {
             publication_method: None,
             institution: None,
             organization: None,
-            school: None,
             abstract_text: Some("x".repeat(5_000)),
             keywords: vec!["bibliometrics".into()],
         }

@@ -187,8 +187,6 @@ struct ResourceDoc {
     #[surreal(default)]
     organization: Option<String>,
     #[surreal(default)]
-    school: Option<String>,
-    #[surreal(default)]
     abstract_text: Option<String>,
     #[surreal(default)]
     keywords: Vec<String>,
@@ -1211,7 +1209,6 @@ impl SurrealStore {
         resource.publication_method = doc.publication_method;
         resource.institution = doc.institution;
         resource.organization = doc.organization;
-        resource.school = doc.school;
         resource.abstract_text = doc.abstract_text;
         resource.keywords = doc.keywords;
         resource.attachment_ids = doc
@@ -1251,7 +1248,6 @@ impl SurrealStore {
             publication_method: resource.publication_method.clone(),
             institution: resource.institution.clone(),
             organization: resource.organization.clone(),
-            school: resource.school.clone(),
             abstract_text: resource.abstract_text.clone(),
             keywords: resource.keywords.clone(),
             kind: resource.kind,
@@ -1663,7 +1659,6 @@ impl SurrealStore {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -2949,7 +2944,6 @@ mod tests {
             publication_method: None,
             institution: None,
             organization: None,
-            school: None,
             abstract_text: None,
             keywords: vec![],
             metadata: metadata.clone(),
@@ -3236,7 +3230,6 @@ mod tests {
                     publication_method: None,
                     institution: None,
                     organization: None,
-                    school: None,
                     abstract_text: None,
                     keywords: vec![],
                 })
@@ -3361,7 +3354,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -3431,7 +3423,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -3478,7 +3469,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -3553,7 +3543,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -3669,7 +3658,6 @@ mod tests {
                     publication_method: None,
                     institution: None,
                     organization: None,
-                    school: None,
                     abstract_text: None,
                     keywords: vec![],
                 })
@@ -3739,7 +3727,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -3856,7 +3843,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -3902,7 +3888,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -4318,7 +4303,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5305,7 +5289,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5399,7 +5382,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5505,7 +5487,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5671,7 +5652,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5832,7 +5812,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5909,7 +5888,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5970,7 +5948,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -6024,7 +6001,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -6119,7 +6095,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -6162,7 +6137,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -6241,7 +6215,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })

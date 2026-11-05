@@ -61,7 +61,6 @@ fn bare(kind: ResourceKind, title: &str, parent_id: Option<ResourceId>) -> NewRe
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     }

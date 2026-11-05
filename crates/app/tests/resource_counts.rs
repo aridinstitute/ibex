@@ -55,7 +55,6 @@ async fn counts_report_the_whole_library_and_emit_one_event() {
                     publication_method: None,
                     institution: None,
                     organization: None,
-                    school: None,
                     abstract_text: None,
                     keywords: vec![],
                 },

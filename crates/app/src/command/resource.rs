@@ -547,9 +547,6 @@ fn changed_fields(old: &Resource, new: &NewResource) -> Vec<&'static str> {
     if old.organization != new.organization {
         changed.push("organization");
     }
-    if old.school != new.school {
-        changed.push("school");
-    }
     if old.abstract_text != new.abstract_text {
         changed.push("abstract_text");
     }
@@ -827,7 +824,6 @@ impl Handler for GetResourceDetail {
             publication_method: resource.publication_method,
             institution: resource.institution,
             organization: resource.organization,
-            school: resource.school,
             abstract_text: resource.abstract_text,
             keywords: resource.keywords,
             id: resource.id,

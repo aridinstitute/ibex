@@ -49,7 +49,6 @@ fn example() -> NewResource {
         publication_method: Some("Online".into()),
         institution: Some("Example University".into()),
         organization: Some("Citation Society".into()),
-        school: Some("School of History".into()),
         abstract_text: Some("A guide to bibliographic research.".into()),
         keywords: vec!["history".into(), "bibliography".into()],
     }

@@ -468,7 +468,6 @@ async fn add(state: &AppState, args: AddArgs) -> Result<()> {
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     };
@@ -1258,7 +1257,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },

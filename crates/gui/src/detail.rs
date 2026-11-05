@@ -126,7 +126,6 @@ pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
         ("Publication method", detail.publication_method.as_deref()),
         ("Institution", detail.institution.as_deref()),
         ("Organization", detail.organization.as_deref()),
-        ("School", detail.school.as_deref()),
         ("Abstract", detail.abstract_text.as_deref()),
     ] {
         if let Some(value) = value {
@@ -696,7 +695,6 @@ mod tests {
             publication_method: None,
             institution: None,
             organization: None,
-            school: None,
             abstract_text: None,
             keywords: vec![],
             id: ResourceId::generate(),

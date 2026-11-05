@@ -63,7 +63,6 @@ fn book_new(author_id: PersonId, title: &str) -> NewResource {
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     }
@@ -390,7 +389,6 @@ async fn update_retype_with_parent_rechecks_parent_kind() {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -443,7 +441,6 @@ async fn update_retype_with_parent_rechecks_parent_kind() {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },

@@ -46,7 +46,6 @@ fn bare_book(title: &str) -> NewResource {
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     }

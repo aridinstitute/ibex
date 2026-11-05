@@ -40,7 +40,6 @@ fn bare_book(title: &str) -> NewResource {
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     }
@@ -114,7 +113,6 @@ async fn app_suggestions_preserve_custom_values_for_every_supported_field() {
         new.publisher = value.clone();
         new.institution = value.clone();
         new.organization = value.clone();
-        new.school = value.clone();
         new.document_type = value.clone();
         new.publication_method = value.clone();
         new.language = value;
@@ -125,7 +123,6 @@ async fn app_suggestions_preserve_custom_values_for_every_supported_field() {
         Publisher,
         Institution,
         Organization,
-        School,
         DocumentType,
         PublicationMethod,
         Language,
