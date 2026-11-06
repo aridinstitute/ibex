@@ -26,3 +26,4 @@ solo.yml
 
 # Local-only release helper
 /scripts/release-local.sh
+/.projects/
