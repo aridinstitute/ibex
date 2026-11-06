@@ -6696,8 +6696,9 @@ impl LibraryApp {
                                 });
                             }
                             Err(err) => {
-                                form.error =
-                                    Some(FieldError::form(format!("Could not create series: {err}")))
+                                form.error = Some(FieldError::form(format!(
+                                    "Could not create series: {err}"
+                                )))
                             }
                         }
                         cx.notify();
@@ -6967,7 +6968,10 @@ impl LibraryApp {
         let draft = form.draft(cx);
         let input_error = form.fields.iter().find_map(|(field, input)| match input {
             BibliographicInput::Tokens(input) => input.read(cx).pending_error(cx).map(|error| {
-                FieldError::at(FormField::for_bib(*field), format!("{}: {error}", field.label()))
+                FieldError::at(
+                    FormField::for_bib(*field),
+                    format!("{}: {error}", field.label()),
+                )
             }),
             _ => None,
         });
@@ -6998,7 +7002,10 @@ impl LibraryApp {
         cx.spawn_in(window, async move |app, window| {
             let reply = worker.update_resource(id, new).await;
             _ = app.update_in(window, |app, window, cx| {
-                if !matches!(&app.edit, Some(EditFetch::Ready(form)) if form.title == form_identity) { return; }
+                if !matches!(&app.edit, Some(EditFetch::Ready(form)) if form.title == form_identity)
+                {
+                    return;
+                }
                 match reply {
                     Ok(_) => {
                         if content_changed {
@@ -7931,39 +7938,64 @@ impl LibraryApp {
             .w_full()
             .bg(cx.theme().background)
             .text_size(FIELD_TEXT_SIZE)
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
                     .child(
-                        h_flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                Button::new("cancel-edit")
-                                    .ghost()
-                                    .small()
-                                    .label("Cancel")
-                                    .disabled(form.saving)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.cancel_edit(window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("save-edit")
-                                    .primary()
-                                    .small()
-                                    .label("Save")
-                                    .loading(saving)
-                                    .disabled(saving || form.author_creating || form.series_loading || form.series_creating)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.save_edit(window, cx)
-                                    })),
+                        Button::new("cancel-edit")
+                            .ghost()
+                            .small()
+                            .label("Cancel")
+                            .disabled(form.saving)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.cancel_edit(window, cx)),
                             ),
                     )
+                    .child(
+                        Button::new("save-edit")
+                            .primary()
+                            .small()
+                            .label("Save")
+                            .loading(saving)
+                            .disabled(
+                                saving
+                                    || form.author_creating
+                                    || form.series_loading
+                                    || form.series_creating,
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.save_edit(window, cx)),
+                            ),
+                    ),
+            )
             .child(
-                v_flex().id("edit-panel").test_support().flex_1().min_h_0().w_full().p_3().gap_4().overflow_y_scroll()
+                v_flex()
+                    .id("edit-panel")
+                    .test_support()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .p_3()
+                    .gap_4()
+                    .overflow_y_scroll()
                     .capture_action(cx.listener(|app, action: &Enter, window, cx| {
-                        if action.secondary { app.save_edit(window, cx); } else { cx.propagate(); }
+                        if action.secondary {
+                            app.save_edit(window, cx);
+                        } else {
+                            cx.propagate();
+                        }
                     }))
                     .when_some(error, |el, error| {
-                        el.child(div().id("edit-form-error").test_support().aria_label(error.message.clone()).text_xs().text_color(danger).child(error.message))
+                        el.child(
+                            div()
+                                .id("edit-form-error")
+                                .test_support()
+                                .aria_label(error.message.clone())
+                                .text_xs()
+                                .text_color(danger)
+                                .child(error.message),
+                        )
                     })
                     .children(sections),
             )
@@ -13790,7 +13822,9 @@ mod classification_tests {
             let row = window.within("edit-field-Identifiers");
             assert_eq!(row.find(("identifier-badge", 0usize)).label(), Some("DOI"));
             assert_eq!(row.find(("identifier-badge", 1usize)).label(), Some("ISBN"));
-            window.within("edit-field-Identifiers").click("identifier-input", cx);
+            window
+                .within("edit-field-Identifiers")
+                .click("identifier-input", cx);
             window.input("not an id", cx);
             window.click("save-edit", cx);
             window.render_frame(cx);
@@ -13803,7 +13837,9 @@ mod classification_tests {
                     "Unrecognized identifier; prefix it with doi:, isbn:, issn:, isrn:, or arxiv:"
                 )
             );
-            window.within("edit-field-Identifiers").click("identifier-input", cx);
+            window
+                .within("edit-field-Identifiers")
+                .click("identifier-input", cx);
             window.press("cmd-a", cx);
             window.press("backspace", cx);
             window.click("save-edit", cx);
@@ -13819,7 +13855,11 @@ mod classification_tests {
         let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
         assert_eq!(saved.doi.as_deref(), Some("10.1000/xyz"));
         assert_eq!(
-            saved.isbns.iter().map(|isbn| isbn.as_str()).collect::<Vec<_>>(),
+            saved
+                .isbns
+                .iter()
+                .map(|isbn| isbn.as_str())
+                .collect::<Vec<_>>(),
             ["978-0-306-40615-7"]
         );
     }
@@ -14369,7 +14409,10 @@ mod classification_tests {
             let kind_row = row(FormField::Kind);
             assert!(headers[0].bottom() <= kind_row.top());
             for field in &shown[1..] {
-                assert!(kind_row.bottom() <= row(*field).top(), "Kind precedes {field:?}");
+                assert!(
+                    kind_row.bottom() <= row(*field).top(),
+                    "Kind precedes {field:?}"
+                );
             }
             for field in &shown {
                 let ix = sections
@@ -14377,9 +14420,15 @@ mod classification_tests {
                     .position(|section| *section == field.section())
                     .unwrap();
                 let bounds = row(*field);
-                assert!(headers[ix].bottom() <= bounds.top(), "{field:?} under its header");
+                assert!(
+                    headers[ix].bottom() <= bounds.top(),
+                    "{field:?} under its header"
+                );
                 if let Some(next) = headers.get(ix + 1) {
-                    assert!(bounds.bottom() <= next.top(), "{field:?} before the next section");
+                    assert!(
+                        bounds.bottom() <= next.top(),
+                        "{field:?} before the next section"
+                    );
                 }
             }
         })

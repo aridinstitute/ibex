@@ -405,18 +405,19 @@ impl DbWorker {
                                 parent_id,
                                 reply,
                             } => {
-                                let result = state
-                                    .execute(Command::PreviewInheritance(PreviewInheritance {
-                                        kind,
-                                        parent_id,
-                                    }))
-                                    .await
-                                    .map_err(|e| e.to_string())
-                                    .and_then(|outcome| match outcome {
-                                        Outcome::PreviewInheritance(preview) => Ok(preview),
-                                        _ => Err("unexpected outcome from preview_inheritance"
-                                            .into()),
-                                    });
+                                let result =
+                                    state
+                                        .execute(Command::PreviewInheritance(PreviewInheritance {
+                                            kind,
+                                            parent_id,
+                                        }))
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                        .and_then(|outcome| match outcome {
+                                            Outcome::PreviewInheritance(preview) => Ok(preview),
+                                            _ => Err("unexpected outcome from preview_inheritance"
+                                                .into()),
+                                        });
                                 let _ = reply.send(result);
                             }
                             DbRequest::CountResources { reply } => {
