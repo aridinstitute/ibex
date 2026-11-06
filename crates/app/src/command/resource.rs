@@ -3,15 +3,108 @@ use std::path::PathBuf;
 
 use ibex_core::{Attachment, AttachmentId};
 use ibex_core::{
-    Creator, InheritanceError, NewResource, PersonId, Resource, ResourceCounts, ResourceDetail,
-    ResourceError, ResourceId, ResourcePage, ResourceQuery, ResourceSummary, SeriesId,
-    SortedResourcePage, StoreError, creator_label_name, detail_creator_groups, resolve_effective,
+    Creator, EffectiveValues, InheritanceError, NewResource, NonEmptyStr, PersonId, Resource,
+    ResourceCounts, ResourceDetail, ResourceError, ResourceId, ResourceKind, ResourcePage,
+    ResourceQuery, ResourceSummary, SeriesId, SortedResourcePage, StoreError, creator_label_name,
+    detail_creator_groups, resolve_effective, resolve_inherited,
 };
 use ibex_core::{ResourceGridPage, ResourceGridParent};
 
 use crate::event::{self, Event};
 use crate::{AppState, CommandError, Handler, Outcome};
 
+#[derive(Debug, Clone)]
+pub struct SuggestFieldValues {
+    pub field: ibex_core::ResourceTextField,
+    pub query: String,
+    pub limit: u32,
+}
+
+pub(crate) struct SuggestedFieldValues(pub Vec<String>);
+
+impl From<SuggestedFieldValues> for Outcome {
+    fn from(SuggestedFieldValues(values): SuggestedFieldValues) -> Self {
+        Outcome::SuggestFieldValues(values)
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for SuggestFieldValues {
+    const NAME: &'static str = "suggest_field_values";
+    type Output = SuggestedFieldValues;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::RESOURCE_SUGGESTION_FIELD, self.field.as_str());
+        ev.set(event::RESOURCE_PAGE_LIMIT, self.limit);
+        // Autocomplete records only the search size, never user-entered text.
+        ev.set(
+            event::RESOURCE_SUGGESTION_QUERY_LENGTH,
+            self.query.chars().count(),
+        );
+    }
+
+    async fn run(self, state: &AppState, ev: &mut Event) -> Result<Self::Output, CommandError> {
+        let values = state
+            .store()
+            .suggest_field_values(self.field, self.query, self.limit)
+            .await?;
+        ev.set(event::RESOURCE_SUGGESTION_COUNT, values.len());
+        Ok(SuggestedFieldValues(values))
+    }
+}
+
+/// What an empty resource of `kind` under `parent_id` would inherit, for
+/// showing hints in the edit form before the record is saved.
+#[derive(Debug, Clone)]
+pub struct PreviewInheritance {
+    pub kind: ResourceKind,
+    pub parent_id: Option<ResourceId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct InheritancePreview {
+    pub values: EffectiveValues,
+    /// Title of every ancestor in the chain, so callers can name the source.
+    pub sources: HashMap<ResourceId, NonEmptyStr>,
+}
+
+impl From<InheritancePreview> for Outcome {
+    fn from(preview: InheritancePreview) -> Self {
+        Outcome::PreviewInheritance(preview)
+    }
+}
+
+#[async_trait::async_trait]
+impl Handler for PreviewInheritance {
+    const NAME: &'static str = "preview_inheritance";
+    type Output = InheritancePreview;
+
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::RESOURCE_KIND, self.kind.as_str());
+        if let Some(parent_id) = self.parent_id {
+            ev.set(event::RESOURCE_ID, parent_id.to_string());
+        }
+    }
+
+    async fn run(self, state: &AppState, _ev: &mut Event) -> Result<Self::Output, CommandError> {
+        let ancestors = match self.parent_id {
+            Some(parent_id) => load_chain(state, Some(parent_id)).await?,
+            None => Vec::new(),
+        };
+        // A parent the kind cannot link to inherits nothing, rather than
+        // failing while the user is still choosing a kind or parent.
+        let ancestors = match ancestors.first() {
+            Some(parent) if self.kind.accept_parent(parent.kind).is_err() => Vec::new(),
+            _ => ancestors,
+        };
+        let values = resolve_inherited(self.kind, &ancestors).map_err(map_inheritance_err)?;
+        let sources = ancestors
+            .into_iter()
+            .map(|ancestor| (ancestor.id, ancestor.title))
+            .collect();
+        Ok(InheritancePreview { values, sources })
+    }
+}
 #[derive(Debug, Clone)]
 pub struct CreateResource {
     pub new: NewResource,
@@ -284,8 +377,16 @@ async fn load_ancestors(
     state: &AppState,
     resource: &Resource,
 ) -> Result<Vec<Resource>, CommandError> {
+    load_chain(state, resource.parent_id).await
+}
+
+/// Load `start` and its ancestors (nearest first).
+async fn load_chain(
+    state: &AppState,
+    start: Option<ResourceId>,
+) -> Result<Vec<Resource>, CommandError> {
     let mut chain = Vec::new();
-    let mut next = resource.parent_id;
+    let mut next = start;
     while let Some(parent_id) = next {
         if chain.len() >= ibex_core::INHERITANCE_MAX_DEPTH {
             return Err(map_inheritance_err(InheritanceError::DepthExceeded));
@@ -507,9 +608,6 @@ fn changed_fields(old: &Resource, new: &NewResource) -> Vec<&'static str> {
     }
     if old.organization != new.organization {
         changed.push("organization");
-    }
-    if old.school != new.school {
-        changed.push("school");
     }
     if old.abstract_text != new.abstract_text {
         changed.push("abstract_text");
@@ -788,7 +886,6 @@ impl Handler for GetResourceDetail {
             publication_method: resource.publication_method,
             institution: resource.institution,
             organization: resource.organization,
-            school: resource.school,
             abstract_text: resource.abstract_text,
             keywords: resource.keywords,
             id: resource.id,

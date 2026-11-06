@@ -37,7 +37,7 @@ pub use import::{
 pub use inheritance::{
     Effective, EffectiveValues, INHERITANCE_MAX_DEPTH, InheritableField, InheritanceError,
     ValueOrigin, fields_inherited_from, gather_ancestors, is_never_inherited, never_inherited,
-    resolve_effective,
+    resolve_effective, resolve_inherited,
 };
 pub use pages::{PageBound, PageSpan, Pages, deserialize_pages_opt};
 pub use person::{Name, NameError, NameKey, NonEmptyStr, Person, PersonError, PersonId};
@@ -46,9 +46,10 @@ pub use resource::{
     DetailCreators, NewResource, ParentRule, PublishedRange, Resource, ResourceCounts,
     ResourceDetail, ResourceError, ResourceFilter, ResourceGridPage, ResourceGridParent,
     ResourceGridRow, ResourceId, ResourceKind, ResourceMetadata, ResourcePage, ResourceProvenance,
-    ResourceQuery, ResourceSort, ResourceSummary, SortDirection, SortedResourcePage, UtcMillis,
-    creator_label_name, detail_creator_groups, format_creators_label, format_published_label,
-    format_recorded_date, primary_creator_sort_key, published_label_from, utc_year_from_millis,
+    ResourceQuery, ResourceSort, ResourceSummary, ResourceTextField, SortDirection,
+    SortedResourcePage, UtcMillis, creator_label_name, detail_creator_groups,
+    format_creators_label, format_published_label, format_recorded_date, primary_creator_sort_key,
+    published_label_from, utc_year_from_millis,
 };
 pub use series::{NewSeries, Series, SeriesId};
 pub use store::{

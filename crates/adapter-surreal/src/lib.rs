@@ -67,6 +67,13 @@ struct SeriesDoc {
     title: NonEmptyStr,
 }
 
+#[derive(Debug, SurrealValue)]
+struct SeriesRow {
+    id: RecordId,
+    #[surreal(wrap)]
+    title: NonEmptyStr,
+}
+
 #[derive(Debug, Clone, SurrealValue)]
 struct TagDoc {
     #[surreal(wrap)]
@@ -179,8 +186,6 @@ struct ResourceDoc {
     institution: Option<String>,
     #[surreal(default)]
     organization: Option<String>,
-    #[surreal(default)]
-    school: Option<String>,
     #[surreal(default)]
     abstract_text: Option<String>,
     #[surreal(default)]
@@ -1204,7 +1209,6 @@ impl SurrealStore {
         resource.publication_method = doc.publication_method;
         resource.institution = doc.institution;
         resource.organization = doc.organization;
-        resource.school = doc.school;
         resource.abstract_text = doc.abstract_text;
         resource.keywords = doc.keywords;
         resource.attachment_ids = doc
@@ -1244,7 +1248,6 @@ impl SurrealStore {
             publication_method: resource.publication_method.clone(),
             institution: resource.institution.clone(),
             organization: resource.organization.clone(),
-            school: resource.school.clone(),
             abstract_text: resource.abstract_text.clone(),
             keywords: resource.keywords.clone(),
             kind: resource.kind,
@@ -1656,7 +1659,6 @@ impl SurrealStore {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -1744,6 +1746,39 @@ fn open_error(path: &Path, err: surrealdb::Error) -> StoreError {
 
 #[async_trait::async_trait]
 impl Store for SurrealStore {
+    async fn suggest_field_values(
+        &self,
+        field: ibex_core::ResourceTextField,
+        query: String,
+        limit: u32,
+    ) -> Result<Vec<String>, StoreError> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        // Only the typed allowlist is interpolated; user text is always bound.
+        // Group and limit scalar projections in the database, not resource rows.
+        let column = field.as_str();
+        let sql = format!(
+            "SELECT VALUE value FROM (
+                SELECT key, array::first(array::sort(array::group(value))) AS value
+                FROM (
+                    SELECT {column} AS value, string::lowercase({column}) AS key
+                    FROM resource
+                    WHERE {column} != NONE AND string::trim({column}) != ''
+                        AND string::contains(string::lowercase({column}), $query)
+                )
+                GROUP BY key ORDER BY key LIMIT $limit
+            )"
+        );
+        let mut response = self
+            .db
+            .query(sql)
+            .bind(("query", query.to_lowercase()))
+            .bind(("limit", limit))
+            .await
+            .map_err(map_err)?;
+        response.take(0).map_err(map_err)
+    }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         self.db.query("RETURN true").await.map_err(map_err)?;
         Ok(StoreHealth {
@@ -1894,6 +1929,22 @@ impl Store for SurrealStore {
         Ok(series)
     }
 
+    async fn list_series(&self) -> Result<Vec<Series>, StoreError> {
+        let mut response = self
+            .db
+            .query("SELECT id, title FROM series ORDER BY title ASC, id ASC")
+            .await
+            .map_err(map_err)?;
+        let rows: Vec<SeriesRow> = response.take(0).map_err(map_err)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(Series {
+                    id: Self::thing_to_series_id(&row.id)?,
+                    title: row.title,
+                })
+            })
+            .collect()
+    }
     async fn get_series(&self, id: SeriesId) -> Result<Series, StoreError> {
         let row: Option<SeriesDoc> = self
             .db
@@ -2893,7 +2944,6 @@ mod tests {
             publication_method: None,
             institution: None,
             organization: None,
-            school: None,
             abstract_text: None,
             keywords: vec![],
             metadata: metadata.clone(),
@@ -3180,7 +3230,6 @@ mod tests {
                     publication_method: None,
                     institution: None,
                     organization: None,
-                    school: None,
                     abstract_text: None,
                     keywords: vec![],
                 })
@@ -3305,7 +3354,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -3375,7 +3423,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -3422,7 +3469,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -3497,7 +3543,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -3613,7 +3658,6 @@ mod tests {
                     publication_method: None,
                     institution: None,
                     organization: None,
-                    school: None,
                     abstract_text: None,
                     keywords: vec![],
                 })
@@ -3683,7 +3727,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -3800,7 +3843,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -3846,7 +3888,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -4262,7 +4303,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5249,7 +5289,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5343,7 +5382,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5449,7 +5487,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5615,7 +5652,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5776,7 +5812,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5853,7 +5888,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5914,7 +5948,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -5968,7 +6001,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -6063,7 +6095,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -6106,7 +6137,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })
@@ -6185,7 +6215,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })

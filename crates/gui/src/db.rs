@@ -10,7 +10,9 @@ use ibex_app::command::{
     ListCollectionForest, ListPersons, ListResourcesQueryPage, ListTags, RemoveCollectionParent,
     RenameCollection, SetCollectionClassification, SetResourceFavorite, UpdateResource,
 };
+use ibex_app::command::{CreateSeries, ListSeries};
 use ibex_app::command::{ImportBiblatex, ImportReport, PreviewBiblatex};
+use ibex_app::command::{InheritancePreview, PreviewInheritance};
 use ibex_app::{AppState, Command, Outcome};
 #[cfg(test)]
 use ibex_core::ResourcePage;
@@ -19,6 +21,7 @@ use ibex_core::{
     NewResource, NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId,
     ResourceQuery, SortedResourcePage, Tag,
 };
+use ibex_core::{NewSeries, Series};
 use ibex_core::{ResourceGridPage, ResourceGridParent};
 use std::{io::Read as _, path::PathBuf};
 use tokio::sync::oneshot;
@@ -31,6 +34,17 @@ pub struct BiblatexImportPlan {
 }
 
 pub enum DbRequest {
+    SuggestFieldValues {
+        field: ibex_core::ResourceTextField,
+        query: String,
+        limit: u32,
+        reply: oneshot::Sender<Result<Vec<String>, String>>,
+    },
+    PreviewInheritance {
+        kind: ibex_core::ResourceKind,
+        parent_id: Option<ResourceId>,
+        reply: oneshot::Sender<Result<InheritancePreview, String>>,
+    },
     PreviewBiblatex {
         path: PathBuf,
         reply: oneshot::Sender<Result<BiblatexImportPlan, String>>,
@@ -101,6 +115,13 @@ pub enum DbRequest {
         name: Name,
         reply: oneshot::Sender<Result<Person, String>>,
     },
+    ListSeries {
+        reply: oneshot::Sender<Result<Vec<Series>, String>>,
+    },
+    CreateSeries {
+        title: String,
+        reply: oneshot::Sender<Result<Series, String>>,
+    },
     ListTags {
         reply: oneshot::Sender<Result<Vec<Tag>, String>>,
     },
@@ -161,6 +182,41 @@ pub struct DbWorker {
 }
 
 impl DbWorker {
+    pub async fn suggest_field_values(
+        &self,
+        field: ibex_core::ResourceTextField,
+        query: String,
+        limit: u32,
+    ) -> Result<Vec<String>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::SuggestFieldValues {
+                field,
+                query,
+                limit,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+    /// What an empty `kind` record under `parent_id` would inherit.
+    pub async fn preview_inheritance(
+        &self,
+        kind: ibex_core::ResourceKind,
+        parent_id: Option<ResourceId>,
+    ) -> Result<InheritancePreview, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::PreviewInheritance {
+                kind,
+                parent_id,
+                reply: tx,
+            })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
     /// Read a bibliography and build a shared preview (no writes).
     pub async fn preview_biblatex(&self, path: PathBuf) -> Result<BiblatexImportPlan, String> {
         let (tx, rx) = oneshot::channel();
@@ -319,6 +375,51 @@ impl DbWorker {
                                     });
                                 let _ = reply.send(result);
                             }
+                            DbRequest::SuggestFieldValues {
+                                field,
+                                query,
+                                limit,
+                                reply,
+                            } => {
+                                let result = state
+                                    .execute(Command::SuggestFieldValues(
+                                        ibex_app::command::SuggestFieldValues {
+                                            field,
+                                            query,
+                                            limit,
+                                        },
+                                    ))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::SuggestFieldValues(values) => Ok(values),
+                                        _ => {
+                                            Err("unexpected outcome from suggest_field_values"
+                                                .into())
+                                        }
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::PreviewInheritance {
+                                kind,
+                                parent_id,
+                                reply,
+                            } => {
+                                let result =
+                                    state
+                                        .execute(Command::PreviewInheritance(PreviewInheritance {
+                                            kind,
+                                            parent_id,
+                                        }))
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                        .and_then(|outcome| match outcome {
+                                            Outcome::PreviewInheritance(preview) => Ok(preview),
+                                            _ => Err("unexpected outcome from preview_inheritance"
+                                                .into()),
+                                        });
+                                let _ = reply.send(result);
+                            }
                             DbRequest::CountResources { reply } => {
                                 let result = state
                                     .execute(Command::CountResources(CountResources))
@@ -444,6 +545,37 @@ impl DbWorker {
                                         Outcome::CreatePerson(person) => Ok(person),
                                         _ => Err("unexpected outcome from create_person".into()),
                                     });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::ListSeries { reply } => {
+                                let result = state
+                                    .execute(Command::ListSeries(ListSeries))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::ListSeries(series) => Ok(series),
+                                        _ => Err("unexpected outcome from list_series".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::CreateSeries { title, reply } => {
+                                let result = async {
+                                    let title =
+                                        NonEmptyStr::try_new(title).map_err(|e| e.to_string())?;
+                                    state
+                                        .execute(Command::CreateSeries(CreateSeries {
+                                            new: NewSeries { title },
+                                        }))
+                                        .await
+                                        .map_err(|e| e.to_string())
+                                        .and_then(|outcome| match outcome {
+                                            Outcome::CreateSeries(series) => Ok(series),
+                                            _ => {
+                                                Err("unexpected outcome from create_series".into())
+                                            }
+                                        })
+                                }
+                                .await;
                                 let _ = reply.send(result);
                             }
                             DbRequest::ListTags { reply } => {
@@ -754,6 +886,23 @@ impl DbWorker {
             .map_err(|_| "db worker dropped the request".to_string())?
     }
 
+    pub async fn list_series(&self) -> Result<Vec<Series>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::ListSeries { reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
+
+    pub async fn create_series(&self, title: String) -> Result<Series, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::CreateSeries { title, reply: tx })
+            .map_err(|_| "db worker stopped".to_string())?;
+        rx.await
+            .map_err(|_| "db worker dropped the request".to_string())?
+    }
     pub async fn list_tags(&self) -> Result<Vec<Tag>, String> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -1048,6 +1197,74 @@ fn read_bibliography_file(path: &PathBuf) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn worker_suggests_stored_metadata_values() {
+        use ibex_core::{ResourceKind, ResourceTextField::*, Store};
+        let store = ibex_adapter_surreal::SurrealStore::open_memory()
+            .await
+            .unwrap();
+        for value in ["zeta Custom", "Alpha Custom", "alpha custom", "", "  "] {
+            let mut new =
+                crate::metadata::empty_resource("Not metadata", ResourceKind::Book).unwrap();
+            new.publisher = Some(value.into());
+            new.institution = Some(value.into());
+            new.organization = Some(value.into());
+            new.document_type = Some(value.into());
+            new.publication_method = Some(value.into());
+            new.language = Some(value.into());
+            store.create_resource(new).await.unwrap();
+        }
+        let worker = DbWorker::spawn(
+            AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
+                .build(),
+        );
+        for field in [
+            Publisher,
+            Institution,
+            Organization,
+            DocumentType,
+            PublicationMethod,
+            Language,
+        ] {
+            assert_eq!(
+                worker
+                    .suggest_field_values(field, "UsTo".into(), 10)
+                    .await
+                    .unwrap(),
+                ["Alpha Custom", "zeta Custom"]
+            );
+            assert_eq!(
+                worker
+                    .suggest_field_values(field, "".into(), 1)
+                    .await
+                    .unwrap(),
+                ["Alpha Custom"]
+            );
+            assert_eq!(
+                worker
+                    .suggest_field_values(field, "".into(), 10)
+                    .await
+                    .unwrap(),
+                ["Alpha Custom", "zeta Custom"]
+            );
+            assert!(
+                worker
+                    .suggest_field_values(field, "".into(), 0)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert!(
+            worker
+                .suggest_field_values(Publisher, "Not metadata".into(), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
     use super::*;
     use ibex_app::Surface;
     use ibex_app::command::ListResources;
@@ -1056,6 +1273,22 @@ mod tests {
     use ibex_core::CreatorRole;
     use ibex_core::published_label_from;
 
+    #[tokio::test]
+    async fn worker_lists_and_creates_series_with_surreal_store() {
+        let store = ibex_adapter_surreal::SurrealStore::open_memory()
+            .await
+            .unwrap();
+        let state = AppState::builder(store).surface(Surface::Test).build();
+        let worker = DbWorker::spawn(state);
+        assert!(worker.list_series().await.unwrap().is_empty());
+        assert!(worker.create_series("   ".into()).await.is_err());
+        let created = worker.create_series("Classics".into()).await.unwrap();
+        assert_eq!(created.title.as_str(), "Classics");
+        let listed = worker.list_series().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, created.id);
+        assert_eq!(listed[0].title.as_str(), "Classics");
+    }
     // Use the real adapter: MemoryStore does not exercise SurrealDB's stack usage.
     #[tokio::test]
     async fn worker_toggles_favorite_with_surreal_store() {
@@ -1331,7 +1564,6 @@ mod tests {
             publication_method: None,
             institution: None,
             organization: None,
-            school: None,
             abstract_text: None,
             keywords: vec![],
         };
@@ -1821,7 +2053,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             })

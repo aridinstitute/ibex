@@ -101,7 +101,6 @@ struct ResourceRow {
     publication_method: Option<String>,
     institution: Option<String>,
     organization: Option<String>,
-    school: Option<String>,
     abstract_text: Option<String>,
     keywords: Vec<String>,
     kind: ResourceKind,
@@ -166,7 +165,6 @@ impl ResourceRow {
         resource.publication_method = self.publication_method.clone();
         resource.institution = self.institution.clone();
         resource.organization = self.organization.clone();
-        resource.school = self.school.clone();
         resource.abstract_text = self.abstract_text.clone();
         resource.keywords = self.keywords.clone();
         resource.attachment_ids = self.attachment_ids.clone();
@@ -624,6 +622,44 @@ impl Default for MemoryStore {
 
 #[async_trait::async_trait]
 impl Store for MemoryStore {
+    async fn suggest_field_values(
+        &self,
+        field: ibex_core::ResourceTextField,
+        query: String,
+        limit: u32,
+    ) -> Result<Vec<String>, StoreError> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        let query = query.to_lowercase();
+        let resources = self.resources.lock().expect("MemoryStore lock");
+        let mut values = std::collections::BTreeMap::<String, String>::new();
+        for row in resources.values() {
+            use ibex_core::ResourceTextField::*;
+            let value = match field {
+                Publisher => &row.publisher,
+                Institution => &row.institution,
+                Organization => &row.organization,
+                DocumentType => &row.document_type,
+                PublicationMethod => &row.publication_method,
+                Language => &row.language,
+            };
+            if let Some(value) = value {
+                let key = value.to_lowercase();
+                if !value.trim().is_empty() && key.contains(&query) {
+                    values
+                        .entry(key)
+                        .and_modify(|first| {
+                            if value < first {
+                                *first = value.clone();
+                            }
+                        })
+                        .or_insert_with(|| value.clone());
+                }
+            }
+        }
+        Ok(values.into_values().take(limit as usize).collect())
+    }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         Ok(StoreHealth {
             backend: "memory",
@@ -697,6 +733,22 @@ impl Store for MemoryStore {
         Ok(state.by_id.values().cloned().collect())
     }
 
+    async fn list_series(&self) -> Result<Vec<Series>, StoreError> {
+        let mut series: Vec<_> = self
+            .series
+            .lock()
+            .expect("MemoryStore lock")
+            .values()
+            .cloned()
+            .collect();
+        series.sort_by(|a, b| {
+            a.title
+                .as_str()
+                .cmp(b.title.as_str())
+                .then_with(|| a.id.as_ulid().cmp(&b.id.as_ulid()))
+        });
+        Ok(series)
+    }
     async fn create_series(&self, new: NewSeries) -> Result<Series, StoreError> {
         let series = Series::try_new(SeriesId::generate(), new);
         self.series
@@ -982,7 +1034,6 @@ impl Store for MemoryStore {
             publication_method: resource.publication_method.clone(),
             institution: resource.institution.clone(),
             organization: resource.organization.clone(),
-            school: resource.school.clone(),
             abstract_text: resource.abstract_text.clone(),
             keywords: resource.keywords.clone(),
             favorite: resource.favorite,
@@ -1129,7 +1180,6 @@ impl Store for MemoryStore {
                         publication_method: dep.publication_method.clone(),
                         institution: dep.institution.clone(),
                         organization: dep.organization.clone(),
-                        school: dep.school.clone(),
                         abstract_text: dep.abstract_text.clone(),
                         keywords: dep.keywords.clone(),
                         favorite: dep.favorite,
@@ -1196,7 +1246,6 @@ impl Store for MemoryStore {
                 publication_method: resource.publication_method.clone(),
                 institution: resource.institution.clone(),
                 organization: resource.organization.clone(),
-                school: resource.school.clone(),
                 abstract_text: resource.abstract_text.clone(),
                 keywords: resource.keywords.clone(),
                 favorite: resource.favorite,
@@ -1314,7 +1363,6 @@ impl Store for MemoryStore {
                 publication_method: r.publication_method.clone(),
                 institution: r.institution.clone(),
                 organization: r.organization.clone(),
-                school: r.school.clone(),
                 abstract_text: r.abstract_text.clone(),
                 keywords: r.keywords.clone(),
                 favorite: r.favorite,
@@ -1380,7 +1428,6 @@ impl Store for MemoryStore {
         resource.publication_method = row.publication_method;
         resource.institution = row.institution;
         resource.organization = row.organization;
-        resource.school = row.school;
         resource.abstract_text = row.abstract_text;
         resource.keywords = row.keywords;
         resource.attachment_ids = row.attachment_ids;
@@ -1578,6 +1625,14 @@ fn unsupported(op: &str) -> StoreError {
 
 #[async_trait::async_trait]
 impl Store for StubStore {
+    async fn suggest_field_values(
+        &self,
+        _field: ibex_core::ResourceTextField,
+        _query: String,
+        _limit: u32,
+    ) -> Result<Vec<String>, StoreError> {
+        Err(unsupported("suggest_field_values"))
+    }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         match &self.health {
             Ok(h) => Ok(h.clone()),
@@ -1618,6 +1673,9 @@ impl Store for StubStore {
         Err(unsupported("create_series"))
     }
 
+    async fn list_series(&self) -> Result<Vec<Series>, StoreError> {
+        Err(unsupported("list_series"))
+    }
     async fn get_series(&self, _id: SeriesId) -> Result<Series, StoreError> {
         Err(unsupported("get_series"))
     }

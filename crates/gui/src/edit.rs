@@ -1,4 +1,4 @@
-//! Edit form for one resource's scalar fields: the panel's write-side twin.
+//! Bibliographic edit drafts: the panel's window-free write-side twin.
 //!
 //! Value logic here stays window-free (draft in, payload out), so the merge
 //! rules run under plain unit tests; `LibraryApp` owns the input entities
@@ -8,57 +8,294 @@ use gpui_kit::SharedString;
 use gpui_kit::component::searchable_list::SearchableListItem;
 
 use ibex_core::{
-    BibliographicDate, CollectionId, CreatorRole, CreatorSpec, NewResource, NonEmptyStr, PersonId,
-    Resource, ResourceId, ResourceKind, SeriesId, TagId, UtcMillis, utc_year_from_millis,
+    BibliographicDate, CollectionId, CreatorRole, CreatorSpec, DateCertainty, DatePrecision,
+    NewResource, NonEmptyStr, PersonId, Resource, ResourceId, ResourceKind, SeriesId, TagId,
+    UtcMillis,
 };
 
+use crate::edit_layout::FormField;
 use crate::kind::kind_label;
+
+use std::collections::BTreeMap;
+
+/// Registry for generic bibliographic text inputs. Lists use one entry per line,
+/// never commas. Dates accept a year, YYYY-MM, YYYY-MM-DD, RFC3339 instant or
+/// month-name form (`March 1991`, `4 March 1991`, `March 4, 1991`),
+/// optionally a range (`/`, `–`, `—`, ` to `, or `-` between bare years),
+/// a trailing `?` (uncertain), or a trailing `~` or leading `c.`, `ca.`,
+/// `circa` or `about` (approximate). Display fields
+/// independently override a date's label; they require a corresponding date.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BibliographicField {
+    Subtitle,
+    TitleAddon,
+    ShortTitle,
+    Publisher,
+    Place,
+    Volume,
+    Issue,
+    Pages,
+    TotalPages,
+    ArticleNumber,
+    Edition,
+    SeriesNumber,
+    Doi,
+    Url,
+    Eprint,
+    Isbns,
+    Issns,
+    Isrns,
+    OriginalDate,
+    EventDate,
+    Language,
+    DocumentType,
+    PublicationMethod,
+    Institution,
+    Organization,
+    AbstractText,
+    Keywords,
+    Citekey,
+    Venue,
+    Published,
+    Accessed,
+    PublishedDisplay,
+    AccessedDisplay,
+    OriginalDateDisplay,
+    EventDateDisplay,
+}
+
+impl BibliographicField {
+    pub const ALL: &[Self] = &[
+        Self::Subtitle,
+        Self::TitleAddon,
+        Self::ShortTitle,
+        Self::Publisher,
+        Self::Place,
+        Self::Volume,
+        Self::Issue,
+        Self::Pages,
+        Self::TotalPages,
+        Self::ArticleNumber,
+        Self::Edition,
+        Self::SeriesNumber,
+        Self::Doi,
+        Self::Url,
+        Self::Eprint,
+        Self::Isbns,
+        Self::Issns,
+        Self::Isrns,
+        Self::OriginalDate,
+        Self::EventDate,
+        Self::Language,
+        Self::DocumentType,
+        Self::PublicationMethod,
+        Self::Institution,
+        Self::Organization,
+        Self::AbstractText,
+        Self::Keywords,
+        Self::Citekey,
+        Self::Venue,
+        Self::Published,
+        Self::Accessed,
+        Self::PublishedDisplay,
+        Self::AccessedDisplay,
+        Self::OriginalDateDisplay,
+        Self::EventDateDisplay,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Subtitle => "Subtitle",
+            Self::TitleAddon => "Title addon",
+            Self::ShortTitle => "Short title",
+            Self::Publisher => "Publisher",
+            Self::Place => "Place",
+            Self::Volume => "Volume",
+            Self::Issue => "Issue",
+            Self::Pages => "Pages",
+            Self::TotalPages => "Total pages",
+            Self::ArticleNumber => "Article number",
+            Self::Edition => "Edition",
+            Self::SeriesNumber => "Series number",
+            Self::Doi => "DOI",
+            Self::Url => "URL",
+            Self::Eprint => "Eprint",
+            Self::Isbns => "ISBNs",
+            Self::Issns => "ISSNs",
+            Self::Isrns => "ISRNs",
+            Self::OriginalDate => "Original date",
+            Self::EventDate => "Event date",
+            Self::Language => "Language",
+            Self::DocumentType => "Document type",
+            Self::PublicationMethod => "Publication method",
+            Self::Institution => "Institution",
+            Self::Organization => "Organization",
+            Self::AbstractText => "Abstract",
+            Self::Keywords => "Keywords",
+            Self::Citekey => "Citekey",
+            Self::Venue => "Venue",
+            Self::Published => "Published date",
+            Self::Accessed => "Accessed date",
+            Self::PublishedDisplay => "Published display",
+            Self::AccessedDisplay => "Accessed display",
+            Self::OriginalDateDisplay => "Original date display",
+            Self::EventDateDisplay => "Event date display",
+        }
+    }
+
+    pub fn multiline(self) -> bool {
+        matches!(
+            self,
+            Self::AbstractText | Self::Keywords | Self::Isbns | Self::Issns | Self::Isrns
+        )
+    }
+}
+
+/// A rejected draft, attached to the form row that caused it. Errors without
+/// a field (worker and save failures) belong to the whole form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldError {
+    pub field: Option<FormField>,
+    pub message: String,
+}
+
+impl FieldError {
+    pub fn form(message: impl Into<String>) -> Self {
+        Self {
+            field: None,
+            message: message.into(),
+        }
+    }
+
+    pub fn at(target: FormField, message: impl Into<String>) -> Self {
+        Self {
+            field: Some(target),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for FieldError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
 
 /// One value per scalar the form edits. The panel reads its input entities
 /// into this plain shape at save time, so the payload build below stays
-/// window-free and unit-testable. Parent and series are ids, not free
-/// text: the parent arrives from a dropdown keyed by id, the series rides
-/// through until series storage lands a listing API. Creators are person
-/// specs; the inline multi-select picks people and defaults new picks to
-/// Author.
+/// window-free and unit-testable. Parent and series arrive as selected ids.
+/// Dates live in `fields` as ISO text. Creator specs preserve roles, credits,
+/// and order.
 pub struct EditDraft {
     pub title: String,
     pub kind: ResourceKind,
     pub parent: Option<ResourceId>,
-    pub publisher: String,
-    pub published_year: String,
-    pub accessed_year: String,
     pub series: String,
-    pub series_number: String,
     pub creators: Vec<CreatorSpec>,
     /// Tags attached on save, in the order shown on the form.
     pub tag_ids: Vec<TagId>,
     /// Collections attached on save, in the order shown on the form.
     pub collection_ids: Vec<CollectionId>,
+    /// Absent keys preserve stored values; present empty strings clear them.
+    pub fields: BTreeMap<BibliographicField, String>,
 }
 
 /// The value each input opens with: the stored record's own values,
 /// optional fields empty (or none) when the record carries nothing.
 pub fn prefill_draft(record: &Resource) -> EditDraft {
+    let values = record.to_new();
     EditDraft {
         title: record.title.as_str().to_owned(),
         kind: record.kind,
         parent: record.parent_id,
-        publisher: record.publisher.clone().unwrap_or_default(),
-        published_year: date_year(record.published.as_ref()),
-        accessed_year: date_year(record.accessed.as_ref()),
         series: record
             .series_id
             .map(|id| id.to_string())
             .unwrap_or_default(),
-        series_number: record
-            .series_number
-            .as_ref()
-            .map(|number| number.as_str().to_owned())
-            .unwrap_or_default(),
-        creators: record.to_new().creators,
+        creators: values.creators.clone(),
         tag_ids: record.tag_ids.clone(),
         collection_ids: record.collection_ids.clone(),
+        fields: BibliographicField::ALL
+            .iter()
+            .map(|field| (*field, field_text(&values, *field)))
+            .collect(),
+    }
+}
+
+fn field_text(record: &NewResource, field: BibliographicField) -> String {
+    match field {
+        BibliographicField::Subtitle => record
+            .subtitle
+            .as_ref()
+            .map(|value| value.as_str().to_owned())
+            .unwrap_or_default(),
+        BibliographicField::TitleAddon => record
+            .title_addon
+            .as_ref()
+            .map(|value| value.as_str().to_owned())
+            .unwrap_or_default(),
+        BibliographicField::ShortTitle => record
+            .short_title
+            .as_ref()
+            .map(|value| value.as_str().to_owned())
+            .unwrap_or_default(),
+        BibliographicField::Publisher => record.publisher.clone().unwrap_or_default(),
+        BibliographicField::Place => record.place.clone().unwrap_or_default(),
+        BibliographicField::Volume => record.volume.clone().unwrap_or_default(),
+        BibliographicField::Issue => record.issue.clone().unwrap_or_default(),
+        BibliographicField::Pages => record
+            .pages
+            .as_ref()
+            .map(|value| value.as_str().to_owned())
+            .unwrap_or_default(),
+        BibliographicField::TotalPages => record.total_pages.clone().unwrap_or_default(),
+        BibliographicField::ArticleNumber => record.article_number.clone().unwrap_or_default(),
+        BibliographicField::Edition => record.edition.clone().unwrap_or_default(),
+        BibliographicField::SeriesNumber => record
+            .series_number
+            .as_ref()
+            .map(|value| value.as_str().to_owned())
+            .unwrap_or_default(),
+        BibliographicField::Doi => record.doi.clone().unwrap_or_default(),
+        BibliographicField::Url => record.url.clone().unwrap_or_default(),
+        BibliographicField::Eprint => record.eprint.clone().unwrap_or_default(),
+        BibliographicField::Language => record.language.clone().unwrap_or_default(),
+        BibliographicField::DocumentType => record.document_type.clone().unwrap_or_default(),
+        BibliographicField::PublicationMethod => {
+            record.publication_method.clone().unwrap_or_default()
+        }
+        BibliographicField::Institution => record.institution.clone().unwrap_or_default(),
+        BibliographicField::Organization => record.organization.clone().unwrap_or_default(),
+        BibliographicField::AbstractText => record.abstract_text.clone().unwrap_or_default(),
+        BibliographicField::Citekey => record.metadata.citekey.clone().unwrap_or_default(),
+        BibliographicField::Venue => record.metadata.venue.clone().unwrap_or_default(),
+        BibliographicField::Isbns => record
+            .isbns
+            .iter()
+            .map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        BibliographicField::Issns => record
+            .issns
+            .iter()
+            .map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        BibliographicField::Isrns => record
+            .isrns
+            .iter()
+            .map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        BibliographicField::Keywords => record.keywords.join("\n"),
+        BibliographicField::Published => date_text(record.published.as_ref()),
+        BibliographicField::Accessed => date_text(record.accessed.as_ref()),
+        BibliographicField::OriginalDate => date_text(record.original_date.as_ref()),
+        BibliographicField::EventDate => date_text(record.event_date.as_ref()),
+        BibliographicField::PublishedDisplay => display_text(record.published.as_ref()),
+        BibliographicField::AccessedDisplay => display_text(record.accessed.as_ref()),
+        BibliographicField::OriginalDateDisplay => display_text(record.original_date.as_ref()),
+        BibliographicField::EventDateDisplay => display_text(record.event_date.as_ref()),
     }
 }
 
@@ -69,23 +306,20 @@ pub fn empty_create_draft() -> EditDraft {
         title: String::new(),
         kind: ResourceKind::Book,
         parent: None,
-        publisher: String::new(),
-        published_year: String::new(),
-        accessed_year: String::new(),
         series: String::new(),
-        series_number: String::new(),
         creators: Vec::new(),
         tag_ids: Vec::new(),
         collection_ids: Vec::new(),
+        fields: BTreeMap::new(),
     }
 }
 
 /// Draft to full-replace payload, over the record's write-side twin: an
 /// emptied optional field clears exactly that field, the rest ride through
-/// as stored. The `String` errors are the form's to show. Parent arrives
+/// as stored. Errors name the row the form shows them on. Parent arrives
 /// already keyed by id from the dropdown, so it passes through unvalidated:
 /// the dropdown's options carry only stored ids.
-pub fn build_update(record: &Resource, draft: &EditDraft) -> Result<NewResource, String> {
+pub fn build_update(record: &Resource, draft: &EditDraft) -> Result<NewResource, FieldError> {
     let mut edit = record.to_new();
     apply_draft_fields(&mut edit, draft)?;
     Ok(edit)
@@ -94,7 +328,7 @@ pub fn build_update(record: &Resource, draft: &EditDraft) -> Result<NewResource,
 /// Draft to a create payload: same scalar rules as update, no stored
 /// record to ride through. Parent/series/accessed stay whatever the draft
 /// carries (inline create leaves them empty).
-pub fn build_create(draft: &EditDraft) -> Result<NewResource, String> {
+pub fn build_create(draft: &EditDraft) -> Result<NewResource, FieldError> {
     let mut new = NewResource {
         kind: draft.kind,
         title: NonEmptyStr::try_new("placeholder").expect("literal"),
@@ -131,7 +365,6 @@ pub fn build_create(draft: &EditDraft) -> Result<NewResource, String> {
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     };
@@ -140,9 +373,10 @@ pub fn build_create(draft: &EditDraft) -> Result<NewResource, String> {
 }
 
 /// Shared field merge for update and create payloads.
-fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), String> {
+fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), FieldError> {
     let title = draft.title.trim();
-    edit.title = NonEmptyStr::try_new(title).map_err(|_| "Title must not be empty".to_owned())?;
+    edit.title = NonEmptyStr::try_new(title)
+        .map_err(|_| FieldError::at(FormField::Title, "Title must not be empty"))?;
 
     edit.kind = draft.kind;
     edit.parent_id = draft.parent;
@@ -150,24 +384,337 @@ fn apply_draft_fields(edit: &mut NewResource, draft: &EditDraft) -> Result<(), S
     edit.tag_ids = draft.tag_ids.clone();
     edit.collection_ids = draft.collection_ids.clone();
 
-    let publisher = draft.publisher.trim();
-    edit.publisher = (!publisher.is_empty()).then(|| publisher.to_owned());
-
-    edit.published = year_field("Published year", &draft.published_year)?;
-    edit.accessed = year_field("Accessed year", &draft.accessed_year)?;
+    use BibliographicField as F;
+    merge_date(
+        &mut edit.published,
+        draft,
+        F::Published,
+        F::PublishedDisplay,
+    )?;
+    merge_date(&mut edit.accessed, draft, F::Accessed, F::AccessedDisplay)?;
+    merge_date(
+        &mut edit.original_date,
+        draft,
+        F::OriginalDate,
+        F::OriginalDateDisplay,
+    )?;
+    merge_date(
+        &mut edit.event_date,
+        draft,
+        F::EventDate,
+        F::EventDateDisplay,
+    )?;
 
     let series = draft.series.trim();
     edit.series_id = (!series.is_empty())
-        .then(|| SeriesId::parse(series).map_err(|_| "Series must be a series id".to_owned()))
-        .transpose()?;
-
-    let number = draft.series_number.trim();
-    edit.series_number = (!number.is_empty())
         .then(|| {
-            NonEmptyStr::try_new(number).map_err(|_| "Series number must not be empty".to_owned())
+            SeriesId::parse(series)
+                .map_err(|_| FieldError::at(FormField::Series, "Series must be a series id"))
         })
         .transpose()?;
 
+    for (field, text) in &draft.fields {
+        if *text == field_text(edit, *field) {
+            continue;
+        }
+        let text = text.trim();
+        let value = (!text.is_empty()).then_some(text);
+        let invalid = |e: ibex_core::NameError| {
+            FieldError::at(
+                FormField::for_bib(*field),
+                format!("{}: {e}", field.label()),
+            )
+        };
+        match field {
+            BibliographicField::Subtitle => {
+                edit.subtitle = value
+                    .map(NonEmptyStr::try_new)
+                    .transpose()
+                    .map_err(invalid)?
+            }
+            BibliographicField::TitleAddon => {
+                edit.title_addon = value
+                    .map(NonEmptyStr::try_new)
+                    .transpose()
+                    .map_err(invalid)?
+            }
+            BibliographicField::ShortTitle => {
+                edit.short_title = value
+                    .map(NonEmptyStr::try_new)
+                    .transpose()
+                    .map_err(invalid)?
+            }
+            BibliographicField::Publisher => edit.publisher = value.map(str::to_owned),
+            BibliographicField::Place => edit.place = value.map(str::to_owned),
+            BibliographicField::Volume => edit.volume = value.map(str::to_owned),
+            BibliographicField::Issue => edit.issue = value.map(str::to_owned),
+            BibliographicField::Pages => {
+                edit.pages = value
+                    .map(ibex_core::Pages::parse)
+                    .transpose()
+                    .map_err(invalid)?
+            }
+            BibliographicField::TotalPages => edit.total_pages = value.map(str::to_owned),
+            BibliographicField::ArticleNumber => edit.article_number = value.map(str::to_owned),
+            BibliographicField::Edition => edit.edition = value.map(str::to_owned),
+            BibliographicField::SeriesNumber => {
+                edit.series_number = value
+                    .map(NonEmptyStr::try_new)
+                    .transpose()
+                    .map_err(invalid)?
+            }
+            BibliographicField::Doi => edit.doi = value.map(str::to_owned),
+            BibliographicField::Url => edit.url = value.map(str::to_owned),
+            BibliographicField::Eprint => edit.eprint = value.map(str::to_owned),
+            BibliographicField::Language => edit.language = value.map(str::to_owned),
+            BibliographicField::DocumentType => edit.document_type = value.map(str::to_owned),
+            BibliographicField::PublicationMethod => {
+                edit.publication_method = value.map(str::to_owned)
+            }
+            BibliographicField::Institution => edit.institution = value.map(str::to_owned),
+            BibliographicField::Organization => edit.organization = value.map(str::to_owned),
+            BibliographicField::AbstractText => edit.abstract_text = value.map(str::to_owned),
+            BibliographicField::Citekey => edit.metadata.citekey = value.map(str::to_owned),
+            BibliographicField::Venue => edit.metadata.venue = value.map(str::to_owned),
+            BibliographicField::Isbns => edit.isbns = identifier_field(*field, text)?,
+            BibliographicField::Issns => edit.issns = identifier_field(*field, text)?,
+            BibliographicField::Isrns => edit.isrns = identifier_field(*field, text)?,
+            BibliographicField::Keywords => edit.keywords = list_field(*field, text)?,
+            BibliographicField::Published
+            | BibliographicField::Accessed
+            | BibliographicField::OriginalDate
+            | BibliographicField::EventDate
+            | BibliographicField::PublishedDisplay
+            | BibliographicField::AccessedDisplay
+            | BibliographicField::OriginalDateDisplay
+            | BibliographicField::EventDateDisplay => {}
+        }
+    }
+    Ok(())
+}
+
+fn list_field(field: BibliographicField, text: &str) -> Result<Vec<String>, FieldError> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    text.lines()
+        .map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.chars().any(char::is_control) {
+                Err(FieldError::at(
+                    FormField::for_bib(field),
+                    format!(
+                        "{} must contain one non-empty entry per line",
+                        field.label()
+                    ),
+                ))
+            } else {
+                Ok(line.to_owned())
+            }
+        })
+        .collect()
+}
+
+fn identifier_field(
+    field: BibliographicField,
+    text: &str,
+) -> Result<Vec<ibex_core::Identifier>, FieldError> {
+    Ok(list_field(field, text)?
+        .into_iter()
+        .map(ibex_core::Identifier::new)
+        .collect())
+}
+
+/// What one entry of the identifiers row is. Each kind writes its own
+/// stored field; the badge names it in the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentifierKind {
+    Doi,
+    Isbn,
+    Issn,
+    Isrn,
+    Eprint,
+}
+
+impl IdentifierKind {
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::Doi => "DOI",
+            Self::Isbn => "ISBN",
+            Self::Issn => "ISSN",
+            Self::Isrn => "ISRN",
+            Self::Eprint => "arXiv",
+        }
+    }
+}
+
+const UNRECOGNIZED_IDENTIFIER: &str =
+    "Unrecognized identifier; prefix it with doi:, isbn:, issn:, isrn:, or arxiv:";
+
+/// Sorts one typed identifier into its kind: an explicit prefix wins, then
+/// DOI shapes, checksummed ISBNs, ISSNs, and arXiv ids. ISRNs have no
+/// recognizable shape, so they need their prefix. The value keeps the
+/// user's spelling minus any prefix.
+pub fn classify_identifier(text: &str) -> Result<(IdentifierKind, String), String> {
+    let text = text.trim();
+    if text.is_empty() || text.chars().any(char::is_control) {
+        return Err("Enter an identifier without control characters".into());
+    }
+    let strip = |prefix: &str| {
+        text.get(..prefix.len())
+            .filter(|head| head.eq_ignore_ascii_case(prefix))
+            .map(|_| text[prefix.len()..].trim())
+    };
+    let prefixed = [
+        ("doi:", IdentifierKind::Doi),
+        ("isbn:", IdentifierKind::Isbn),
+        ("issn:", IdentifierKind::Issn),
+        ("isrn:", IdentifierKind::Isrn),
+        ("arxiv:", IdentifierKind::Eprint),
+        ("eprint:", IdentifierKind::Eprint),
+        ("https://doi.org/", IdentifierKind::Doi),
+        ("http://doi.org/", IdentifierKind::Doi),
+        ("https://dx.doi.org/", IdentifierKind::Doi),
+        ("http://dx.doi.org/", IdentifierKind::Doi),
+    ];
+    if let Some((kind, value)) = prefixed
+        .iter()
+        .find_map(|(prefix, kind)| strip(prefix).map(|value| (*kind, value)))
+    {
+        return if value.is_empty() {
+            Err("Enter an identifier after the prefix".into())
+        } else {
+            Ok((kind, value.to_owned()))
+        };
+    }
+    let kind = if text.starts_with("10.") && text.contains('/') {
+        IdentifierKind::Doi
+    } else if is_isbn(text) {
+        IdentifierKind::Isbn
+    } else if is_issn(text) {
+        IdentifierKind::Issn
+    } else if is_arxiv(text) {
+        IdentifierKind::Eprint
+    } else {
+        return Err(UNRECOGNIZED_IDENTIFIER.into());
+    };
+    Ok((kind, text.to_owned()))
+}
+
+fn is_isbn(text: &str) -> bool {
+    let compact: Vec<char> = text.chars().filter(|c| !matches!(c, '-' | ' ')).collect();
+    let digit = |c: char| c.to_digit(10);
+    match compact.len() {
+        13 if compact.iter().all(char::is_ascii_digit)
+            && (compact.starts_with(&['9', '7', '8']) || compact.starts_with(&['9', '7', '9'])) =>
+        {
+            let sum: u32 = compact
+                .iter()
+                .enumerate()
+                .map(|(ix, c)| digit(*c).unwrap() * if ix % 2 == 0 { 1 } else { 3 })
+                .sum();
+            sum.is_multiple_of(10)
+        }
+        10 if compact[..9].iter().all(char::is_ascii_digit)
+            && (compact[9].is_ascii_digit() || compact[9] == 'X') =>
+        {
+            let sum: u32 = compact
+                .iter()
+                .enumerate()
+                .map(|(ix, c)| digit(*c).unwrap_or(10) * (10 - ix as u32))
+                .sum();
+            sum.is_multiple_of(11)
+        }
+        _ => false,
+    }
+}
+
+/// `\d{4}-?\d{3}[\dXx]`.
+fn is_issn(text: &str) -> bool {
+    let compact = text
+        .get(..4)
+        .filter(|_| text.as_bytes().get(4) == Some(&b'-'))
+        .map_or_else(|| text.to_owned(), |head| format!("{head}{}", &text[5..]));
+    let bytes = compact.as_bytes();
+    bytes.len() == 8
+        && bytes[..7].iter().all(u8::is_ascii_digit)
+        && (bytes[7].is_ascii_digit() || matches!(bytes[7], b'X' | b'x'))
+}
+
+/// New-style `\d{4}\.\d{4,5}(v\d+)?` or old-style
+/// `[a-z-]+(\.[A-Z]{2})?/\d{7}` arXiv ids.
+fn is_arxiv(text: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if let Some((year, rest)) = text.split_once('.')
+        && year.len() == 4
+        && digits(year)
+    {
+        let (number, version) = rest.split_once('v').unwrap_or((rest, "0"));
+        return (4..=5).contains(&number.len()) && digits(number) && digits(version);
+    }
+    let Some((archive, number)) = text.split_once('/') else {
+        return false;
+    };
+    let (name, class) = archive.split_once('.').unwrap_or((archive, "AB"));
+    !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')
+        && class.len() == 2
+        && class.bytes().all(|b| b.is_ascii_uppercase())
+        && number.len() == 7
+        && digits(number)
+}
+
+const IDENTIFIER_FIELDS: [(BibliographicField, IdentifierKind); 5] = [
+    (BibliographicField::Doi, IdentifierKind::Doi),
+    (BibliographicField::Eprint, IdentifierKind::Eprint),
+    (BibliographicField::Isbns, IdentifierKind::Isbn),
+    (BibliographicField::Issns, IdentifierKind::Issn),
+    (BibliographicField::Isrns, IdentifierKind::Isrn),
+];
+
+/// The draft's identifiers as one list: DOI, eprint, then ISBNs, ISSNs,
+/// and ISRNs in stored order.
+pub fn identifier_tokens(draft: &EditDraft) -> Vec<(IdentifierKind, String)> {
+    IDENTIFIER_FIELDS
+        .iter()
+        .flat_map(|(field, kind)| {
+            draft
+                .fields
+                .get(field)
+                .map(String::as_str)
+                .unwrap_or_default()
+                .lines()
+                .map(|line| (*kind, line.to_owned()))
+        })
+        .collect()
+}
+
+/// Writes the identifier list back into the draft's five fields. Lists keep
+/// token order, so unchanged identifiers still match the stored text and
+/// keep their canonical forms.
+pub fn apply_identifier_tokens(
+    draft: &mut EditDraft,
+    tokens: &[(IdentifierKind, String)],
+) -> Result<(), FieldError> {
+    for (field, kind) in IDENTIFIER_FIELDS {
+        let values: Vec<&str> = tokens
+            .iter()
+            .filter(|(token_kind, _)| *token_kind == kind)
+            .map(|(_, value)| value.as_str())
+            .collect();
+        if values.len() > 1 {
+            match kind {
+                IdentifierKind::Doi => {
+                    return Err(FieldError::at(FormField::Identifiers, "Only one DOI"));
+                }
+                IdentifierKind::Eprint => {
+                    return Err(FieldError::at(FormField::Identifiers, "Only one eprint"));
+                }
+                _ => {}
+            }
+        }
+        draft.fields.insert(field, values.join("\n"));
+    }
     Ok(())
 }
 
@@ -226,34 +773,395 @@ pub fn kind_items() -> Vec<KindItem> {
     items
 }
 
-/// The stored date's UTC year as text; empty when no date is set. The form
-/// edits whole years, so the fuzzy display string never enters the input.
-fn date_year(date: Option<&BibliographicDate>) -> String {
-    date.map(|date| utc_year_from_millis(date.instant().as_unix_ms()).to_string())
+fn display_text(date: Option<&BibliographicDate>) -> String {
+    date.and_then(BibliographicDate::display)
         .unwrap_or_default()
+        .to_owned()
 }
 
-/// Year text to the year's January 1 UTC date; empty clears the field,
-/// anything unparseable is the form's error to show.
-fn year_field(label: &str, text: &str) -> Result<Option<BibliographicDate>, String> {
-    let text = text.trim();
-    if text.is_empty() {
+fn date_text(date: Option<&BibliographicDate>) -> String {
+    let Some(date) = date else {
+        return String::new();
+    };
+    let mut text = instant_text(date.instant(), date.precision());
+    if let Some(end) = date.end() {
+        text.push('/');
+        let end_text = instant_text(end, date.precision());
+        // Only the start has stored precision; an end can carry finer detail.
+        if parse_date_instant(&end_text).is_some_and(|(instant, _)| instant == end) {
+            text.push_str(&end_text);
+        } else {
+            text.push_str(&instant_text(end, DatePrecision::DateTime));
+        }
+    }
+    match date.certainty() {
+        DateCertainty::Uncertain => text.push('?'),
+        DateCertainty::Approximate => text.push('~'),
+        DateCertainty::Exact => {}
+    }
+    text
+}
+
+fn instant_text(instant: UtcMillis, precision: DatePrecision) -> String {
+    let Ok(at) = time::OffsetDateTime::from_unix_timestamp_nanos(
+        i128::from(instant.as_unix_ms()) * 1_000_000,
+    ) else {
+        return instant.as_unix_ms().to_string();
+    };
+    match precision {
+        DatePrecision::Year => at.year().to_string(),
+        DatePrecision::Month => format!("{:04}-{:02}", at.year(), u8::from(at.month())),
+        DatePrecision::Day => format!(
+            "{:04}-{:02}-{:02}",
+            at.year(),
+            u8::from(at.month()),
+            at.day()
+        ),
+        // Imports without precision often store a bare year or day as
+        // midnight; show it as one so the narrow inline cell stays readable.
+        // `merge_date` compares against this same text, so an untouched
+        // prefill still keeps the stored precision.
+        DatePrecision::Unspecified if at.time() == time::Time::MIDNIGHT => {
+            if (at.month(), at.day()) == (time::Month::January, 1) {
+                instant_text(instant, DatePrecision::Year)
+            } else {
+                instant_text(instant, DatePrecision::Day)
+            }
+        }
+        DatePrecision::DateTime | DatePrecision::Unspecified => at
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| at.to_string()),
+    }
+}
+
+// Compare against the original date text: an unchanged input must keep the
+// stored date exactly rather than re-infer its precision from the text.
+fn merge_date(
+    date: &mut Option<BibliographicDate>,
+    draft: &EditDraft,
+    field: BibliographicField,
+    display_field: BibliographicField,
+) -> Result<(), FieldError> {
+    let at = |message: String| FieldError::at(FormField::for_bib(field), message);
+    let old_display = display_text(date.as_ref());
+    let edited_full = draft
+        .fields
+        .get(&field)
+        .filter(|text| text.trim() != date_text(date.as_ref()));
+    let mut changed = if let Some(text) = edited_full {
+        parse_date_preserving_endpoints(field, text, date.as_ref())?
+    } else {
+        date.clone()
+    };
+    let label = draft
+        .fields
+        .get(&display_field)
+        .filter(|text| text.trim() != old_display)
+        .map(|text| text.trim())
+        .unwrap_or(&old_display);
+    if let Some(value) = changed.as_ref() {
+        changed = Some(
+            BibliographicDate::try_new_precise(
+                value.instant(),
+                value.end(),
+                value.precision(),
+                value.certainty(),
+                (!label.is_empty())
+                    .then(|| NonEmptyStr::try_new(label))
+                    .transpose()
+                    .map_err(|e| at(format!("{}: {e}", display_field.label())))?,
+            )
+            .map_err(|e| at(format!("{}: {e}", field.label())))?,
+        );
+    } else if !label.is_empty() && label != old_display {
+        return Err(at(format!("{} requires a date", display_field.label())));
+    }
+    *date = changed;
+    Ok(())
+}
+
+/// A parsed date before it becomes a [`BibliographicDate`]. Each endpoint
+/// keeps the precision its own text spelled, which only the preview uses for
+/// the end.
+struct DateParts {
+    start: (UtcMillis, DatePrecision),
+    end: Option<(UtcMillis, DatePrecision)>,
+    certainty: DateCertainty,
+}
+
+// Partial display precision is not permission to round an imported instant.
+// An endpoint whose text still reads the same as the stored one keeps its
+// stored instant (and, for the start, precision), so a certainty-only edit
+// or a respelling such as `March 1991` for `1991-03` changes nothing else.
+fn parse_date_preserving_endpoints(
+    field: BibliographicField,
+    text: &str,
+    original: Option<&BibliographicDate>,
+) -> Result<Option<BibliographicDate>, FieldError> {
+    let Some(mut parts) = date_parts(field, text)? else {
+        return Ok(None);
+    };
+    if let Some(original) = original
+        && let Some(old) = parse_date_parts(&date_text(Some(original)))
+    {
+        if parts.start == old.start {
+            parts.start = (original.instant(), original.precision());
+        }
+        if let (Some(end), Some(old_end), Some(stored)) =
+            (parts.end.as_mut(), old.end, original.end())
+            && end.0 == old_end.0
+        {
+            end.0 = stored;
+        }
+    }
+    date_from_parts(field, &parts).map(Some)
+}
+
+/// How the date input's text reads back: `1991`, `March 1991`,
+/// `4 March 1991` or an RFC3339 instant, `A – B` for a range, then
+/// ` · approximate` or ` · uncertain`. Empty text previews as empty.
+pub fn date_preview(field: BibliographicField, text: &str) -> Result<String, FieldError> {
+    let Some(parts) = date_parts(field, text)? else {
+        return Ok(String::new());
+    };
+    date_from_parts(field, &parts)?;
+    let mut preview = endpoint_preview(parts.start);
+    if let Some(end) = parts.end {
+        preview.push_str(" – ");
+        preview.push_str(&endpoint_preview(end));
+    }
+    preview.push_str(match parts.certainty {
+        DateCertainty::Approximate => " · approximate",
+        DateCertainty::Uncertain => " · uncertain",
+        DateCertainty::Exact => "",
+    });
+    Ok(preview)
+}
+
+fn endpoint_preview((instant, precision): (UtcMillis, DatePrecision)) -> String {
+    let Ok(at) = time::OffsetDateTime::from_unix_timestamp_nanos(
+        i128::from(instant.as_unix_ms()) * 1_000_000,
+    ) else {
+        return instant.as_unix_ms().to_string();
+    };
+    match precision {
+        DatePrecision::Year => at.year().to_string(),
+        DatePrecision::Month => format!("{} {}", at.month(), at.year()),
+        DatePrecision::Day => format!("{} {} {}", at.day(), at.month(), at.year()),
+        DatePrecision::DateTime | DatePrecision::Unspecified => {
+            instant_text(instant, DatePrecision::DateTime)
+        }
+    }
+}
+
+fn date_parts(field: BibliographicField, text: &str) -> Result<Option<DateParts>, FieldError> {
+    if text.trim().is_empty() {
         return Ok(None);
     }
-    let year: i64 = text
-        .parse()
-        .map_err(|_| format!("{label} must be a whole year, got '{text}'"))?;
-    let instant =
-        UtcMillis::jan_1_utc(year).ok_or_else(|| format!("{label} is outside the calendar"))?;
-    BibliographicDate::try_new(instant, None)
-        .map(Some)
-        .map_err(|_| format!("{label} is outside the calendar"))
+    parse_date_parts(text).map(Some).ok_or_else(|| {
+        FieldError::at(
+            FormField::for_bib(field),
+            format!(
+                "{} must be a date such as 1991, March 1991, 4 March 1991, 1991-03-04 or 1990–1995; end with ? if uncertain, or ~ (or start with c.) if approximate",
+                field.label()
+            ),
+        )
+    })
+}
+
+fn date_from_parts(
+    field: BibliographicField,
+    parts: &DateParts,
+) -> Result<BibliographicDate, FieldError> {
+    let at = |message: String| FieldError::at(FormField::for_bib(field), message);
+    let (instant, precision) = parts.start;
+    let end = parts.end.map(|(end, _)| end);
+    if end.is_some_and(|end| end.as_unix_ms() < instant.as_unix_ms()) {
+        return Err(at(format!(
+            "{} range end must not precede its start",
+            field.label()
+        )));
+    }
+    BibliographicDate::try_new_precise(instant, end, precision, parts.certainty, None)
+        .map_err(|e| at(format!("{}: {e}", field.label())))
+}
+
+fn parse_date_parts(text: &str) -> Option<DateParts> {
+    let text = text.trim();
+    let (text, certainty) = if let Some(text) = text.strip_suffix('?') {
+        (text, DateCertainty::Uncertain)
+    } else if let Some(text) = text.strip_suffix('~') {
+        (text, DateCertainty::Approximate)
+    } else if let Some(text) = strip_approximate_prefix(text) {
+        (text, DateCertainty::Approximate)
+    } else {
+        (text, DateCertainty::Exact)
+    };
+    let (start, end) = split_date_range(text.trim());
+    Some(DateParts {
+        start: parse_date_endpoint(start)?,
+        end: match end {
+            Some(end) => Some(parse_date_endpoint(end)?),
+            None => None,
+        },
+        certainty,
+    })
+}
+
+fn strip_approximate_prefix(text: &str) -> Option<&str> {
+    ["circa", "about", "ca.", "c."].iter().find_map(|prefix| {
+        let rest = text
+            .get(..prefix.len())
+            .filter(|head| head.eq_ignore_ascii_case(prefix))
+            .map(|_| &text[prefix.len()..])?;
+        // A word prefix needs a space after it; `c.1850` is fine.
+        (prefix.ends_with('.') || rest.starts_with(char::is_whitespace)).then(|| rest.trim_start())
+    })
+}
+
+fn split_date_range(text: &str) -> (&str, Option<&str>) {
+    let split = ["/", "–", "—"]
+        .iter()
+        .find_map(|separator| text.split_once(separator))
+        .or_else(|| {
+            let at = text.to_ascii_lowercase().find(" to ")?;
+            Some((&text[..at], &text[at + " to ".len()..]))
+        })
+        .or_else(|| {
+            // `-` also separates months and days, so it is a range only
+            // between two bare years.
+            let (start, end) = text.split_once('-')?;
+            let year = |part: &str| part.len() == 4 && part.bytes().all(|b| b.is_ascii_digit());
+            (year(start.trim()) && year(end.trim())).then_some((start, end))
+        });
+    match split {
+        Some((start, end)) => (start.trim(), Some(end.trim())),
+        None => (text, None),
+    }
+}
+
+fn parse_date_endpoint(text: &str) -> Option<(UtcMillis, DatePrecision)> {
+    parse_date_instant(text).or_else(|| parse_named_date(text))
+}
+
+/// `March 1991`, `4 March 1991`, `March 4, 1991` or `March 4 1991`, with
+/// full or three-letter month names in any case and an optional `.`.
+fn parse_named_date(text: &str) -> Option<(UtcMillis, DatePrecision)> {
+    let words = text
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let (month, day, year) = match words[..] {
+        [month, year] => (month, None, year),
+        [day, month, year] if month_number(month).is_some() => (month, Some(day), year),
+        [month, day, year] => (month, Some(day), year),
+        _ => return None,
+    };
+    let digits = |word: &str, max: usize| {
+        (!word.is_empty() && word.len() <= max && word.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| word.parse::<i32>().ok())
+            .flatten()
+    };
+    let month = month_number(month)?;
+    let year = digits(year, 9)?;
+    let day = match day {
+        Some(day) => Some(digits(day, 2)?),
+        None => None,
+    };
+    let at = time::Date::from_calendar_date(year, month, u8::try_from(day.unwrap_or(1)).ok()?)
+        .ok()?
+        .midnight()
+        .assume_utc();
+    Some((
+        UtcMillis::from_unix_ms(at.unix_timestamp() * 1000),
+        if day.is_some() {
+            DatePrecision::Day
+        } else {
+            DatePrecision::Month
+        },
+    ))
+}
+
+fn month_number(word: &str) -> Option<time::Month> {
+    const MONTHS: [&str; 12] = [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+    let word = word.strip_suffix('.').unwrap_or(word).to_ascii_lowercase();
+    let ix = MONTHS
+        .iter()
+        .position(|month| *month == word || (word.len() == 3 && month.starts_with(&word)))?;
+    time::Month::try_from(u8::try_from(ix + 1).ok()?).ok()
+}
+fn parse_date_instant(text: &str) -> Option<(UtcMillis, DatePrecision)> {
+    if text.contains(['T', 't']) {
+        let at = time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+            .ok()?;
+        return Some((
+            UtcMillis::from_unix_ms(i64::try_from(at.unix_timestamp_nanos() / 1_000_000).ok()?),
+            DatePrecision::DateTime,
+        ));
+    }
+    let (sign, unsigned) = text.strip_prefix('-').map_or((1, text), |text| (-1, text));
+    let parts = unsigned.split('-').collect::<Vec<_>>();
+    if parts.is_empty()
+        || parts.len() > 3
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    let year = parts[0].parse::<i32>().ok()?.checked_mul(sign)?;
+    let month = parts
+        .get(1)
+        .map(|part| {
+            if part.len() == 2 {
+                part.parse::<u8>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(Some(1))?;
+    let day = parts
+        .get(2)
+        .map(|part| {
+            if part.len() == 2 {
+                part.parse::<u8>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(Some(1))?;
+    let at = time::Date::from_calendar_date(year, time::Month::try_from(month).ok()?, day)
+        .ok()?
+        .midnight()
+        .assume_utc();
+    let precision = match parts.len() {
+        1 => DatePrecision::Year,
+        2 => DatePrecision::Month,
+        _ => DatePrecision::Day,
+    };
+    Some((
+        UtcMillis::from_unix_ms(at.unix_timestamp() * 1000),
+        precision,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        EditDraft, KindItem, SearchableListItem, build_create, build_update,
+        EditDraft, FieldError, FormField, KindItem, SearchableListItem, build_create, build_update,
         creators_from_person_ids, empty_create_draft, kind_items, prefill_draft,
     };
     use ibex_core::{
@@ -320,7 +1228,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -333,38 +1240,567 @@ mod tests {
             title: title.into(),
             kind: ResourceKind::BookSection,
             parent: None,
-            publisher: "MIT Press".into(),
-            published_year: "1991".into(),
-            accessed_year: "2020".into(),
             series: "".into(),
-            series_number: "".into(),
             creators,
             tag_ids: Vec::new(),
             collection_ids: vec![],
+            fields: [(super::BibliographicField::Publisher, "MIT Press".into())].into(),
+        }
+    }
+    #[test]
+    fn range_end_keeps_finer_detail_when_start_is_edited() {
+        use super::BibliographicField as F;
+        let mut draft = empty_create_draft();
+        draft.title = "Range".into();
+        draft
+            .fields
+            .insert(F::OriginalDate, "2024/2025-03-04T12:00:00Z".into());
+        let record =
+            Resource::try_new(ResourceId::generate(), build_create(&draft).unwrap()).unwrap();
+        let mut draft = prefill_draft(&record);
+        assert_eq!(draft.fields[&F::OriginalDate], "2024/2025-03-04T12:00:00Z");
+        draft.fields.insert(
+            F::OriginalDate,
+            draft.fields[&F::OriginalDate].replacen("2024", "2023", 1),
+        );
+        let updated = build_update(&record, &draft).unwrap();
+        let date = updated.original_date.unwrap();
+        assert_eq!(date.instant(), UtcMillis::jan_1_utc(2023).unwrap());
+        assert_eq!(date.end(), record.original_date.unwrap().end());
+    }
+    #[test]
+    fn registry_populates_every_input_and_marks_multiline_values() {
+        use super::BibliographicField as F;
+        let mut record = loaded_record();
+        record.published = None;
+        record.accessed = None;
+        record.publisher = None;
+        record.series_number = None;
+        let draft = prefill_draft(&record);
+        assert_eq!(F::ALL.len(), 35);
+        assert_eq!(draft.fields.len(), F::ALL.len());
+        for field in F::ALL {
+            assert_eq!(draft.fields[field], "");
+            assert!(!field.label().is_empty());
+            assert_eq!(
+                field.multiline(),
+                [F::AbstractText, F::Keywords, F::Isbns, F::Issns, F::Isrns].contains(field)
+            );
+        }
+        assert!(empty_create_draft().fields.is_empty());
+    }
+    #[test]
+    fn absent_fields_and_unchanged_structured_values_preserve_metadata() {
+        use super::BibliographicField as F;
+        let mut record = loaded_record();
+        record.subtitle = Some(NonEmptyStr::try_new("Unexposed subtitle").unwrap());
+        record.isbns = vec![ibex_core::Identifier {
+            original: "Source, spelling".into(),
+            canonical: Some("custom-key".into()),
+        }];
+        record.pages = Some(ibex_core::Pages {
+            literal: NonEmptyStr::try_new("1, 3").unwrap(),
+            spans: vec![],
+        });
+        record.keywords = vec!["first, keyword".into(), "second".into()];
+        record.metadata.citekey = Some("old-key".into());
+        record.metadata.venue = Some("old-venue".into());
+        record
+            .metadata
+            .source_fields
+            .insert("title".into(), "Source title".into());
+        record.metadata.provenance = ibex_core::ResourceProvenance {
+            format: Some("biblatex".into()),
+            parser_version: Some(7),
+            entry_type: Some("article".into()),
+            original_fields: [("title".into(), "Original title".into())].into(),
+            inherited_origins: [("publisher".into(), "parent-key".into())].into(),
+            note: Some("Source note".into()),
+            annotation: Some("Source annotation".into()),
+            source_fingerprint: Some("fingerprint".into()),
+        };
+        let mut draft = prefill_draft(&record);
+        assert_eq!(build_update(&record, &draft).unwrap(), record.to_new());
+        draft.fields.clear();
+        assert_eq!(build_update(&record, &draft).unwrap(), record.to_new());
+        draft.fields.insert(F::Citekey, "new-key".into());
+        draft.fields.insert(F::Venue, "new-venue".into());
+        let mut expected = record.to_new();
+        expected.metadata.citekey = Some("new-key".into());
+        expected.metadata.venue = Some("new-venue".into());
+        assert_eq!(build_update(&record, &draft).unwrap(), expected);
+    }
+    #[test]
+    fn invalid_dates_and_orphan_displays_name_the_field() {
+        use super::BibliographicField as F;
+        let record = loaded_record();
+        for field in [F::Published, F::Accessed, F::OriginalDate, F::EventDate] {
+            for text in [
+                "soon",
+                "2023-02-29",
+                "2024-13",
+                "2024-01-32",
+                "2024-1",
+                "2024/2023",
+                "2024/",
+                "/2024",
+                "2024/2025/2026",
+                "2024?~",
+                "2024-01-01T25:00:00Z",
+                "2024-01-01T00:00:00",
+                "999999999999999999999",
+            ] {
+                let mut draft = prefill_draft(&record);
+                draft.fields.insert(field, text.into());
+                let err = build_update(&record, &draft).unwrap_err();
+                assert!(
+                    err.message.contains(field.label()),
+                    "{field:?}: {text}: {err}"
+                );
+                assert_eq!(err.field, Some(FormField::Bib(field)));
+                assert!(build_create(&draft).is_err());
+            }
+        }
+        for (date, display) in [
+            (F::Published, F::PublishedDisplay),
+            (F::Accessed, F::AccessedDisplay),
+            (F::OriginalDate, F::OriginalDateDisplay),
+            (F::EventDate, F::EventDateDisplay),
+        ] {
+            let mut draft = empty_create_draft();
+            draft.title = "No date".into();
+            draft.fields.insert(display, "Orphan display".into());
+            let err = build_create(&draft).unwrap_err();
+            assert!(err.message.contains(display.label()), "{err}");
+            assert_eq!(err.field, Some(FormField::Bib(date)));
+        }
+    }
+    #[test]
+    fn year_edit_of_a_datetime_sets_year_precision() {
+        use super::BibliographicField as F;
+        use ibex_core::DatePrecision as P;
+        let mut record = loaded_record();
+        record.published = Some(
+            BibliographicDate::try_new_precise(
+                UtcMillis::from_unix_ms(1709201096123),
+                None,
+                P::DateTime,
+                ibex_core::DateCertainty::Exact,
+                None,
+            )
+            .unwrap(),
+        );
+        let mut draft = prefill_draft(&record);
+        draft.fields.insert(F::Published, "2024".into());
+        let date = build_update(&record, &draft).unwrap().published.unwrap();
+        assert_eq!(date.instant(), UtcMillis::jan_1_utc(2024).unwrap());
+        assert_eq!(date.precision(), P::Year);
+    }
+    #[test]
+    fn published_only_draft_leaves_other_dates_untouched() {
+        use super::BibliographicField as F;
+        let mut record = loaded_record();
+        record.accessed = Some(
+            BibliographicDate::try_new_precise(
+                UtcMillis::from_unix_ms(1709201096123),
+                None,
+                ibex_core::DatePrecision::DateTime,
+                ibex_core::DateCertainty::Exact,
+                Some(NonEmptyStr::try_new("Leap day").unwrap()),
+            )
+            .unwrap(),
+        );
+        record.original_date = record.published.clone();
+        record.event_date = record.accessed.clone();
+        // The inline editor's draft carries only the Published field.
+        let mut draft = draft_with("Citation Networks", record.to_new().creators);
+        draft.fields.insert(F::Published, "2024".into());
+        let updated = build_update(&record, &draft).unwrap();
+        assert_eq!(
+            updated.published.map(|date| date.instant()),
+            UtcMillis::jan_1_utc(2024)
+        );
+        assert_eq!(updated.accessed, record.accessed);
+        assert_eq!(updated.original_date, record.original_date);
+        assert_eq!(updated.event_date, record.event_date);
+    }
+    #[test]
+    fn full_dates_edit_prefill_display_and_clear() {
+        use super::BibliographicField as F;
+        use ibex_core::{DateCertainty as C, DatePrecision as P};
+        let pairs = [
+            (F::Published, F::PublishedDisplay, "published"),
+            (F::Accessed, F::AccessedDisplay, "accessed"),
+            (F::OriginalDate, F::OriginalDateDisplay, "original_date"),
+            (F::EventDate, F::EventDateDisplay, "event_date"),
+        ];
+        for (field, display, key) in pairs {
+            for (text, precision, certainty, instant, end) in [
+                ("2024", P::Year, C::Exact, 1704067200000, None),
+                ("2024-02?", P::Month, C::Uncertain, 1706745600000, None),
+                ("2024-02-29~", P::Day, C::Approximate, 1709164800000, None),
+                (
+                    "2024-02/2024-03~",
+                    P::Month,
+                    C::Approximate,
+                    1706745600000,
+                    Some(1709251200000),
+                ),
+                (
+                    "2024-02-29T12:34:56.123+02:30",
+                    P::DateTime,
+                    C::Exact,
+                    1709201096123,
+                    None,
+                ),
+            ] {
+                let mut draft = empty_create_draft();
+                draft.title = "Dates".into();
+                draft.fields.insert(field, text.into());
+                draft.fields.insert(display, "Custom label".into());
+                let new = build_create(&draft).unwrap();
+                let date = match field {
+                    F::Published => &new.published,
+                    F::Accessed => &new.accessed,
+                    F::OriginalDate => &new.original_date,
+                    F::EventDate => &new.event_date,
+                    _ => unreachable!(),
+                }
+                .as_ref()
+                .unwrap();
+                assert_eq!(date.instant().as_unix_ms(), instant, "{text}");
+                assert_eq!(date.end().map(|v| v.as_unix_ms()), end);
+                assert_eq!(date.precision(), precision);
+                assert_eq!(date.certainty(), certainty);
+                assert_eq!(date.display(), Some("Custom label"));
+                let original = loaded_record();
+                let mut update_draft = prefill_draft(&original);
+                update_draft.fields.insert(field, text.into());
+                update_draft.fields.insert(display, "Custom label".into());
+                let updated =
+                    serde_json::to_value(build_update(&original, &update_draft).unwrap()).unwrap();
+                assert_eq!(updated[key], serde_json::to_value(&new).unwrap()[key]);
+                let record = Resource::try_new(ResourceId::generate(), new.clone()).unwrap();
+                let mut draft = prefill_draft(&record);
+                assert!(!draft.fields[&field].is_empty());
+                assert_eq!(draft.fields[&display], "Custom label");
+                assert_eq!(build_update(&record, &draft).unwrap(), new);
+                draft.fields.insert(display, String::new());
+                let updated = serde_json::to_value(build_update(&record, &draft).unwrap()).unwrap();
+                assert!(updated[key]["display"].is_null());
+                draft.fields.insert(field, String::new());
+                assert!(
+                    serde_json::to_value(build_update(&record, &draft).unwrap()).unwrap()[key]
+                        .is_null()
+                );
+            }
+        }
+    }
+    #[test]
+    fn invalid_lists_are_rejected_with_field_labels() {
+        use super::BibliographicField as F;
+        let record = loaded_record();
+        for field in [F::Isbns, F::Issns, F::Isrns, F::Keywords] {
+            for text in ["first\n\nsecond", "first\n  \nsecond", "bad\0entry"] {
+                let mut draft = prefill_draft(&record);
+                draft.fields.insert(field, text.into());
+                let err = build_update(&record, &draft).unwrap_err();
+                assert!(err.message.contains(field.label()), "{err}");
+                assert_eq!(err.field, Some(FormField::for_bib(field)));
+            }
+        }
+    }
+    #[test]
+    fn list_fields_use_lines_preserve_commas_and_clear() {
+        use super::BibliographicField as F;
+        for (field, key) in [
+            (F::Isbns, "isbns"),
+            (F::Issns, "issns"),
+            (F::Isrns, "isrns"),
+            (F::Keywords, "keywords"),
+        ] {
+            let mut draft = empty_create_draft();
+            draft.title = "Lists".into();
+            assert!(draft.fields.is_empty());
+            draft
+                .fields
+                .insert(field, "  first, literal\n second \n".into());
+            let new = build_create(&draft).unwrap();
+            let json = serde_json::to_value(&new).unwrap();
+            if field == F::Keywords {
+                assert_eq!(json[key], serde_json::json!(["first, literal", "second"]));
+            } else {
+                assert_eq!(json[key][0]["original"], "first, literal");
+                assert_eq!(json[key][1]["original"], "second");
+                assert_eq!(json[key].as_array().unwrap().len(), 2);
+            }
+            let record = Resource::try_new(ResourceId::generate(), new).unwrap();
+            let mut draft = prefill_draft(&record);
+            assert_eq!(draft.fields[&field], "first, literal\nsecond");
+            draft.fields.insert(field, String::new());
+            let cleared = serde_json::to_value(build_update(&record, &draft).unwrap()).unwrap();
+            assert_eq!(cleared[key], serde_json::json!([]));
         }
     }
 
     #[test]
+    fn scalar_fields_edit_prefill_and_clear() {
+        use super::BibliographicField as F;
+        let cases = [
+            (F::Subtitle, "subtitle"),
+            (F::TitleAddon, "title_addon"),
+            (F::ShortTitle, "short_title"),
+            (F::Place, "place"),
+            (F::Volume, "volume"),
+            (F::Issue, "issue"),
+            (F::Pages, "pages"),
+            (F::TotalPages, "total_pages"),
+            (F::ArticleNumber, "article_number"),
+            (F::Edition, "edition"),
+            (F::Publisher, "publisher"),
+            (F::SeriesNumber, "series_number"),
+            (F::Doi, "doi"),
+            (F::Url, "url"),
+            (F::Eprint, "eprint"),
+            (F::Language, "language"),
+            (F::DocumentType, "document_type"),
+            (F::PublicationMethod, "publication_method"),
+            (F::Institution, "institution"),
+            (F::Organization, "organization"),
+            (F::AbstractText, "abstract_text"),
+            (F::Citekey, "citekey"),
+            (F::Venue, "venue"),
+        ];
+        let record = loaded_record();
+        for (field, key) in cases {
+            let mut draft = prefill_draft(&record);
+            draft.fields.insert(field, "  edited, value  ".into());
+            let new = build_update(&record, &draft).unwrap();
+            let json = serde_json::to_value(&new).unwrap();
+            let value = if matches!(field, F::Citekey | F::Venue) {
+                &json["metadata"][key]
+            } else {
+                &json[key]
+            };
+            let value = if field == F::Pages {
+                &value["literal"]
+            } else {
+                value
+            };
+            assert_eq!(value, "edited, value", "{field:?}");
+            let created = serde_json::to_value(build_create(&draft).unwrap()).unwrap();
+            let created_value = if matches!(field, F::Citekey | F::Venue) {
+                &created["metadata"][key]
+            } else {
+                &created[key]
+            };
+            let updated_value = if matches!(field, F::Citekey | F::Venue) {
+                &json["metadata"][key]
+            } else {
+                &json[key]
+            };
+            assert_eq!(
+                created_value, updated_value,
+                "{field:?} create matches update"
+            );
+            let stored = Resource::try_new(record.id, new).unwrap();
+            let mut draft = prefill_draft(&stored);
+            assert_eq!(draft.fields[&field], "edited, value");
+            draft.fields.insert(field, "  ".into());
+            let cleared = serde_json::to_value(build_update(&stored, &draft).unwrap()).unwrap();
+            let value = if matches!(field, F::Citekey | F::Venue) {
+                &cleared["metadata"][key]
+            } else {
+                &cleared[key]
+            };
+            assert!(value.is_null(), "{field:?}");
+        }
+    }
+    #[test]
+    fn unchanged_dates_preserve_exact_date_data() {
+        use ibex_core::DatePrecision as P;
+        for precision in [P::Unspecified, P::Year, P::Month, P::Day, P::DateTime] {
+            let mut record = loaded_record();
+            record.published = Some(
+                BibliographicDate::try_new_precise(
+                    UtcMillis::from_unix_ms(1_600_000_000_123),
+                    Some(UtcMillis::from_unix_ms(1_600_086_400_456)),
+                    precision,
+                    ibex_core::DateCertainty::Uncertain,
+                    Some(NonEmptyStr::try_new("Autumn 2020").unwrap()),
+                )
+                .unwrap(),
+            );
+            record.accessed = record.published.clone();
+            record.original_date = record.published.clone();
+            record.event_date = record.published.clone();
+            let mut draft = prefill_draft(&record);
+            assert_eq!(build_update(&record, &draft).unwrap(), record.to_new());
+            draft.fields.clear();
+            assert_eq!(build_update(&record, &draft).unwrap(), record.to_new());
+        }
+    }
+    #[test]
+    fn unspecified_midnight_dates_prefill_short_and_round_trip_unchanged() {
+        use super::BibliographicField as F;
+        use ibex_core::DatePrecision as P;
+        for (instant, text) in [
+            (UtcMillis::jan_1_utc(1991).unwrap(), "1991"),
+            (UtcMillis::from_unix_ms(668_044_800_000), "1991-03-04"),
+        ] {
+            let mut record = loaded_record();
+            record.published = Some(BibliographicDate::try_new(instant, None).unwrap());
+            let draft = prefill_draft(&record);
+            assert_eq!(draft.fields[&F::Published], text);
+            let updated = build_update(&record, &draft).unwrap();
+            assert_eq!(updated, record.to_new());
+            assert_eq!(updated.published.unwrap().precision(), P::Unspecified);
+        }
+    }
+    #[test]
+    fn respelled_endpoints_keep_stored_instant_and_precision() {
+        use super::BibliographicField as F;
+        use ibex_core::{DateCertainty as C, DatePrecision as P};
+        let mut record = loaded_record();
+        // Mid-March: the stored instant is finer than its Month text.
+        let stored = UtcMillis::from_unix_ms(668_563_200_000);
+        record.published = Some(
+            BibliographicDate::try_new_precise(stored, None, P::Month, C::Exact, None).unwrap(),
+        );
+        let mut draft = prefill_draft(&record);
+        assert_eq!(draft.fields[&F::Published], "1991-03");
+        for (text, certainty) in [("March 1991", C::Exact), ("c. Mar. 1991", C::Approximate)] {
+            draft.fields.insert(F::Published, text.into());
+            let date = build_update(&record, &draft).unwrap().published.unwrap();
+            assert_eq!(date.instant(), stored, "{text}");
+            assert_eq!(date.precision(), P::Month);
+            assert_eq!(date.certainty(), certainty);
+        }
+        draft.fields.insert(F::Published, "April 1991".into());
+        let date = build_update(&record, &draft).unwrap().published.unwrap();
+        assert_eq!(date.instant(), UtcMillis::from_unix_ms(670_464_000_000));
+    }
+    #[test]
+    fn smart_date_forms_parse() {
+        use super::BibliographicField as F;
+        use ibex_core::{DateCertainty as C, DatePrecision as P};
+        let march = 667_785_600_000; // 1991-03-01
+        let march_4 = 668_044_800_000; // 1991-03-04
+        let y1990 = UtcMillis::jan_1_utc(1990).unwrap().as_unix_ms();
+        let y1995 = UtcMillis::jan_1_utc(1995).unwrap().as_unix_ms();
+        let cases: [(&str, i64, Option<i64>, P, C); 21] = [
+            ("March 1991", march, None, P::Month, C::Exact),
+            ("mar 1991", march, None, P::Month, C::Exact),
+            ("MAR. 1991", march, None, P::Month, C::Exact),
+            ("4 March 1991", march_4, None, P::Day, C::Exact),
+            ("March 4, 1991", march_4, None, P::Day, C::Exact),
+            ("March 4 1991", march_4, None, P::Day, C::Exact),
+            ("4 mar. 1991", march_4, None, P::Day, C::Exact),
+            ("1990/1995", y1990, Some(y1995), P::Year, C::Exact),
+            ("1990–1995", y1990, Some(y1995), P::Year, C::Exact),
+            ("1990 — 1995", y1990, Some(y1995), P::Year, C::Exact),
+            ("1990 to 1995", y1990, Some(y1995), P::Year, C::Exact),
+            ("1990-1995", y1990, Some(y1995), P::Year, C::Exact),
+            ("1990-12", 660_009_600_000, None, P::Month, C::Exact),
+            ("March 1991 to 1995", march, Some(y1995), P::Month, C::Exact),
+            ("1991?", 662_688_000_000, None, P::Year, C::Uncertain),
+            ("1991~", 662_688_000_000, None, P::Year, C::Approximate),
+            ("c. 1850", -3_786_825_600_000, None, P::Year, C::Approximate),
+            ("c.1850", -3_786_825_600_000, None, P::Year, C::Approximate),
+            (
+                "ca. 1850",
+                -3_786_825_600_000,
+                None,
+                P::Year,
+                C::Approximate,
+            ),
+            (
+                "Circa 1850",
+                -3_786_825_600_000,
+                None,
+                P::Year,
+                C::Approximate,
+            ),
+            (
+                "about 1990-1995",
+                y1990,
+                Some(y1995),
+                P::Year,
+                C::Approximate,
+            ),
+        ];
+        for (text, instant, end, precision, certainty) in cases {
+            let mut draft = empty_create_draft();
+            draft.title = "Dates".into();
+            draft.fields.insert(F::Published, text.into());
+            let date = build_create(&draft)
+                .unwrap_or_else(|e| panic!("{text}: {e}"))
+                .published
+                .unwrap();
+            assert_eq!(date.instant().as_unix_ms(), instant, "{text}");
+            assert_eq!(date.end().map(UtcMillis::as_unix_ms), end, "{text}");
+            assert_eq!(date.precision(), precision, "{text}");
+            assert_eq!(date.certainty(), certainty, "{text}");
+        }
+        for text in [
+            "Marchember 1991",
+            "32 March 1991",
+            "March",
+            "1991 March 4 5",
+            "aboutx 1991",
+            "c. 1991?",
+            "1995-1990",
+            "1990-199",
+        ] {
+            let mut draft = empty_create_draft();
+            draft.title = "Dates".into();
+            draft.fields.insert(F::Published, text.into());
+            assert!(build_create(&draft).is_err(), "{text}");
+        }
+    }
+    #[test]
+    fn date_preview_reads_back_the_parsed_date() {
+        use super::{BibliographicField as F, date_preview};
+        for (text, preview) in [
+            ("", ""),
+            ("  ", ""),
+            ("1991", "1991"),
+            ("1991-03", "March 1991"),
+            ("c. March 1991", "March 1991 · approximate"),
+            ("March 4, 1991?", "4 March 1991 · uncertain"),
+            ("1990-1995", "1990 – 1995"),
+            ("2024-02-29T12:34:56Z", "2024-02-29T12:34:56Z"),
+        ] {
+            assert_eq!(date_preview(F::Published, text).unwrap(), preview);
+        }
+        let err = date_preview(F::Accessed, "soon").unwrap_err();
+        assert_eq!(err.field, Some(FormField::Bib(F::Accessed)));
+        assert!(err.message.contains(F::Accessed.label()), "{err}");
+        assert!(date_preview(F::Published, "1995/1990").is_err());
+    }
+    #[test]
     fn prefill_copies_every_stored_field() {
+        use super::BibliographicField as F;
         let record = loaded_record();
         let draft = prefill_draft(&record);
         assert_eq!(draft.title, "Citation Networks");
         assert_eq!(draft.kind, ResourceKind::BookSection);
         assert_eq!(draft.parent, record.parent_id);
-        assert_eq!(draft.publisher, "MIT Press");
-        assert_eq!(draft.published_year, "1991");
-        assert_eq!(draft.accessed_year, "2020");
+        assert_eq!(draft.fields[&F::Publisher], "MIT Press");
+        assert_eq!(draft.fields[&F::Published], "1991");
+        assert_eq!(draft.fields[&F::Accessed], "2020");
         assert_eq!(
             draft.series,
             record.series_id.expect("series set").to_string()
         );
-        assert_eq!(draft.series_number, "LCL 26");
+        assert_eq!(draft.fields[&F::SeriesNumber], "LCL 26");
         assert_eq!(draft.creators.len(), 1);
         assert_eq!(draft.creators[0].person_id, record.creators[0].person_id);
     }
 
     #[test]
     fn prefill_empties_absent_optionals() {
+        use super::BibliographicField as F;
         let mut record = loaded_record();
         let mut edit = record.to_new();
         edit.publisher = None;
@@ -378,11 +1814,11 @@ mod tests {
 
         let draft = prefill_draft(&record);
         assert_eq!(draft.parent, None);
-        assert_eq!(draft.publisher, "");
-        assert_eq!(draft.published_year, "");
-        assert_eq!(draft.accessed_year, "");
+        assert_eq!(draft.fields[&F::Publisher], "");
+        assert_eq!(draft.fields[&F::Published], "");
+        assert_eq!(draft.fields[&F::Accessed], "");
         assert_eq!(draft.series, "");
-        assert_eq!(draft.series_number, "");
+        assert_eq!(draft.fields[&F::SeriesNumber], "");
         assert!(draft.creators.is_empty());
         // Title is never optional, so it still prefills.
         assert_eq!(draft.title, "Citation Networks");
@@ -390,16 +1826,17 @@ mod tests {
 
     #[test]
     fn build_update_applies_edits_and_clears_emptied() {
+        use super::BibliographicField as F;
         let record = loaded_record();
         let mut draft = draft_with("Retitled", record.to_new().creators);
         draft.kind = ResourceKind::Book;
         draft.parent = Some(ResourceId::generate());
-        draft.publisher = "Penguin".into();
-        draft.published_year = "2024".into();
-        draft.accessed_year = "".into();
+        draft.fields.insert(F::Publisher, "Penguin".into());
+        draft.fields.insert(F::Published, "2024".into());
+        draft.fields.insert(F::Accessed, "".into());
         // Series rides through untouched text.
         draft.series = record.series_id.expect("series set").to_string();
-        draft.series_number = "XL 1".into();
+        draft.fields.insert(F::SeriesNumber, "XL 1".into());
 
         let new = build_update(&record, &draft).expect("draft merges");
         assert_eq!(new.title.as_str(), "Retitled");
@@ -450,7 +1887,10 @@ mod tests {
     #[test]
     fn build_create_from_empty_draft_rejects_blank_title() {
         let err = build_create(&empty_create_draft()).expect_err("blank title");
-        assert_eq!(err, "Title must not be empty");
+        assert_eq!(
+            err,
+            FieldError::at(FormField::Title, "Title must not be empty")
+        );
     }
 
     #[test]
@@ -458,8 +1898,12 @@ mod tests {
         let author = PersonId::generate();
         let mut draft = empty_create_draft();
         draft.title = "Unsigned dictionary".into();
-        draft.publisher = "OUP".into();
-        draft.published_year = "2020".into();
+        draft
+            .fields
+            .insert(super::BibliographicField::Publisher, "OUP".into());
+        draft
+            .fields
+            .insert(super::BibliographicField::Published, "2020".into());
         draft.creators = vec![CreatorSpec {
             person_id: author,
             role: CreatorRole::Author,
@@ -471,6 +1915,10 @@ mod tests {
         assert_eq!(new.title.as_str(), "Unsigned dictionary");
         assert_eq!(new.publisher.as_deref(), Some("OUP"));
         assert_eq!(new.creators.len(), 1);
+        assert_eq!(
+            new.published.map(|date| date.instant()),
+            UtcMillis::jan_1_utc(2020)
+        );
         assert_eq!(new.parent_id, None);
         assert_eq!(new.accessed, None);
         assert_eq!(new.series_id, None);
@@ -518,20 +1966,32 @@ mod tests {
 
         let err = build_update(&record, &draft_with("   ", creators.clone()))
             .expect_err("blank title rejects");
-        assert_eq!(err, "Title must not be empty");
+        assert_eq!(
+            err,
+            FieldError::at(FormField::Title, "Title must not be empty")
+        );
 
         let mut draft = draft_with("Retitled", creators.clone());
-        draft.published_year = "soon".into();
-        let err = build_update(&record, &draft).expect_err("bad year rejects");
+        draft
+            .fields
+            .insert(super::BibliographicField::Published, "soon".into());
+        let err = build_update(&record, &draft).expect_err("bad date rejects");
         assert!(
-            err.contains("Published year"),
+            err.message.contains("Published"),
             "message names the field: {err}"
+        );
+        assert_eq!(
+            err.field,
+            Some(FormField::Bib(super::BibliographicField::Published))
         );
 
         let mut draft = draft_with("Retitled", creators);
         draft.series = "not-an-id".into();
         let err = build_update(&record, &draft).expect_err("bad series rejects");
-        assert!(err.contains("Series"), "message names the field: {err}");
+        assert_eq!(
+            err,
+            FieldError::at(FormField::Series, "Series must be a series id")
+        );
     }
 
     #[test]
@@ -550,5 +2010,163 @@ mod tests {
         for kind in ResourceKind::ALL {
             assert_eq!(items.iter().filter(|item| item.value() == &kind).count(), 1);
         }
+    }
+
+    #[test]
+    fn classify_identifier_honors_prefixes() {
+        use super::{IdentifierKind as K, classify_identifier};
+        for (text, kind, value) in [
+            (" DOI: 10.1/x ", K::Doi, "10.1/x"),
+            ("isbn:123", K::Isbn, "123"),
+            ("ISSN:abc", K::Issn, "abc"),
+            ("isrn:TEST-2024", K::Isrn, "TEST-2024"),
+            ("arXiv:2101.00001", K::Eprint, "2101.00001"),
+            ("eprint:custom", K::Eprint, "custom"),
+        ] {
+            assert_eq!(
+                classify_identifier(text),
+                Ok((kind, value.into())),
+                "{text}"
+            );
+        }
+        assert!(classify_identifier("doi:").is_err());
+    }
+
+    #[test]
+    fn classify_identifier_reads_doi_urls_and_bare_dois() {
+        use super::{IdentifierKind as K, classify_identifier};
+        for text in [
+            "https://doi.org/10.1000/xyz",
+            "http://dx.doi.org/10.1000/xyz",
+            "https://dx.doi.org/10.1000/xyz",
+            "10.1000/xyz",
+        ] {
+            assert_eq!(
+                classify_identifier(text),
+                Ok((K::Doi, "10.1000/xyz".into())),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_identifier_checks_isbn_checksums() {
+        use super::{IdentifierKind as K, classify_identifier};
+        for text in [
+            "978-0-306-40615-7",
+            "9780306406157",
+            "0-306-40615-2",
+            "080442957X",
+        ] {
+            assert_eq!(
+                classify_identifier(text),
+                Ok((K::Isbn, text.into())),
+                "{text}"
+            );
+        }
+        for text in ["978-0-306-40615-8", "0-306-40615-3", "1230306406157"] {
+            assert_eq!(
+                classify_identifier(text),
+                Err(super::UNRECOGNIZED_IDENTIFIER.into()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_identifier_reads_issns_and_arxiv_ids() {
+        use super::{IdentifierKind as K, classify_identifier};
+        for text in ["2049-3630", "0378595x", "1234567X"] {
+            assert_eq!(
+                classify_identifier(text),
+                Ok((K::Issn, text.into())),
+                "{text}"
+            );
+        }
+        for text in [
+            "2101.00001",
+            "1501.0001v2",
+            "hep-th/9901001",
+            "math.GT/0309136",
+        ] {
+            assert_eq!(
+                classify_identifier(text),
+                Ok((K::Eprint, text.into())),
+                "{text}"
+            );
+        }
+        for text in [
+            "2101.001",
+            "1501.00001v",
+            "Hep-th/9901001",
+            "math.gt/0309136",
+            "TEST-2024",
+        ] {
+            assert_eq!(
+                classify_identifier(text),
+                Err(super::UNRECOGNIZED_IDENTIFIER.into()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn identifier_tokens_round_trip_through_the_draft() {
+        use super::{IdentifierKind as K, apply_identifier_tokens, identifier_tokens};
+        let mut record = loaded_record();
+        record.doi = Some("10.1000/xyz".into());
+        record.eprint = Some("2101.00001".into());
+        record.isbns = vec![
+            ibex_core::Identifier {
+                original: "978-0-306-40615-7".into(),
+                canonical: Some("custom-key".into()),
+            },
+            ibex_core::Identifier::new("0-306-40615-2"),
+        ];
+        record.issns = vec![ibex_core::Identifier::new("2049-3630")];
+        record.isrns = vec![ibex_core::Identifier::new("TEST-2024")];
+        let mut draft = prefill_draft(&record);
+        let tokens = identifier_tokens(&draft);
+        assert_eq!(
+            tokens,
+            vec![
+                (K::Doi, "10.1000/xyz".into()),
+                (K::Eprint, "2101.00001".into()),
+                (K::Isbn, "978-0-306-40615-7".into()),
+                (K::Isbn, "0-306-40615-2".into()),
+                (K::Issn, "2049-3630".into()),
+                (K::Isrn, "TEST-2024".into()),
+            ]
+        );
+        for field in super::IDENTIFIER_FIELDS.map(|(field, _)| field) {
+            draft.fields.remove(&field);
+        }
+        apply_identifier_tokens(&mut draft, &tokens).unwrap();
+        assert_eq!(build_update(&record, &draft).unwrap(), record.to_new());
+    }
+
+    #[test]
+    fn apply_identifier_tokens_allows_one_doi_and_one_eprint() {
+        use super::{IdentifierKind as K, apply_identifier_tokens};
+        let record = loaded_record();
+        let mut draft = prefill_draft(&record);
+        let err = apply_identifier_tokens(
+            &mut draft,
+            &[(K::Doi, "10.1/a".into()), (K::Doi, "10.1/b".into())],
+        )
+        .unwrap_err();
+        assert_eq!(err, FieldError::at(FormField::Identifiers, "Only one DOI"));
+        let err = apply_identifier_tokens(
+            &mut draft,
+            &[
+                (K::Eprint, "2101.00001".into()),
+                (K::Eprint, "2101.00002".into()),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            FieldError::at(FormField::Identifiers, "Only one eprint")
+        );
     }
 }

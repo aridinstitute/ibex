@@ -7,10 +7,13 @@
 #[path = "resource_grid.rs"]
 mod resource_grid;
 use resource_grid::ResourceGrid;
+#[path = "series_picker.rs"]
+mod series_picker;
+use series_picker::{SeriesChoice, SeriesDelegate};
 
 use std::{
     any::Any,
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     ops::Range,
     path::PathBuf,
     time::{Duration, Instant},
@@ -21,7 +24,7 @@ use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::base::{Transition as MotionTransition, transition};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
-use gpui_kit::component::input::{Enter, Input, InputEvent, InputState};
+use gpui_kit::component::input::{Enter, Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::resizable::resize_handle;
 use gpui_kit::component::searchable_list::{SearchableListItem, SearchableVec};
@@ -40,8 +43,8 @@ use ibex_core::{
     NonEmptyStr, ParentRule, Person, PersonChoice as ImportPersonChoice, PersonId,
     PersonMatchPreview, PublishedRange, Resource, ResourceCounts, ResourceDetail, ResourceFilter,
     ResourceGridPage, ResourceGridParent, ResourceId, ResourceKind, ResourceQuery, ResourceSort,
-    ResourceSummary, SortDirection, Tag, TagId, UtcMillis, format_recorded_date,
-    keyword_suggestions,
+    ResourceSummary, SortDirection, Tag, TagId, UtcMillis, ValueOrigin, format_published_label,
+    format_recorded_date, keyword_suggestions,
 };
 
 use crate::classification_rules::{ClassificationRules, ClassificationRulesSaved};
@@ -57,14 +60,15 @@ use crate::detail::{
 };
 use crate::documentation::{DocumentationWindow, OpenDocumentation};
 use crate::edit::{
-    EditDraft, KindItem, build_create, build_update, creators_from_person_ids, kind_items,
-    prefill_draft,
+    BibliographicField, EditDraft, FieldError, IdentifierKind, KindItem, apply_identifier_tokens,
+    build_create, build_update, classify_identifier, identifier_tokens, kind_items, prefill_draft,
 };
+use crate::edit_layout::{self, FormField, Section};
 use crate::icons::symbol;
 use crate::import_dialog::{ConflictPolicy, ImportConfirmed, ImportDialog};
 use crate::inline_edit::{
     InlineField, InlineRowEdit, InlineSession, PersonChoice, PersonDelegate,
-    creators_badge_trigger, person_items, person_name_from_query, selected_person_ids,
+    creators_badge_trigger, person_name_from_query, selected_person_ids,
 };
 use crate::kind::{kind_color, kind_label, kind_symbol};
 use crate::settings::{Settings, ThemeColorTarget};
@@ -72,7 +76,7 @@ use crate::tags::{TagChoice, TagDelegate};
 use crate::theme_editor::{ThemeEditor, ThemeEditorEvent};
 use gpui_kit::component::Disableable as _;
 use gpui_kit::component::popover::Popover;
-use ibex_app::command::ImportReport;
+use ibex_app::command::{ImportReport, InheritancePreview};
 
 /// Rows fetched per scroll trigger. Small enough to feel incremental, large
 /// enough that the demo library spans several pages.
@@ -238,7 +242,7 @@ fn compact_menu_item(
     handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> PopupMenuItem {
     let label = label.into();
-    PopupMenuItem::element(move |_, _| div().text_size(px(12.)).child(label.clone()))
+    PopupMenuItem::element(move |_, _| div().text_size(rems(1.)).child(label.clone()))
         .on_click(handler)
 }
 
@@ -248,6 +252,26 @@ struct CollectionDrag {
     id: CollectionId,
     name: SharedString,
     from_parent: Option<CollectionId>,
+}
+
+#[derive(Clone)]
+struct CreatorDrag {
+    form: EntityId,
+    key: u64,
+    position: usize,
+    name: SharedString,
+}
+
+impl Render for CreatorDrag {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().popover_foreground)
+            .child(self.name.clone())
+    }
 }
 
 struct CollectionDragGhost {
@@ -262,7 +286,7 @@ impl Render for CollectionDragGhost {
             .rounded(px(6.))
             .bg(cx.theme().popover)
             .text_color(cx.theme().popover_foreground)
-            .text_size(px(12.))
+            .text_size(rems(1.))
             .border_1()
             .border_color(cx.theme().border)
             .child(self.name.clone())
@@ -315,15 +339,15 @@ const COLUMN_KEYS: [&str; COLUMNS] = [
 /// grid opens readable on narrower windows.
 const DEFAULT_TITLE_WIDTH: f32 = 310.;
 
-const CELL_TEXT_SIZE: Pixels = px(12.);
+const CELL_TEXT_SIZE: Rems = rems(1.);
 /// Inline editors read slightly larger than static cells so the caret and
 /// typed text stay obvious on the accent row.
-const INLINE_CELL_TEXT_SIZE: Pixels = px(13.);
+const INLINE_CELL_TEXT_SIZE: Rems = rems(1.1);
 /// Kind dropdown is wider than the 28px icon column so labels aren't clipped.
 const INLINE_KIND_MENU_WIDTH: Pixels = px(220.);
 /// Header labels are one step below the cell text; the kit's default
 /// `text_xs` reads too small at this base font size.
-const HEADER_TEXT_SIZE: Pixels = px(10.);
+const HEADER_TEXT_SIZE: Rems = rems(0.9);
 
 pub struct LibraryDelegate {
     worker: DbWorker,
@@ -1192,7 +1216,7 @@ impl TableDelegate for LibraryDelegate {
                         .w_full(),
                 ),
                 COL_PUBLISHED => cell.child(
-                    Input::new(&form.published_year)
+                    Input::new(&form.published)
                         .appearance(false)
                         .text_size(INLINE_CELL_TEXT_SIZE)
                         .text_color(muted)
@@ -1674,7 +1698,7 @@ fn step_inline_field(
                 form.kind.clone(),
                 form.title.clone(),
                 form.creators.clone(),
-                form.published_year.clone(),
+                form.published.clone(),
                 form.publisher.clone(),
             ),
             form.active_field,
@@ -1933,6 +1957,7 @@ pub struct LibraryApp {
     /// fetched, ready once the inputs exist. One form at a time, owned by
     /// the row it was opened on.
     edit: Option<EditFetch>,
+    edit_generation: u64,
     /// Per-id generation for detail fetches. Saving an edit bumps its id's
     /// generation; a reply from a fetch issued before the bump is dropped
     /// instead of re-caching the pre-edit detail.
@@ -1953,6 +1978,925 @@ enum EditFetch {
     Ready(Box<EditForm>),
 }
 
+/// One text input for a date, in any form `date_preview` reads. The draft
+/// keeps the exact spelling, so an untouched imported date saves back
+/// unchanged; the preview row shows how the text will be stored.
+struct DetailsDateInput {
+    owner: WeakEntity<LibraryApp>,
+    field: BibliographicField,
+    input: Entity<InputState>,
+    calendar: Entity<gpui_kit::component::calendar::CalendarState>,
+    show_calendar: bool,
+    display: Option<Entity<InputState>>,
+    show_display: bool,
+    _subscriptions: Vec<Subscription>,
+}
+impl DetailsDateInput {
+    fn new(
+        field: BibliographicField,
+        value: String,
+        owner: WeakEntity<LibraryApp>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        use gpui_kit::component::calendar::{CalendarEvent, CalendarState};
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(value)
+                .placeholder("e.g. 1991, March 1991, 1990–1995, c. 1850")
+        });
+        let calendar = cx.new(|cx| CalendarState::new(window, cx));
+        let subscriptions = vec![
+            cx.subscribe(&input, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
+            cx.subscribe_in(&calendar, window, |this, _, event, window, cx| {
+                let CalendarEvent::Selected(date) = event;
+                if let Some(day) = date.start() {
+                    this.input.update(cx, |input, cx| {
+                        input.set_value(day.format("%Y-%m-%d").to_string(), window, cx)
+                    });
+                }
+                this.show_calendar = false;
+                cx.notify();
+            }),
+        ];
+        Self {
+            owner,
+            field,
+            input,
+            calendar,
+            show_calendar: false,
+            display: None,
+            show_display: false,
+            _subscriptions: subscriptions,
+        }
+    }
+    fn value(&self, cx: &App) -> String {
+        self.input.read(cx).value().to_string()
+    }
+}
+impl Render for DetailsDateInput {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::component::calendar::{Calendar, Date};
+        let disabled = self.owner.upgrade().is_none_or(
+            |owner| matches!(&owner.read(cx).edit, Some(EditFetch::Ready(form)) if form.saving),
+        );
+        let preview = crate::edit::date_preview(self.field, &self.value(cx));
+        let (preview, color) = match preview {
+            Ok(preview) => (preview, cx.theme().muted_foreground),
+            Err(error) => (error.message, cx.theme().danger),
+        };
+        v_flex()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .w_full()
+                    .child(
+                        Input::new(&self.input)
+                            .id("date-input")
+                            .small()
+                            .aria_label(self.field.label())
+                            .disabled(disabled)
+                            .w_full(),
+                    )
+                    .child(
+                        Button::new("date-calendar")
+                            .ghost()
+                            .small()
+                            .icon(Icon::new(IconName::Calendar).small())
+                            .accessibility_label("Pick a day")
+                            .tooltip("Pick a day")
+                            .selected(self.show_calendar)
+                            .disabled(disabled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_calendar = !this.show_calendar;
+                                if this.show_calendar {
+                                    let day = this.value(cx).trim().parse().ok();
+                                    this.calendar.update(cx, |calendar, cx| {
+                                        calendar.set_date(Date::Single(day), window, cx)
+                                    });
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("date-clear")
+                            .ghost()
+                            .small()
+                            .icon(Icon::new(IconName::Close).small())
+                            .accessibility_label("Clear date")
+                            .tooltip("Clear date")
+                            .disabled(disabled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                for input in std::iter::once(&this.input).chain(this.display.iter())
+                                {
+                                    input.update(cx, |input, cx| input.set_value("", window, cx));
+                                }
+                                this.show_calendar = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(self.show_calendar && !disabled, |content| {
+                content.child(Calendar::new(&self.calendar).small())
+            })
+            .when(!preview.is_empty(), |content| {
+                content.child(
+                    div()
+                        .id("date-preview")
+                        .test_support()
+                        .aria_label(preview.clone())
+                        .text_xs()
+                        .text_color(color)
+                        .child(preview),
+                )
+            })
+            .when_some(self.display.clone(), |content, display| {
+                if !self.show_display {
+                    return content.child(
+                        Button::new("date-display-toggle")
+                            .ghost()
+                            .xsmall()
+                            .label("Display as…")
+                            .disabled(disabled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_display = true;
+                                if let Some(display) = &this.display {
+                                    display.update(cx, |input, cx| input.focus(window, cx));
+                                }
+                                cx.notify();
+                            })),
+                    );
+                }
+                content.child(
+                    div()
+                        .id("date-display-help")
+                        .w_full()
+                        .tooltip(|window, cx| {
+                            Tooltip::new("Changes citation text, not the stored date")
+                                .build(window, cx)
+                        })
+                        .child(
+                            Input::new(&display)
+                                .id("date-display")
+                                .small()
+                                .aria_label("Display as")
+                                .disabled(disabled)
+                                .w_full(),
+                        ),
+                )
+            })
+    }
+}
+struct DetailsTokens {
+    owner: WeakEntity<LibraryApp>,
+    tokens: Vec<String>,
+    pending: Entity<InputState>,
+    error: Option<&'static str>,
+    _subscription: Subscription,
+}
+impl DetailsTokens {
+    fn new(
+        value: String,
+        owner: WeakEntity<LibraryApp>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let pending = cx.new(|cx| InputState::new(window, cx).placeholder("Add an entry…"));
+        let subscription = cx.subscribe_in(&pending, window, |this, _, event, window, cx| {
+            if matches!(
+                event,
+                InputEvent::PressEnter {
+                    secondary: false,
+                    ..
+                }
+            ) {
+                this.add(window, cx);
+            }
+        });
+        Self {
+            owner,
+            tokens: value.lines().map(str::to_owned).collect(),
+            pending,
+            error: None,
+            _subscription: subscription,
+        }
+    }
+    fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self.pending.read(cx).value().to_string();
+        if value.trim().is_empty() || value.chars().any(char::is_control) {
+            self.error = Some("Enter a non-empty entry without control characters");
+        } else {
+            self.tokens.push(value);
+            self.pending
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.error = None;
+        }
+        cx.notify();
+    }
+    fn pending_error(&self, cx: &App) -> Option<&'static str> {
+        let value = self.pending.read(cx).value();
+        (!value.is_empty() && (value.trim().is_empty() || value.chars().any(char::is_control)))
+            .then_some("Enter a non-empty entry without control characters")
+    }
+    fn value(&self, cx: &App) -> String {
+        let mut values = self.tokens.clone();
+        let pending = self.pending.read(cx).value().to_string();
+        if !pending.is_empty() {
+            values.push(pending);
+        }
+        values.join("\n")
+    }
+}
+impl Render for DetailsTokens {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let disabled = self.owner.upgrade().is_none_or(
+            |owner| matches!(&owner.read(cx).edit, Some(EditFetch::Ready(form)) if form.saving),
+        );
+        v_flex()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if !disabled
+                    && event.keystroke.key == "backspace"
+                    && this.pending.read(cx).focus_handle(cx).is_focused(window)
+                    && this.pending.read(cx).value().is_empty()
+                    && !this.tokens.is_empty()
+                {
+                    this.tokens.pop();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .child(h_flex().gap_1().flex_wrap().w_full().children(
+                self.tokens.iter().enumerate().map(|(ix, token)| {
+                    h_flex()
+                        .gap_1()
+                        .max_w_full()
+                        .min_w_0()
+                        .rounded_sm()
+                        .bg(cx.theme().secondary)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .child(token.clone()),
+                        )
+                        .child(
+                            Button::new(("token-remove", ix))
+                                .small()
+                                .ghost()
+                                .label("×")
+                                .tooltip(format!("Remove {token}"))
+                                .accessibility_label(format!("Remove {token}"))
+                                .disabled(disabled)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.tokens.remove(ix);
+                                    cx.notify();
+                                })),
+                        )
+                }),
+            ))
+            .child(
+                Input::new(&self.pending)
+                    .id("token-input")
+                    .small()
+                    .disabled(disabled)
+                    .w_full(),
+            )
+            .child(
+                Button::new("token-add")
+                    .small()
+                    .outline()
+                    .label("Add")
+                    .disabled(disabled)
+                    .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
+            )
+            .children(
+                self.error
+                    .map(|error| div().text_sm().text_color(cx.theme().danger).child(error)),
+            )
+    }
+}
+/// The identifiers row: one list of typed entries (DOI, ISBN, ISSN, ISRN,
+/// arXiv), each sorted into its stored field by [`classify_identifier`].
+struct IdentifierTokens {
+    owner: WeakEntity<LibraryApp>,
+    tokens: Vec<(IdentifierKind, String)>,
+    pending: Entity<InputState>,
+    error: Option<String>,
+    _subscription: Subscription,
+}
+impl IdentifierTokens {
+    fn new(
+        tokens: Vec<(IdentifierKind, String)>,
+        owner: WeakEntity<LibraryApp>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let pending = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Add a DOI, ISBN, ISSN, ISRN, or arXiv id…")
+        });
+        let subscription = cx.subscribe_in(&pending, window, |this, _, event, window, cx| {
+            if matches!(
+                event,
+                InputEvent::PressEnter {
+                    secondary: false,
+                    ..
+                }
+            ) {
+                this.add(window, cx);
+            }
+        });
+        Self {
+            owner,
+            tokens,
+            pending,
+            error: None,
+            _subscription: subscription,
+        }
+    }
+    fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match classify_identifier(&self.pending.read(cx).value()) {
+            Ok(token) => {
+                self.tokens.push(token);
+                self.pending
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
+        cx.notify();
+    }
+    /// The entries to save: the list plus typed-but-unadded text, or the
+    /// reason that text is not an identifier.
+    fn tokens(&self, cx: &App) -> Result<Vec<(IdentifierKind, String)>, String> {
+        let mut tokens = self.tokens.clone();
+        let pending = self.pending.read(cx).value();
+        if !pending.is_empty() {
+            tokens.push(classify_identifier(&pending)?);
+        }
+        Ok(tokens)
+    }
+    fn is_empty(&self, cx: &App) -> bool {
+        self.tokens.is_empty() && self.pending.read(cx).value().trim().is_empty()
+    }
+    fn holds(&self, kind: IdentifierKind, cx: &App) -> bool {
+        self.tokens(cx)
+            .is_ok_and(|tokens| tokens.iter().any(|(token, _)| *token == kind))
+    }
+}
+impl Render for IdentifierTokens {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let disabled = self.owner.upgrade().is_none_or(
+            |owner| matches!(&owner.read(cx).edit, Some(EditFetch::Ready(form)) if form.saving),
+        );
+        v_flex()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .capture_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if !disabled
+                    && event.keystroke.key == "backspace"
+                    && this.pending.read(cx).focus_handle(cx).is_focused(window)
+                    && this.pending.read(cx).value().is_empty()
+                    && !this.tokens.is_empty()
+                {
+                    this.tokens.pop();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .children(self.tokens.iter().enumerate().map(|(ix, (kind, value))| {
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .id(("identifier-badge", ix))
+                            .test_support()
+                            .aria_label(kind.badge())
+                            .px_1()
+                            .rounded_sm()
+                            .text_xs()
+                            .bg(cx.theme().secondary)
+                            .child(kind.badge()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(value.clone()),
+                    )
+                    .child(
+                        Button::new(("identifier-remove", ix))
+                            .small()
+                            .ghost()
+                            .label("×")
+                            .tooltip(format!("Remove {value}"))
+                            .accessibility_label(format!("Remove {value}"))
+                            .disabled(disabled)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.tokens.remove(ix);
+                                cx.notify();
+                            })),
+                    )
+            }))
+            .child(
+                Input::new(&self.pending)
+                    .id("identifier-input")
+                    .small()
+                    .aria_label("Identifier")
+                    .disabled(disabled)
+                    .w_full(),
+            )
+            .child(
+                Button::new("identifier-add")
+                    .small()
+                    .outline()
+                    .label("Add")
+                    .disabled(disabled)
+                    .on_click(cx.listener(|this, _, window, cx| this.add(window, cx))),
+            )
+            .children(
+                self.error
+                    .clone()
+                    .map(|error| div().text_sm().text_color(cx.theme().danger).child(error)),
+            )
+    }
+}
+fn details_suggestion_field(field: BibliographicField) -> Option<ibex_core::ResourceTextField> {
+    use BibliographicField as F;
+    use ibex_core::ResourceTextField as S;
+    Some(match field {
+        F::Publisher => S::Publisher,
+        F::Language => S::Language,
+        F::Institution => S::Institution,
+        F::Organization => S::Organization,
+        F::DocumentType => S::DocumentType,
+        F::PublicationMethod => S::PublicationMethod,
+        _ => return None,
+    })
+}
+#[derive(Clone)]
+struct DetailsValueItem {
+    label: SharedString,
+    value: String,
+}
+impl SearchableListItem for DetailsValueItem {
+    type Value = String;
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+    fn value(&self) -> &String {
+        &self.value
+    }
+    fn display_title(&self) -> Option<AnyElement> {
+        Some(div().child(self.value.clone()).into_any_element())
+    }
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div()
+            .id(SharedString::from(format!("value-option-{}", self.value)))
+            .aria_label(self.label.clone())
+            .test_support()
+            .child(self.label.clone())
+    }
+}
+struct DetailsValueDelegate {
+    field: ibex_core::ResourceTextField,
+    owner: WeakEntity<DetailsSuggestions>,
+    staged: std::rc::Rc<std::cell::RefCell<String>>,
+    query: String,
+    rows: Vec<DetailsValueItem>,
+    library: Vec<String>,
+}
+impl DetailsValueDelegate {
+    fn new(
+        field: ibex_core::ResourceTextField,
+        owner: WeakEntity<DetailsSuggestions>,
+        staged: std::rc::Rc<std::cell::RefCell<String>>,
+        library: Vec<String>,
+        query: String,
+    ) -> Self {
+        let mut this = Self {
+            field,
+            owner,
+            staged,
+            query,
+            rows: Vec::new(),
+            library,
+        };
+        this.filter();
+        this
+    }
+    fn filter(&mut self) {
+        use ibex_core::ResourceTextField as F;
+        // Practical common languages, not a complete ISO catalog. Imported spelling
+        // stays a separate value until the user explicitly chooses a code.
+        let known: &[(&str, &str)] = match self.field {
+            F::Language => &[
+                ("en", "English"),
+                ("de", "German"),
+                ("fr", "French"),
+                ("es", "Spanish"),
+                ("it", "Italian"),
+                ("pt", "Portuguese"),
+                ("nl", "Dutch"),
+                ("ru", "Russian"),
+                ("uk", "Ukrainian"),
+                ("zh", "Chinese"),
+                ("ja", "Japanese"),
+                ("ko", "Korean"),
+                ("ar", "Arabic"),
+                ("he", "Hebrew"),
+                ("hi", "Hindi"),
+                ("sv", "Swedish"),
+                ("no", "Norwegian"),
+                ("da", "Danish"),
+                ("fi", "Finnish"),
+                ("pl", "Polish"),
+                ("cs", "Czech"),
+                ("el", "Greek"),
+                ("tr", "Turkish"),
+                ("la", "Latin"),
+                ("fa", "Persian"),
+                ("id", "Indonesian"),
+                ("vi", "Vietnamese"),
+            ],
+            F::DocumentType => &[
+                ("PhD thesis", "PhD thesis"),
+                ("Master's thesis", "Master's thesis"),
+                ("Bachelor's thesis", "Bachelor's thesis"),
+                ("Technical report", "Technical report"),
+                ("Working paper", "Working paper"),
+                ("White paper", "White paper"),
+                ("Policy brief", "Policy brief"),
+                ("Letter", "Letter"),
+                ("Draft", "Draft"),
+            ],
+            F::PublicationMethod => &[
+                ("Print", "Print"),
+                ("Online", "Online"),
+                ("Electronic", "Electronic"),
+                ("Manuscript", "Manuscript"),
+                ("Preprint", "Preprint"),
+            ],
+            _ => &[],
+        };
+        let needle = self.query.to_lowercase();
+        let mut options: Vec<_> = known
+            .iter()
+            .map(|(code, name)| DetailsValueItem {
+                label: if code == name {
+                    (*name).into()
+                } else {
+                    format!("{code} — {name}").into()
+                },
+                value: (*code).into(),
+            })
+            .collect();
+        for value in self
+            .library
+            .iter()
+            .chain(std::iter::once(&*self.staged.borrow()).filter(|_| self.query.is_empty()))
+        {
+            if !value.is_empty() && !options.iter().any(|item| item.value == *value) {
+                options.push(DetailsValueItem {
+                    label: value.clone().into(),
+                    value: value.clone(),
+                });
+            }
+        }
+        self.rows = options
+            .into_iter()
+            .filter(|item| {
+                item.label.to_lowercase().contains(&needle)
+                    || item.value.to_lowercase().contains(&needle)
+            })
+            .collect();
+        // Select::set_items retains its committed snapshot only when the new
+        // delegate can still resolve it. Keep that value available during search.
+        let current = self.staged.borrow().clone();
+        if !current.is_empty() && !self.rows.iter().any(|item| item.value == current) {
+            self.rows.push(DetailsValueItem {
+                label: current.clone().into(),
+                value: current,
+            });
+        }
+        if !self.query.is_empty() && !self.rows.iter().any(|item| item.value == self.query) {
+            self.rows.push(DetailsValueItem {
+                label: format!("Use “{}”", self.query).into(),
+                value: self.query.clone(),
+            });
+        }
+    }
+}
+impl gpui_kit::component::searchable_list::SearchableListDelegate for DetailsValueDelegate {
+    type Item = DetailsValueItem;
+    fn items_count(&self, _: usize) -> usize {
+        self.rows.len()
+    }
+    fn item(&self, ix: IndexPath) -> Option<&DetailsValueItem> {
+        self.rows.get(ix.row)
+    }
+    fn position<V>(&self, value: &V) -> Option<IndexPath>
+    where
+        DetailsValueItem: SearchableListItem<Value = V>,
+        V: PartialEq,
+    {
+        self.rows
+            .iter()
+            .position(|item| item.value() == value)
+            .map(IndexPath::new)
+    }
+    fn perform_search(&mut self, query: &str, window: &mut Window, cx: &mut App) -> Task<()> {
+        self.query = query.to_owned();
+        self.filter();
+        let field = self.field;
+        let query = self.query.clone();
+        let _ = self
+            .owner
+            .update(cx, |owner, cx| owner.request(field, query, window, cx));
+        Task::ready(())
+    }
+    fn on_will_change(
+        &mut self,
+        selection: &mut Vec<(IndexPath, DetailsValueItem)>,
+        changes: &[gpui_kit::component::searchable_list::SearchableListChange],
+    ) {
+        use gpui_kit::component::searchable_list::SearchableListChange;
+        for change in changes {
+            match change {
+                SearchableListChange::Select { index } => {
+                    if let Some(item) = self.rows.get(index.row) {
+                        selection.push((*index, item.clone()));
+                    }
+                }
+                SearchableListChange::Deselect { index } => selection.retain(|(ix, _)| ix != index),
+            }
+        }
+        *self.staged.borrow_mut() = selection
+            .first()
+            .map(|(_, item)| item.value.clone())
+            .unwrap_or_default();
+        self.query.clear();
+    }
+}
+struct DetailsValueControl {
+    picker: Entity<gpui_kit::component::select::SelectState<DetailsValueDelegate>>,
+    staged: std::rc::Rc<std::cell::RefCell<String>>,
+    field: ibex_core::ResourceTextField,
+}
+impl DetailsValueControl {
+    fn new(
+        field: ibex_core::ResourceTextField,
+        value: String,
+        owner: &Entity<DetailsSuggestions>,
+        window: &mut Window,
+        cx: &mut Context<LibraryApp>,
+    ) -> Self {
+        let staged = std::rc::Rc::new(std::cell::RefCell::new(value.clone()));
+        let delegate = DetailsValueDelegate::new(
+            field,
+            owner.downgrade(),
+            staged.clone(),
+            Vec::new(),
+            String::new(),
+        );
+        let selected = delegate
+            .rows
+            .iter()
+            .position(|item| item.value == value)
+            .map(IndexPath::new);
+        let picker = cx.new(|cx| {
+            gpui_kit::component::select::SelectState::new(delegate, selected, window, cx)
+                .searchable(true)
+        });
+        let clear_value = staged.clone();
+        cx.subscribe(&picker, move |_, _, event, _| {
+            let gpui_kit::component::select::SelectEvent::Confirm(value) = event;
+            *clear_value.borrow_mut() = value.clone().unwrap_or_default();
+        })
+        .detach();
+        owner.update(cx, |owner, cx| {
+            owner.pickers.insert(
+                field,
+                DetailsSuggestionTarget {
+                    picker: picker.downgrade(),
+                    staged: staged.clone(),
+                },
+            );
+            owner.request(field, String::new(), window, cx);
+        });
+        Self {
+            picker,
+            staged,
+            field,
+        }
+    }
+    fn render(&self, disabled: bool) -> AnyElement {
+        gpui_kit::component::select::Select::new(&self.picker)
+            .id("value-select")
+            .small()
+            .accessibility_label(self.field.as_str())
+            .cleanable(true)
+            .search_placeholder("Search or enter a value…")
+            .placeholder("Select or enter…")
+            .disabled(disabled)
+            .w_full()
+            .into_any_element()
+    }
+}
+/// One retained request owner per form. Weak picker identity plus its live query
+/// prevent a late reply from replacing another editor's options.
+#[derive(Clone)]
+struct DetailsSuggestionTarget {
+    picker: WeakEntity<gpui_kit::component::select::SelectState<DetailsValueDelegate>>,
+    staged: std::rc::Rc<std::cell::RefCell<String>>,
+}
+struct DetailsSuggestions {
+    worker: DbWorker,
+    pickers: HashMap<ibex_core::ResourceTextField, DetailsSuggestionTarget>,
+    tasks: HashMap<ibex_core::ResourceTextField, Task<()>>,
+    queries: HashMap<ibex_core::ResourceTextField, String>,
+}
+impl DetailsSuggestions {
+    fn request(
+        &mut self,
+        field: ibex_core::ResourceTextField,
+        query: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.pickers.get(&field).cloned() else {
+            return;
+        };
+        let worker = self.worker.clone();
+        let weak_owner = cx.entity().downgrade();
+        self.queries.insert(field, query.clone());
+        self.tasks.insert(
+            field,
+            cx.spawn_in(window, async move |owner, window| {
+                let result = worker.suggest_field_values(field, query.clone(), 30).await;
+                let _ = owner.update_in(window, |owner, window, cx| {
+                    let Some(picker) = target.picker.upgrade() else {
+                        return;
+                    };
+                    if owner.queries.get(&field) != Some(&query) {
+                        return;
+                    }
+                    // A suggestion failure must never prevent custom typing or saving.
+                    if let Ok(library) = result {
+                        picker.update(cx, |picker, cx| {
+                            picker.set_items(
+                                DetailsValueDelegate::new(
+                                    field,
+                                    weak_owner,
+                                    target.staged,
+                                    library,
+                                    query,
+                                ),
+                                window,
+                                cx,
+                            );
+                            cx.notify();
+                        });
+                    }
+                });
+            }),
+        );
+    }
+}
+enum BibliographicInput {
+    Value(DetailsValueControl),
+    Tokens(Entity<DetailsTokens>),
+    Date(Entity<DetailsDateInput>),
+    Single(Entity<InputState>),
+    Multiline(Entity<TextareaState>),
+}
+impl BibliographicInput {
+    fn value(&self, cx: &App) -> String {
+        match self {
+            Self::Date(input) => input.read(cx).value(cx),
+            Self::Tokens(input) => input.read(cx).value(cx),
+            Self::Value(input) => input.staged.borrow().clone(),
+            Self::Single(input) => input.read(cx).value().to_string(),
+            Self::Multiline(input) => input.read(cx).value().to_string(),
+        }
+    }
+    fn render(&self, field: BibliographicField, disabled: bool) -> AnyElement {
+        match self {
+            Self::Date(input) => input.clone().into_any_element(),
+            Self::Tokens(input) => input.clone().into_any_element(),
+            Self::Value(input) => input.render(disabled),
+            Self::Single(input) => Input::new(input)
+                .small()
+                .aria_label(field.label())
+                .disabled(disabled)
+                .w_full()
+                .into_any_element(),
+            Self::Multiline(input) => Textarea::new(input)
+                .small()
+                .aria_label(field.label())
+                .disabled(disabled)
+                .w_full()
+                .into_any_element(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CreatorRoleItem(ibex_core::CreatorRole);
+impl SearchableListItem for CreatorRoleItem {
+    type Value = ibex_core::CreatorRole;
+    fn title(&self) -> SharedString {
+        format!("{:?}", self.0).into()
+    }
+    fn value(&self) -> &Self::Value {
+        &self.0
+    }
+}
+/// A creator menu item with an element id, which `PopupMenuItem::new`
+/// cannot carry, so tests can click it.
+fn creator_menu_item(id: String, label: &'static str) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .id(SharedString::from(id.clone()))
+            .test_support()
+            .child(label)
+    })
+}
+
+struct CreatorRow {
+    key: u64,
+    person_id: PersonId,
+    name: String,
+    role: Entity<ComboboxState<SearchableVec<CreatorRoleItem>>>,
+    credited_as: Entity<InputState>,
+    show_credit: bool,
+}
+impl CreatorRow {
+    fn new(
+        key: u64,
+        spec: ibex_core::CreatorSpec,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<LibraryApp>,
+    ) -> Self {
+        use ibex_core::CreatorRole::*;
+        let roles = vec![Author, Editor, Translator, Contributor, Host, Director];
+        let selected = roles.iter().position(|role| *role == spec.role).unwrap();
+        let show_credit = spec.credited_as.is_some();
+        Self {
+            key,
+            person_id: spec.person_id,
+            name,
+            role: cx.new(|cx| {
+                ComboboxState::new(
+                    SearchableVec::new(roles.into_iter().map(CreatorRoleItem).collect::<Vec<_>>()),
+                    vec![IndexPath::new(selected)],
+                    window,
+                    cx,
+                )
+                .searchable(true)
+            }),
+            credited_as: prefill_input(
+                spec.credited_as
+                    .map(|s| s.as_str().to_owned())
+                    .unwrap_or_default(),
+                "Credited as (optional)",
+                window,
+                cx,
+            ),
+            show_credit,
+        }
+    }
+    fn spec(&self, cx: &App) -> ibex_core::CreatorSpec {
+        ibex_core::CreatorSpec {
+            person_id: self.person_id,
+            role: self
+                .role
+                .read(cx)
+                .selected_values()
+                .first()
+                .copied()
+                .unwrap_or(ibex_core::CreatorRole::Author),
+            credited_as: NonEmptyStr::try_new(self.credited_as.read(cx).value().trim()).ok(),
+        }
+    }
+}
+
 /// The edit form's widgets plus the raw record they edit. Inputs are
 /// prefilled from the record at construction; saving reads them back into
 /// an [`EditDraft`] and builds the full-replace payload. The parent box
@@ -1965,19 +2909,30 @@ struct EditForm {
     kind: Entity<ComboboxState<SearchableVec<KindItem>>>,
     parent: Entity<ComboboxState<SearchableVec<ParentItem>>>,
     creators: Entity<ComboboxState<PersonDelegate>>,
-    publisher: Entity<InputState>,
-    published_year: Entity<InputState>,
-    accessed_year: Entity<InputState>,
-    series: Entity<InputState>,
-    series_number: Entity<InputState>,
+    creator_rows: Vec<CreatorRow>,
+    next_creator_key: u64,
+    people_names: HashMap<PersonId, String>,
+    /// Every bibliographic input except the identifiers, which share
+    /// `identifiers`.
+    fields: BTreeMap<BibliographicField, BibliographicInput>,
+    identifiers: Entity<IdentifierTokens>,
+    _value_suggestions: Entity<DetailsSuggestions>,
+    series: Entity<ComboboxState<SeriesDelegate>>,
+    series_options: Vec<ibex_core::Series>,
+    series_selected: Option<ibex_core::SeriesId>,
+    series_loading: bool,
+    series_error: Option<String>,
+    series_creating: bool,
     /// Tags staged for save: order matches the form rows; the Combobox
     /// adds, the row × removes, neither writes until Save.
     tags: Vec<Tag>,
     /// Collections staged for save (same attach pattern as tags).
     collections: Vec<Collection>,
-    /// The form's own line of complaint: a rejected payload or a failed
-    /// save, shown until the next attempt.
-    error: Option<String>,
+    /// Rows the user opened through "Add field…"; shown even while empty.
+    revealed: BTreeSet<FormField>,
+    /// A rejected payload, shown on its row, or a failed save (no field),
+    /// shown above the form; cleared by the next attempt.
+    error: Option<FieldError>,
     /// While the save is in flight: the Save button busy, no double sends.
     author_creating: bool,
     saving: bool,
@@ -1988,6 +2943,10 @@ struct EditForm {
     /// Bumped on every options load; a reply carries the generation it was
     /// issued for, so a late fetch cannot clobber a newer kind's options.
     parent_gen: u64,
+    /// What empty rows would inherit from the selected parent, for hints.
+    inherited: Option<InheritancePreview>,
+    /// Same guard as `parent_gen`, for inheritance previews.
+    inherit_gen: u64,
 }
 
 impl EditForm {
@@ -2004,6 +2963,12 @@ impl EditForm {
         cx: &mut Context<LibraryApp>,
     ) -> Self {
         let draft = prefill_draft(&record);
+        let value_suggestions = cx.new(|_| DetailsSuggestions {
+            worker: worker.clone(),
+            pickers: HashMap::new(),
+            tasks: HashMap::new(),
+            queries: HashMap::new(),
+        });
         let tags: Vec<Tag> = draft
             .tag_ids
             .iter()
@@ -2040,22 +3005,27 @@ impl EditForm {
             ComboboxState::new(SearchableVec::new(Vec::new()), Vec::new(), window, cx)
                 .searchable(true)
         });
-        let items = person_items(people);
-        let selected: Vec<IndexPath> = draft
+        let creators = cx.new(|cx| {
+            ComboboxState::new(PersonDelegate::new(people), Vec::new(), window, cx).searchable(true)
+        });
+        let people_names: HashMap<_, _> = people.iter().map(|p| (p.id, p.name.display())).collect();
+        let creator_rows = draft
             .creators
             .iter()
-            .filter_map(|spec| {
-                items
-                    .iter()
-                    .position(|item| item.choice == PersonChoice::Existing(spec.person_id))
-                    .map(IndexPath::new)
+            .enumerate()
+            .map(|(ix, spec)| {
+                CreatorRow::new(
+                    ix as u64,
+                    spec.clone(),
+                    people_names
+                        .get(&spec.person_id)
+                        .cloned()
+                        .unwrap_or_else(|| "Unknown person".into()),
+                    window,
+                    cx,
+                )
             })
             .collect();
-        let creators = cx.new(|cx| {
-            ComboboxState::new(PersonDelegate::new(people), selected, window, cx)
-                .multiple(true)
-                .searchable(true)
-        });
         // A parent valid for the old kind is off-kind for the new one, and
         // a kind that forbids parents empties the box outright, so every
         // kind change re-keys the parent options.
@@ -2065,9 +3035,13 @@ impl EditForm {
                 let ComboboxEvent::Change(values) = event else {
                     return;
                 };
+                app.load_inherited(window, cx);
                 let Some(EditFetch::Ready(form)) = &app.edit else {
                     return;
                 };
+                if form.saving {
+                    return;
+                }
                 // A cleared kind box falls back to the stored kind, the
                 // same rule the draft applies on save.
                 let new_kind = values.first().copied().unwrap_or(form.record.kind);
@@ -2095,59 +3069,307 @@ impl EditForm {
             }
         })
         .detach();
+        cx.subscribe_in(
+            &parent,
+            window,
+            |app, _, event: &ComboboxEvent<SearchableVec<ParentItem>>, window, cx| {
+                if matches!(event, ComboboxEvent::Change(_)) {
+                    app.load_inherited(window, cx);
+                }
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &creators,
+            window,
+            |app, picker, event: &ComboboxEvent<PersonDelegate>, window, cx| {
+                let ComboboxEvent::Change(choices) = event else {
+                    return;
+                };
+                if !choices
+                    .iter()
+                    .any(|choice| matches!(choice, PersonChoice::Existing(_)))
+                {
+                    return;
+                }
+                app.add_creator(window, cx);
+                picker.update(cx, |state, cx| state.set_selected_values(&[], window, cx));
+            },
+        )
+        .detach();
         let parent_options_kind = match draft.kind.parent_rule() {
             ParentRule::Optional { expected } | ParentRule::Required { expected } => Some(expected),
             ParentRule::Forbidden => None,
         };
-        Self {
+        let identifiers = identifier_tokens(&draft);
+        let mut form = Self {
             title: prefill_input(draft.title, "Title", window, cx),
             kind,
             parent,
             creators,
-            publisher: prefill_input(draft.publisher, "Publisher", window, cx),
-            published_year: prefill_input(draft.published_year, "Year", window, cx),
-            accessed_year: prefill_input(draft.accessed_year, "Year", window, cx),
-            series: prefill_input(draft.series, "Series id", window, cx),
-            series_number: prefill_input(draft.series_number, "e.g. LCL 26", window, cx),
+            creator_rows,
+            next_creator_key: draft.creators.len() as u64,
+            people_names,
+            fields: BibliographicField::ALL
+                .iter()
+                .filter(|field| FormField::for_bib(**field) != FormField::Identifiers)
+                .map(|field| {
+                    let value = draft.fields.get(field).cloned().unwrap_or_default();
+                    let input = if matches!(
+                        field,
+                        BibliographicField::Published
+                            | BibliographicField::Accessed
+                            | BibliographicField::OriginalDate
+                            | BibliographicField::EventDate
+                    ) {
+                        let owner = cx.entity().downgrade();
+                        BibliographicInput::Date(
+                            cx.new(|cx| DetailsDateInput::new(*field, value, owner, window, cx)),
+                        )
+                    } else if *field == BibliographicField::Keywords {
+                        let owner = cx.entity().downgrade();
+                        BibliographicInput::Tokens(
+                            cx.new(|cx| DetailsTokens::new(value, owner, window, cx)),
+                        )
+                    } else if let Some(suggestion_field) = details_suggestion_field(*field) {
+                        BibliographicInput::Value(DetailsValueControl::new(
+                            suggestion_field,
+                            value,
+                            &value_suggestions,
+                            window,
+                            cx,
+                        ))
+                    } else if field.multiline() {
+                        let input = cx.new(|cx| {
+                            TextareaState::new(window, cx)
+                                .rows(3)
+                                .placeholder(field.label())
+                        });
+                        input.update(cx, |input, cx| input.set_value(value, window, cx));
+                        BibliographicInput::Multiline(input)
+                    } else {
+                        let placeholder = match field {
+                            BibliographicField::SeriesNumber => "e.g. LCL 26",
+                            _ => field.label(),
+                        };
+                        BibliographicInput::Single(prefill_input(value, placeholder, window, cx))
+                    };
+                    (*field, input)
+                })
+                .collect(),
+            identifiers: {
+                let owner = cx.entity().downgrade();
+                cx.new(|cx| IdentifierTokens::new(identifiers, owner, window, cx))
+            },
+            _value_suggestions: value_suggestions,
+            series: cx.new(|cx| {
+                ComboboxState::new(SeriesDelegate::new(&[]), Vec::new(), window, cx)
+                    .searchable(true)
+            }),
+            series_options: Vec::new(),
+            series_selected: record.series_id,
+            series_loading: true,
+            series_error: None,
+            series_creating: false,
             tags,
             collections,
+            revealed: BTreeSet::new(),
             author_creating: false,
             record: Box::new(record),
             error: None,
             saving: false,
             parent_options_kind,
             parent_gen: 0,
+            inherited: None,
+            inherit_gen: 0,
+        };
+        for (date, display) in [
+            (
+                BibliographicField::Published,
+                BibliographicField::PublishedDisplay,
+            ),
+            (
+                BibliographicField::OriginalDate,
+                BibliographicField::OriginalDateDisplay,
+            ),
+            (
+                BibliographicField::EventDate,
+                BibliographicField::EventDateDisplay,
+            ),
+            (
+                BibliographicField::Accessed,
+                BibliographicField::AccessedDisplay,
+            ),
+        ] {
+            if let (BibliographicInput::Date(date), BibliographicInput::Single(display)) =
+                (&form.fields[&date], &form.fields[&display])
+            {
+                date.update(cx, |date, cx| {
+                    date.show_display = !display.read(cx).value().is_empty();
+                    date.display = Some(display.clone());
+                });
+            }
         }
+        // Rows that open with data stay shown after the user clears them,
+        // so a row never vanishes mid-edit.
+        form.revealed = FormField::ORDER
+            .iter()
+            .copied()
+            .filter(|field| form.has_value(*field, cx))
+            .collect();
+        form
+    }
+
+    /// The kind the form edits now: the kind box's selection, or the
+    /// stored kind while the box is cleared (the same rule save applies).
+    fn current_kind(&self, cx: &App) -> ResourceKind {
+        self.kind
+            .read(cx)
+            .selected_values()
+            .first()
+            .copied()
+            .unwrap_or(self.record.kind)
+    }
+
+    fn parent_set(&self, cx: &App) -> bool {
+        !self.parent.read(cx).selected_values().is_empty()
+    }
+
+    /// Whether the row's controls hold anything to save.
+    fn has_value(&self, field: FormField, cx: &App) -> bool {
+        let filled = |bib: BibliographicField| !self.fields[&bib].value(cx).trim().is_empty();
+        match field {
+            FormField::Kind => true,
+            FormField::Title => !self.title.read(cx).value().trim().is_empty(),
+            FormField::Creators => !self.creator_rows.is_empty(),
+            FormField::Parent => self.parent_set(cx),
+            FormField::Series => self.series_selected.is_some(),
+            FormField::Identifiers => !self.identifiers.read(cx).is_empty(cx),
+            FormField::Tags => !self.tags.is_empty(),
+            FormField::Collections => !self.collections.is_empty(),
+            FormField::Bib(bib) => filled(bib),
+        }
+    }
+
+    /// "From {parent}: {value}" for an empty row that inherits a value. The
+    /// identifiers row names inherited ISBNs and ISSNs while the row holds
+    /// none of that kind; other rows hide the hint once they hold a value.
+    fn inherited_hint(&self, field: FormField, cx: &App) -> Option<String> {
+        use BibliographicField as F;
+        let preview = self.inherited.as_ref()?;
+        let values = &preview.values;
+        let empty = |bib: F| self.fields[&bib].value(cx).trim().is_empty();
+        let from = |origin: ValueOrigin, value: String| match origin {
+            ValueOrigin::Inherited { parent_id } => preview
+                .sources
+                .get(&parent_id)
+                .map(|title| format!("From {}: {value}", title.as_str())),
+            ValueOrigin::Absent | ValueOrigin::Explicit => None,
+        };
+        let text = |effective: &ibex_core::Effective<String>| {
+            effective
+                .value
+                .clone()
+                .and_then(|value| from(effective.origin, value))
+        };
+        let ids = |effective: &ibex_core::Effective<Vec<ibex_core::Identifier>>| {
+            effective.value.as_ref().and_then(|ids| {
+                let joined = ids
+                    .iter()
+                    .map(ibex_core::Identifier::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                from(effective.origin, joined)
+            })
+        };
+        match field {
+            FormField::Identifiers => {
+                let identifiers = self.identifiers.read(cx);
+                let hints: Vec<String> = [
+                    (IdentifierKind::Isbn, &values.isbns),
+                    (IdentifierKind::Issn, &values.issns),
+                ]
+                .into_iter()
+                .filter(|(kind, _)| !identifiers.holds(*kind, cx))
+                .filter_map(|(_, effective)| ids(effective))
+                .collect();
+                (!hints.is_empty()).then(|| hints.join("; "))
+            }
+            FormField::Bib(bib) if empty(bib) => match bib {
+                F::Publisher => text(&values.publisher),
+                F::Published => values.published.value.as_ref().and_then(|date| {
+                    from(
+                        values.published.origin,
+                        format_published_label(date).as_str().to_owned(),
+                    )
+                }),
+                F::Place => text(&values.place),
+                F::Volume => text(&values.volume),
+                F::Issue => text(&values.issue),
+                F::Edition => text(&values.edition),
+                F::Language => text(&values.language),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Inherited hints count as values, so an inheriting row stays in view.
+    fn visible(&self, field: FormField, cx: &App) -> bool {
+        edit_layout::visible(
+            self.current_kind(cx),
+            field,
+            self.has_value(field, cx) || self.inherited_hint(field, cx).is_some(),
+            self.revealed.contains(&field),
+            self.parent_set(cx),
+        )
+    }
+
+    /// Hidden rows that "Add field…" can reveal, in panel order.
+    fn addable_fields(&self, cx: &App) -> Vec<FormField> {
+        let kind = self.current_kind(cx);
+        let parent_set = self.parent_set(cx);
+        FormField::ORDER
+            .iter()
+            .copied()
+            .filter(|field| {
+                !self.visible(*field, cx)
+                    && edit_layout::visible(kind, *field, false, true, parent_set)
+            })
+            .collect()
     }
 
     /// The inputs' current values as one plain draft. A cleared kind box
     /// falls back to the stored kind: every resource carries one, so the
     /// form never clears it. A cleared parent box is exactly that: no
-    /// parent.
-    fn draft(&self, cx: &App) -> EditDraft {
+    /// parent. Fails when the identifiers row holds text that is not an
+    /// identifier, or more than one DOI or eprint.
+    fn draft(&self, cx: &App) -> Result<EditDraft, FieldError> {
         let value = |input: &Entity<InputState>| input.read(cx).value().to_string();
-        EditDraft {
+        let tokens = self
+            .identifiers
+            .read(cx)
+            .tokens(cx)
+            .map_err(|error| FieldError::at(FormField::Identifiers, error))?;
+        let mut draft = EditDraft {
+            fields: self
+                .fields
+                .iter()
+                .map(|(field, input)| (*field, input.value(cx)))
+                .collect(),
             title: value(&self.title),
-            kind: self
-                .kind
-                .read(cx)
-                .selected_values()
-                .first()
-                .copied()
-                .unwrap_or(self.record.kind),
+            kind: self.current_kind(cx),
             parent: self.parent.read(cx).selected_values().first().cloned(),
-            publisher: value(&self.publisher),
-            published_year: value(&self.published_year),
-            accessed_year: value(&self.accessed_year),
-            series: value(&self.series),
-            series_number: value(&self.series_number),
-            creators: creators_from_person_ids(
-                &selected_person_ids(&self.creators.read(cx).selected_values()),
-                &self.record.to_new().creators,
-            ),
+            series: self
+                .series_selected
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            creators: self.creator_rows.iter().map(|row| row.spec(cx)).collect(),
             tag_ids: self.tags.iter().map(|tag| tag.id).collect(),
             collection_ids: self.collections.iter().map(|c| c.id).collect(),
-        }
+        };
+        apply_identifier_tokens(&mut draft, &tokens)?;
+        Ok(draft)
     }
 }
 
@@ -2751,6 +3973,7 @@ impl LibraryApp {
             jev_endpoint: crate::jev::DECISIONS_URL.to_owned(),
             rules_window: None,
             edit: None,
+            edit_generation: 0,
             detail_gens: HashMap::new(),
             last_escape_at: None,
             inline_trap: cx.focus_handle(),
@@ -3007,8 +4230,8 @@ impl LibraryApp {
                 v_flex().id("biblatex-import-report").test_support().aria_label(summary.clone()).gap_3()
                     .child(summary.clone())
                     .child(div().id("biblatex-import-issues").max_h(px(320.)).overflow_y_scroll()
-                        .child(v_flex().gap_2().children(issues.iter().map(|issue| div().text_size(px(12.)).child(issue.clone())))))
-                    .child(div().text_size(px(12.)).text_color(cx.theme().muted_foreground)
+                        .child(v_flex().gap_2().children(issues.iter().map(|issue| div().text_size(rems(1.)).child(issue.clone())))))
+                    .child(div().text_size(rems(1.)).text_color(cx.theme().muted_foreground)
                         .child("Existing records are not overwritten. Same-source retries reuse committed entries. Current library filters still apply."))
             )
         });
@@ -3658,7 +4881,7 @@ impl LibraryApp {
         let Some(EditFetch::Ready(form)) = &mut self.edit else {
             return;
         };
-        if form.collections.iter().any(|c| c.id == choice) {
+        if form.saving || form.collections.iter().any(|c| c.id == choice) {
             return;
         }
         form.collections.push(collection);
@@ -3675,6 +4898,9 @@ impl LibraryApp {
         let Some(EditFetch::Ready(form)) = &mut self.edit else {
             return;
         };
+        if form.saving {
+            return;
+        }
         form.collections.retain(|c| c.id != collection_id);
         self.sync_collection_picker(window, cx);
         cx.notify();
@@ -3917,7 +5143,7 @@ impl LibraryApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !matches!(self.edit, Some(EditFetch::Ready(_))) {
+        if !matches!(&self.edit, Some(EditFetch::Ready(form)) if !form.saving) {
             return;
         }
         match choice {
@@ -3953,7 +5179,7 @@ impl LibraryApp {
                                         .sort_by(|a, b| a.text.as_str().cmp(b.text.as_str()));
                                 }
                                 if let Some(EditFetch::Ready(form)) = &mut app.edit {
-                                    if !form.tags.iter().any(|t| t.id == tag.id) {
+                                    if !form.saving && !form.tags.iter().any(|t| t.id == tag.id) {
                                         form.tags.push(tag);
                                     }
                                     form.error = None;
@@ -3962,7 +5188,7 @@ impl LibraryApp {
                             }
                             Err(err) => {
                                 if let Some(EditFetch::Ready(form)) = &mut app.edit {
-                                    form.error = Some(err);
+                                    form.error = Some(FieldError::form(err));
                                 }
                             }
                         }
@@ -3984,6 +5210,9 @@ impl LibraryApp {
         let Some(EditFetch::Ready(form)) = &mut self.edit else {
             return;
         };
+        if form.saving {
+            return;
+        }
         form.tags.retain(|tag| tag.id != tag_id);
         self.sync_tag_picker(window, cx);
         cx.notify();
@@ -4192,6 +5421,10 @@ impl LibraryApp {
 
     /// Toggle by stored identity even when the detail panel is still loading.
     fn toggle_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The edit panel has no favorite control; the detail header owns it.
+        if matches!(self.edit, Some(EditFetch::Ready(_))) {
+            return;
+        }
         if self.wait_for_library_write(window, cx) {
             return;
         }
@@ -4757,7 +5990,7 @@ impl LibraryApp {
     ) {
         for (field, input) in [
             (InlineField::Title, &form.title),
-            (InlineField::Published, &form.published_year),
+            (InlineField::Published, &form.published),
             (InlineField::Publisher, &form.publisher),
         ] {
             cx.subscribe_in(input, window, move |this, _, event: &InputEvent, _, cx| {
@@ -4778,8 +6011,116 @@ impl LibraryApp {
         }
     }
 
+    fn drop_creator(&mut self, drag: &CreatorDrag, target: u64, cx: &mut Context<Self>) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        if form.saving || form.title.entity_id() != drag.form {
+            return;
+        }
+        let Some(from) = form.creator_rows.iter().position(|row| row.key == drag.key) else {
+            return;
+        };
+        let Some(to) = form.creator_rows.iter().position(|row| row.key == target) else {
+            return;
+        };
+        let row = form.creator_rows.remove(from);
+        form.creator_rows.insert(to, row);
+        cx.notify();
+    }
+
     /// Both author comboboxes create people through the worker, then select the
     /// saved id on the same still-open form. A late reply cannot edit a new form.
+    fn move_creator(&mut self, key: u64, direction: isize, cx: &mut Context<Self>) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        if form.saving {
+            return;
+        }
+        let Some(ix) = form.creator_rows.iter().position(|r| r.key == key) else {
+            return;
+        };
+        if let Some(next) = ix
+            .checked_add_signed(direction)
+            .filter(|next| *next < form.creator_rows.len())
+        {
+            form.creator_rows.swap(ix, next);
+            cx.notify();
+        }
+    }
+
+    fn remove_creator(&mut self, key: u64, cx: &mut Context<Self>) {
+        if let Some(EditFetch::Ready(form)) = &mut self.edit
+            && !form.saving
+        {
+            form.creator_rows.retain(|row| row.key != key);
+            cx.notify();
+        }
+    }
+
+    fn show_creator_credit(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        let Some(row) = form.creator_rows.iter_mut().find(|row| row.key == key) else {
+            return;
+        };
+        row.show_credit = true;
+        let input = row.credited_as.clone();
+        // The menu restores focus as it dismisses; focus after it.
+        window.defer(cx, move |window, cx| {
+            input.update(cx, |input, cx| input.focus(window, cx))
+        });
+        cx.notify();
+    }
+
+    fn hide_creator_credit(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        if form.saving {
+            return;
+        }
+        let Some(row) = form.creator_rows.iter_mut().find(|row| row.key == key) else {
+            return;
+        };
+        row.show_credit = false;
+        row.credited_as
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        cx.notify();
+    }
+
+    fn add_creator(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        if form.saving || form.author_creating {
+            return;
+        }
+        for id in selected_person_ids(&form.creators.read(cx).selected_values()) {
+            let name = form
+                .people_names
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| "Unknown person".into());
+            let spec = ibex_core::CreatorSpec {
+                person_id: id,
+                role: ibex_core::CreatorRole::Author,
+                credited_as: None,
+            };
+            form.creator_rows.push(CreatorRow::new(
+                form.next_creator_key,
+                spec,
+                name,
+                window,
+                cx,
+            ));
+            form.next_creator_key += 1;
+        }
+        cx.notify();
+    }
+
     fn wire_author_creation(
         picker: &Entity<ComboboxState<PersonDelegate>>,
         window: &mut Window,
@@ -4878,6 +6219,9 @@ impl LibraryApp {
                         }
                         let error = match result {
                             Ok((person, people)) => {
+                                if !inline && let Some(EditFetch::Ready(form)) = &mut app.edit {
+                                    form.people_names.insert(person.id, person.name.display());
+                                }
                                 let mut values: Vec<_> = picker
                                     .read(cx)
                                     .selected_values()
@@ -4906,9 +6250,20 @@ impl LibraryApp {
                                     cx.notify();
                                 }
                             });
-                        } else if let Some(EditFetch::Ready(form)) = &mut app.edit {
-                            form.author_creating = false;
-                            form.error = error;
+                        } else {
+                            let created = error.is_none();
+                            if let Some(EditFetch::Ready(form)) = &mut app.edit {
+                                form.author_creating = false;
+                                form.error = error.map(FieldError::form);
+                            }
+                            // Programmatic selection emits no Change, so the
+                            // add-on-select subscription never sees this person.
+                            if created {
+                                app.add_creator(window, cx);
+                                picker.update(cx, |state, cx| {
+                                    state.set_selected_values(&[], window, cx)
+                                });
+                            }
                         }
                         cx.notify();
                     });
@@ -4931,7 +6286,7 @@ impl LibraryApp {
                     f.kind.clone(),
                     f.title.clone(),
                     f.creators.clone(),
-                    f.published_year.clone(),
+                    f.published.clone(),
                     f.publisher.clone(),
                     f.active_field,
                 )
@@ -5136,7 +6491,8 @@ impl LibraryApp {
             build_update(record, &draft)
         } else {
             build_create(&draft)
-        };
+        }
+        .map_err(|error| error.message);
         let new = match payload {
             Ok(new) => new,
             Err(message) => {
@@ -5223,6 +6579,137 @@ impl LibraryApp {
         .detach();
     }
 
+    fn load_series_options(
+        &mut self,
+        picker: Entity<ComboboxState<SeriesDelegate>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(EditFetch::Ready(form)) = &mut self.edit {
+            if form.saving {
+                return;
+            }
+            form.series_loading = true;
+            form.series_error = None;
+        }
+        let worker = self.table.read(cx).delegate().worker().clone();
+        cx.spawn_in(window, async move |app, window| {
+            let result = worker.list_series().await;
+            _ = app.update_in(window, |app, window, cx| {
+                let Some(EditFetch::Ready(form)) = &mut app.edit else {
+                    return;
+                };
+                if form.series != picker {
+                    return;
+                }
+                form.series_loading = false;
+                match result {
+                    Ok(options) => {
+                        let selected = form.series_selected.map(SeriesChoice::Existing);
+                        picker.update(cx, |state, cx| {
+                            state.set_items(SeriesDelegate::new(&options), window, cx);
+                            state.set_selected_values(
+                                &selected.into_iter().collect::<Vec<_>>(),
+                                window,
+                                cx,
+                            );
+                        });
+                        form.series_options = options;
+                        form.series_loading = false;
+                        form.series_error = None;
+                    }
+                    Err(err) => {
+                        form.series_error = Some(format!("Could not load series: {err}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn wire_series_creation(
+        picker: &Entity<ComboboxState<SeriesDelegate>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.subscribe_in(
+            picker,
+            window,
+            |app, picker, event: &ComboboxEvent<SeriesDelegate>, window, cx| {
+                let ComboboxEvent::Change(choices) = event else {
+                    return;
+                };
+                let Some(EditFetch::Ready(form)) = &mut app.edit else {
+                    return;
+                };
+                if form.series != *picker
+                    || form.series_creating
+                    || form.series_loading
+                    || form.saving
+                {
+                    return;
+                }
+                let Some(SeriesChoice::Create(title)) = choices.first() else {
+                    form.series_selected = choices.first().and_then(|choice| match choice {
+                        SeriesChoice::Existing(id) => Some(*id),
+                        SeriesChoice::Create(_) => None,
+                    });
+                    return;
+                };
+                let title = title.clone();
+                let previous = form.series_selected.map(SeriesChoice::Existing);
+                picker.update(cx, |state, cx| {
+                    state.set_selected_values(&previous.into_iter().collect::<Vec<_>>(), window, cx)
+                });
+                form.series_creating = true;
+                form.error = None;
+                let picker = picker.clone();
+                let worker = app.table.read(cx).delegate().worker().clone();
+                cx.notify();
+                cx.spawn_in(window, async move |app, window| {
+                    let result = worker.create_series(title).await;
+                    _ = app.update_in(window, |app, window, cx| {
+                        let Some(EditFetch::Ready(form)) = &mut app.edit else {
+                            return;
+                        };
+                        if form.series != picker {
+                            return;
+                        }
+                        form.series_creating = false;
+                        match result {
+                            Ok(series) => {
+                                let id = series.id;
+                                form.series_options.push(series);
+                                form.series_selected = Some(id);
+                                picker.update(cx, |state, cx| {
+                                    state.set_items(
+                                        SeriesDelegate::new(&form.series_options),
+                                        window,
+                                        cx,
+                                    );
+                                    state.set_selected_values(
+                                        &[SeriesChoice::Existing(id)],
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                            Err(err) => {
+                                form.error = Some(FieldError::form(format!(
+                                    "Could not create series: {err}"
+                                )))
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            },
+        )
+        .detach();
+    }
+
     /// Open the edit form for the selected resource: fetch the raw record
     /// (the panel's projection drops the ids the form needs), then open
     /// the prefilled widgets — the parent box empty until its options land,
@@ -5248,6 +6735,8 @@ impl LibraryApp {
         }
         self.cancel_inline(cx);
         self.edit = Some(EditFetch::Loading(id));
+        self.edit_generation += 1;
+        let generation = self.edit_generation;
         self.detail_open = true;
         let worker = self.table.read(cx).delegate().worker().clone();
         cx.spawn_in(window, async move |app, window| {
@@ -5256,6 +6745,11 @@ impl LibraryApp {
                 Err(err) => Err(err),
             };
             _ = app.update_in(window, |app, window, cx| {
+                if app.edit_generation != generation
+                    || !matches!(app.edit, Some(EditFetch::Loading(loading)) if loading == id)
+                {
+                    return;
+                }
                 match reply {
                     Ok((record, people)) => {
                         // The selection moved or re-clicked Edit since the
@@ -5278,7 +6772,10 @@ impl LibraryApp {
                             );
                             let title = form.title.clone();
                             Self::wire_author_creation(&form.creators, window, cx);
+                            Self::wire_series_creation(&form.series, window, cx);
+                            let series_picker = form.series.clone();
                             app.edit = Some(EditFetch::Ready(Box::new(form)));
+                            app.load_series_options(series_picker, window, cx);
                             // Land the caret in the title so `e` opens ready
                             // to type; parent options load in the background.
                             title.update(cx, |state, cx| {
@@ -5347,6 +6844,7 @@ impl LibraryApp {
                 state.set_items(SearchableVec::new(Vec::new()), window, cx);
                 state.set_selected_indices(Vec::new(), window, cx);
             });
+            self.load_inherited(window, cx);
             cx.notify();
             return;
         };
@@ -5404,6 +6902,38 @@ impl LibraryApp {
                         None => state.set_selected_indices(Vec::new(), window, cx),
                     }
                 });
+                // Setting the selection directly emits no change event,
+                // so the inherited hints follow the new options here.
+                app.load_inherited(window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Ask what the form's current kind would inherit from its selected
+    /// parent. A newer kind or parent change bumps the generation, so a
+    /// late reply cannot overwrite fresher hints.
+    fn load_inherited(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let worker = self.table.read(cx).delegate().worker().clone();
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        form.inherit_gen += 1;
+        let generation = form.inherit_gen;
+        let id = form.record.id;
+        let kind = form.current_kind(cx);
+        let parent_id = form.parent.read(cx).selected_values().first().copied();
+        cx.spawn_in(window, async move |app, window| {
+            let reply = worker.preview_inheritance(kind, parent_id).await;
+            _ = app.update_in(window, |app, _, cx| {
+                let Some(EditFetch::Ready(form)) = &mut app.edit else {
+                    return;
+                };
+                if form.record.id != id || form.inherit_gen != generation {
+                    return;
+                }
+                form.inherited = reply.ok();
                 cx.notify();
             });
         })
@@ -5412,6 +6942,11 @@ impl LibraryApp {
 
     /// Close the form without writing; the panel falls back to the detail.
     fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(&self.edit, Some(EditFetch::Ready(form)) if form.saving) {
+            return;
+        }
+        self.edit_generation += 1;
+        self.focus_table(window, cx);
         self.edit = None;
         self.sync_tag_picker(window, cx);
         cx.notify();
@@ -5425,12 +6960,26 @@ impl LibraryApp {
         let Some(EditFetch::Ready(form)) = &self.edit else {
             return;
         };
-        if form.saving || form.author_creating {
+        if form.saving || form.author_creating || form.series_loading || form.series_creating {
             return;
         }
         let record = form.record.clone();
+        let form_identity = form.title.clone();
         let draft = form.draft(cx);
-        let new = match build_update(&record, &draft) {
+        let input_error = form.fields.iter().find_map(|(field, input)| match input {
+            BibliographicInput::Tokens(input) => input.read(cx).pending_error(cx).map(|error| {
+                FieldError::at(
+                    FormField::for_bib(*field),
+                    format!("{}: {error}", field.label()),
+                )
+            }),
+            _ => None,
+        });
+        let payload = input_error.map_or_else(
+            || draft.and_then(|draft| build_update(&record, &draft)),
+            Err,
+        );
+        let new = match payload {
             Ok(new) => new,
             Err(message) => {
                 if let Some(EditFetch::Ready(form)) = &mut self.edit {
@@ -5453,6 +7002,10 @@ impl LibraryApp {
         cx.spawn_in(window, async move |app, window| {
             let reply = worker.update_resource(id, new).await;
             _ = app.update_in(window, |app, window, cx| {
+                if !matches!(&app.edit, Some(EditFetch::Ready(form)) if form.title == form_identity)
+                {
+                    return;
+                }
                 match reply {
                     Ok(_) => {
                         if content_changed {
@@ -5479,7 +7032,7 @@ impl LibraryApp {
                     }
                     Err(err) => match &mut app.edit {
                         Some(EditFetch::Ready(form)) => {
-                            form.error = Some(err);
+                            form.error = Some(FieldError::form(err));
                             form.saving = false;
                         }
                         _ => app.edit = None,
@@ -5611,7 +7164,7 @@ impl LibraryApp {
             .size_full()
             .p_2()
             .overflow_y_scroll()
-            .text_size(px(12.))
+            .text_size(rems(1.))
             .child(self.sidebar_row(
                 0,
                 SidebarNav::All,
@@ -6336,15 +7889,48 @@ impl LibraryApp {
         });
     }
 
-    /// The form: Save/Cancel above, one labelled row per scalar, the error
-    /// line under the buttons. Scrollable like the detail sidebar, so a
-    /// short window still reaches every row. Parent is a searchable
-    /// dropdown of library titles, not an id to type: users pick the
-    /// containing work by name.
+    /// The form: Save/Cancel above, then the registry's rows grouped under
+    /// section headers, with form-level errors first. Scrollable like the
+    /// detail sidebar, so a short window still reaches every row. Parent is
+    /// a searchable dropdown of library titles, not an id to type: users
+    /// pick the containing work by name.
     fn render_edit_panel(&self, form: &EditForm, cx: &mut Context<Self>) -> Div {
-        let saving = form.saving || form.author_creating;
-        let error = form.error.clone();
+        let saving = form.saving;
+        let error = form.error.clone().filter(|error| error.field.is_none());
         let danger = cx.theme().danger;
+        let muted = cx.theme().muted_foreground;
+        let mut sections = Vec::new();
+        for section in Section::ALL {
+            if section == Section::Organize {
+                sections.extend(self.render_add_field_menu(form, cx));
+            }
+            let fields: Vec<FormField> = FormField::ORDER
+                .iter()
+                .copied()
+                .filter(|field| field.section() == section && form.visible(*field, cx))
+                .collect();
+            let rows: Vec<Div> = fields
+                .into_iter()
+                .map(|field| self.render_form_row(form, field, cx))
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            sections.push(
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("edit-section-{section:?}")))
+                            .test_support()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(section.title()),
+                    )
+                    .children(rows),
+            );
+        }
 
         v_flex()
             .h_full()
@@ -6353,186 +7939,414 @@ impl LibraryApp {
             .bg(cx.theme().background)
             .text_size(FIELD_TEXT_SIZE)
             .child(
-                v_flex()
-                    .id("edit-panel")
-                    .size_full()
-                    .p_3()
+                h_flex()
+                    .justify_end()
                     .gap_2()
-                    .overflow_y_scroll()
                     .child(
-                        h_flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(
-                                Button::new("cancel-edit")
-                                    .ghost()
-                                    .small()
-                                    .label("Cancel")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.cancel_edit(window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("save-edit")
-                                    .primary()
-                                    .small()
-                                    .label("Save")
-                                    .loading(saving)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.save_edit(window, cx)
-                                    })),
+                        Button::new("cancel-edit")
+                            .ghost()
+                            .small()
+                            .label("Cancel")
+                            .disabled(form.saving)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.cancel_edit(window, cx)),
                             ),
                     )
+                    .child(
+                        Button::new("save-edit")
+                            .primary()
+                            .small()
+                            .label("Save")
+                            .loading(saving)
+                            .disabled(
+                                saving
+                                    || form.author_creating
+                                    || form.series_loading
+                                    || form.series_creating,
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.save_edit(window, cx)),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("edit-panel")
+                    .test_support()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .p_3()
+                    .gap_4()
+                    .overflow_y_scroll()
+                    .capture_action(cx.listener(|app, action: &Enter, window, cx| {
+                        if action.secondary {
+                            app.save_edit(window, cx);
+                        } else {
+                            cx.propagate();
+                        }
+                    }))
                     .when_some(error, |el, error| {
-                        el.child(div().text_xs().text_color(danger).child(error))
+                        el.child(
+                            div()
+                                .id("edit-form-error")
+                                .test_support()
+                                .aria_label(error.message.clone())
+                                .text_xs()
+                                .text_color(danger)
+                                .child(error.message),
+                        )
                     })
-                    .child(edit_field("Title", padded_input(&form.title).w_full()))
-                    .child(edit_field(
-                        "Kind",
-                        Combobox::new(&form.kind)
-                            .small()
-                            .placeholder("Kind")
-                            .search_placeholder("Search kinds")
-                            .w_full(),
-                    ))
-                    .child(edit_field(
-                        "Parent",
-                        Combobox::new(&form.parent)
-                            .small()
-                            .placeholder("Parent")
-                            .search_placeholder("Search resources")
-                            .cleanable(true)
-                            .w_full(),
-                    ))
-                    .child(edit_field(
-                        "Authors",
-                        Combobox::new(&form.creators)
-                            .small()
-                            .placeholder("Add authors")
-                            .search_placeholder("Search people")
-                            .cleanable(true)
-                            .w_full(),
-                    ))
-                    .child(edit_field(
-                        "Publisher",
-                        padded_input(&form.publisher).w_full(),
-                    ))
-                    .child(edit_field(
-                        "Published",
-                        padded_input(&form.published_year).w_full(),
-                    ))
-                    .child(edit_field(
-                        "Accessed",
-                        padded_input(&form.accessed_year).w_full(),
-                    ))
-                    .child(edit_field("Series", padded_input(&form.series).w_full()))
-                    .child(edit_field(
-                        "Series no.",
-                        padded_input(&form.series_number).w_full(),
-                    ))
-                    .child(edit_field(
-                        "Tags",
-                        v_flex()
-                            .gap_1()
-                            .w_full()
-                            .child(
-                                Combobox::new(&self.tag_picker)
-                                    .small()
-                                    .placeholder("Add tag")
-                                    .search_placeholder("Search or create...")
-                                    .w_full(),
-                            )
-                            .children(form.tags.iter().map(|tag| {
-                                let tag_id = tag.id;
-                                h_flex()
-                                    .w_full()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(tag.text.as_str().to_owned()),
-                                    )
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "unstage-tag-{tag_id}"
-                                        )))
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(Icon::new(IconName::Close).xsmall())
-                                        .tooltip("Remove tag")
-                                        .on_click(
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.unstage_tag_on_edit_form(tag_id, window, cx)
-                                            }),
-                                        ),
-                                    )
-                            })),
-                    ))
-                    .child(edit_field(
-                        "Collections",
-                        v_flex()
-                            .gap_1()
-                            .w_full()
-                            .child(
-                                Combobox::new(&self.collection_picker)
-                                    .small()
-                                    .placeholder("Add collection")
-                                    .search_placeholder("Search collections...")
-                                    .w_full(),
-                            )
-                            .children(form.collections.iter().map(|collection| {
-                                let collection_id = collection.id;
-                                h_flex()
-                                    .w_full()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .child(collection.name.as_str().to_owned()),
-                                    )
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "unstage-collection-{collection_id}"
-                                        )))
-                                        .ghost()
-                                        .xsmall()
-                                        .icon(Icon::new(IconName::Close).xsmall())
-                                        .tooltip("Remove collection")
-                                        .on_click(
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.unstage_collection_on_edit_form(
-                                                    collection_id,
-                                                    window,
-                                                    cx,
-                                                )
-                                            }),
-                                        ),
-                                    )
-                            })),
-                    )),
+                    .children(sections),
             )
     }
+
+    /// "Add field…": a menu of the rows the kind hides, by their kind
+    /// labels. `None` when every row is already shown.
+    fn render_add_field_menu(&self, form: &EditForm, cx: &mut Context<Self>) -> Option<Div> {
+        let kind = form.current_kind(cx);
+        let addable: Vec<(FormField, &'static str)> = form
+            .addable_fields(cx)
+            .into_iter()
+            .map(|field| (field, field.label(kind)))
+            .collect();
+        if addable.is_empty() {
+            return None;
+        }
+        let app = cx.entity().downgrade();
+        Some(
+            h_flex().child(
+                Button::new("add-field-menu")
+                    .ghost()
+                    .small()
+                    .label("Add field…")
+                    .disabled(form.saving)
+                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, window, _cx| {
+                        let Some(app) = app.upgrade() else {
+                            return menu;
+                        };
+                        addable.iter().fold(menu, |menu, &(field, label)| {
+                            // `PopupMenuItem::new` takes no id; tests find the
+                            // item through the element's own id.
+                            menu.item(
+                                PopupMenuItem::element(move |_, _| {
+                                    div()
+                                        .id(SharedString::from(format!("add-field-{field:?}")))
+                                        .test_support()
+                                        .child(label)
+                                })
+                                .on_click(window.listener_for(
+                                    &app,
+                                    move |this, _, window, cx| {
+                                        this.reveal_form_field(field, window, cx)
+                                    },
+                                )),
+                            )
+                        })
+                    }),
+            ),
+        )
+    }
+
+    fn reveal_form_field(&mut self, field: FormField, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(EditFetch::Ready(form)) = &mut self.edit else {
+            return;
+        };
+        form.revealed.insert(field);
+        let input = match field {
+            FormField::Identifiers => Some(form.identifiers.read(cx).pending.clone()),
+            FormField::Bib(bib) => match &form.fields[&bib] {
+                BibliographicInput::Single(input) => Some(input.clone()),
+                BibliographicInput::Date(date) => Some(date.read(cx).input.clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(input) = input {
+            // The menu restores focus as it dismisses; focus after it.
+            window.defer(cx, move |window, cx| {
+                input.update(cx, |input, cx| input.focus(window, cx))
+            });
+        }
+        cx.notify();
+    }
+
+    /// One registry row: the label column plus the control that edits
+    /// `field`, with the form's error underneath when it targets the row.
+    fn render_form_row(&self, form: &EditForm, field: FormField, cx: &mut Context<Self>) -> Div {
+        let saving = form.saving;
+        let danger = cx.theme().danger;
+        let label = field.label(form.current_kind(cx));
+        match field {
+            FormField::Kind => edit_field(
+                label,
+                Combobox::new(&form.kind)
+                    .small()
+                    .placeholder("Kind")
+                    .search_placeholder("Search kinds")
+                    .disabled(saving)
+                    .w_full(),
+            ),
+            FormField::Title => edit_field(label, div().id("edit-field-Title").test_support().w_full()
+                .child(Input::new(&form.title).small().id("edit-title").aria_label("Title").disabled(saving).w_full())
+                .children(field_error(form, field, danger))),
+            FormField::Creators => edit_field(label,
+                v_flex().w_full().gap_2()
+                    .children(form.creator_rows.iter().enumerate().map(|(ix, row)| {
+                        let key = row.key;
+                        let identity = form.title.entity_id();
+                        let first = ix == 0;
+                        let last = ix + 1 == form.creator_rows.len();
+                        let app = cx.entity().downgrade();
+                        v_flex().id(SharedString::from(format!("creator-row-{key}"))).test_support().gap_1().w_full()
+                            .can_drop(move |dragged, _, _| !saving && dragged.downcast_ref::<CreatorDrag>().is_some_and(|drag| drag.form == identity && drag.key != key))
+                            .on_drop(cx.listener(move |app, drag: &CreatorDrag, _, cx| app.drop_creator(drag, key, cx)))
+                            .drag_over::<CreatorDrag>(move |style, drag, _, cx| {
+                                if saving || drag.form != identity || drag.key == key { return style; }
+                                let style = style.border_color(cx.theme().accent).bg(cx.theme().muted);
+                                if drag.position < ix { style.border_b_2() } else { style.border_t_2() }
+                            })
+                            .child(h_flex().gap_1().items_center().w_full()
+                                .child(div().id(SharedString::from(format!("creator-drag-{key}"))).test_support().flex_1().min_w_0()
+                                    .aria_label(format!("Drag to reorder {}", row.name))
+                                    .tooltip(|window, cx| Tooltip::new("Drag to reorder creator, or use the creator menu").build(window, cx))
+                                    .child(h_flex().gap_1().items_center()
+                                        .child(symbol("line.3.horizontal", AssetIconName::GripVertical).small().text_color(cx.theme().muted_foreground))
+                                        .child(div().min_w_0().truncate().child(row.name.clone())))
+                                    .when(!saving, |header| header.cursor_grab().on_drag(
+                                        CreatorDrag { form: identity, key, position: ix, name: row.name.clone().into() },
+                                        |drag, _, _, cx| cx.new(|_| drag.clone()),
+                                    )))
+                                .child(div().id(SharedString::from(format!("creator-role-{key}"))).test_support().w(rems(8.)).flex_none().child(
+                                    Combobox::new(&row.role).small().placeholder("Role").search_placeholder("Search roles").disabled(saving).w_full()
+                                ))
+                                .child(Button::new(SharedString::from(format!("creator-menu-{key}"))).ghost().xsmall()
+                                    .icon(symbol("ellipsis", AssetIconName::Ellipsis)).tooltip("Creator options").disabled(saving)
+                                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, _cx| {
+                                        let Some(app) = app.upgrade() else {
+                                            return menu;
+                                        };
+                                        menu.item(creator_menu_item(format!("creator-credit-as-{key}"), "Credited as…")
+                                                .on_click(window.listener_for(&app, move |this, _, window, cx| this.show_creator_credit(key, window, cx))))
+                                            .item(creator_menu_item(format!("creator-up-{key}"), "Move up").disabled(first)
+                                                .on_click(window.listener_for(&app, move |this, _, _, cx| this.move_creator(key, -1, cx))))
+                                            .item(creator_menu_item(format!("creator-down-{key}"), "Move down").disabled(last)
+                                                .on_click(window.listener_for(&app, move |this, _, _, cx| this.move_creator(key, 1, cx))))
+                                            .item(PopupMenuItem::separator())
+                                            .item(creator_menu_item(format!("creator-remove-{key}"), "Remove")
+                                                .on_click(window.listener_for(&app, move |this, _, _, cx| this.remove_creator(key, cx))))
+                                    })))
+                            .when(row.show_credit, |el| el.child(h_flex().gap_1().items_center().w_full()
+                                .child(div().id(SharedString::from(format!("creator-credit-{key}"))).test_support().flex_1().min_w_0().child(
+                                    Input::new(&row.credited_as).small().aria_label("Credited as").disabled(saving).w_full()
+                                ))
+                                .child(Button::new(SharedString::from(format!("creator-credit-clear-{key}"))).ghost().xsmall()
+                                    .icon(symbol("xmark", AssetIconName::X)).tooltip("Clear credited as").disabled(saving)
+                                    .on_click(cx.listener(move |app, _, window, cx| app.hide_creator_credit(key, window, cx))))))
+                    }))
+                    .child(div().id("add-creator-person").test_support().w_full().child(
+                        Combobox::new(&form.creators).small().placeholder("Add creator…").search_placeholder("Search people").disabled(saving).w_full()
+                    ))
+            ),
+            FormField::Parent => edit_field(
+                label,
+                Combobox::new(&form.parent)
+                    .small()
+                    .placeholder("Parent")
+                    .search_placeholder("Search resources")
+                    .cleanable(true)
+                    .disabled(saving)
+                    .w_full(),
+            ),
+            FormField::Series => edit_field(
+                label,
+                div().id("edit-series").test_support().w_full().child(
+                    Combobox::new(&form.series)
+                        .small()
+                        .placeholder(if form.series_loading {
+                            "Loading series…"
+                        } else {
+                            "Select series"
+                        })
+                        .search_placeholder("Search or create series")
+                        .cleanable(true)
+                        .disabled(saving || form.series_loading || form.series_creating)
+                        .w_full(),
+                ).children(field_error(form, field, danger)).when_some(form.series_error.as_ref(), |field, error| field.child(div().text_xs().child(error.clone())).child(
+                    Button::new("retry-series").ghost().small().label("Retry").disabled(saving).on_click(cx.listener(|app, _, window, cx| {
+                        let Some(EditFetch::Ready(form)) = &app.edit else { return; };
+                        app.load_series_options(form.series.clone(), window, cx);
+                    }))
+                )),
+            ),
+            FormField::Identifiers => edit_field(
+                label,
+                v_flex().id("edit-field-Identifiers").test_support().w_full().gap_1()
+                    .child(form.identifiers.clone())
+                    .children(inherited_note(form, field, cx))
+                    .children(field_error(form, field, danger)),
+            ),
+            FormField::Tags => edit_field(
+                label,
+                v_flex()
+                    .gap_1()
+                    .w_full()
+                    .child(
+                        Combobox::new(&self.tag_picker)
+                            .small()
+                            .placeholder("Add tag")
+                            .search_placeholder("Search or create...")
+                            .disabled(saving)
+                            .w_full(),
+                    )
+                    .children(form.tags.iter().map(|tag| {
+                        let tag_id = tag.id;
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(tag.text.as_str().to_owned()),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "unstage-tag-{tag_id}"
+                                )))
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Close).xsmall())
+                                .tooltip("Remove tag")
+                                .accessibility_label("Detach tag").disabled(saving)
+                                .on_click(
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.unstage_tag_on_edit_form(tag_id, window, cx)
+                                    }),
+                                ),
+                            )
+                    })),
+            ),
+            FormField::Collections => edit_field(
+                label,
+                v_flex()
+                    .gap_1()
+                    .w_full()
+                    .child(
+                        Combobox::new(&self.collection_picker)
+                            .small()
+                            .placeholder("Add collection")
+                            .search_placeholder("Search collections...")
+                            .disabled(saving)
+                            .w_full(),
+                    )
+                    .children(form.collections.iter().map(|collection| {
+                        let collection_id = collection.id;
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(collection.name.as_str().to_owned()),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "unstage-collection-{collection_id}"
+                                )))
+                                .ghost()
+                                .xsmall()
+                                .icon(Icon::new(IconName::Close).xsmall())
+                                .tooltip("Remove collection")
+                                .accessibility_label("Detach collection").disabled(saving)
+                                .on_click(
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.unstage_collection_on_edit_form(
+                                            collection_id,
+                                            window,
+                                            cx,
+                                        )
+                                    }),
+                                ),
+                            )
+                    })),
+            ),
+            FormField::Bib(bib) => edit_field(
+                label,
+                div()
+                    .id(SharedString::from(format!("edit-field-{bib:?}")))
+                    .test_support()
+                    .w_full()
+                    .child(form.fields[&bib].render(bib, saving))
+                    .when(
+                        bib == BibliographicField::Venue && form.parent_set(cx),
+                        |el| {
+                            el.child(
+                                div()
+                                    .id("venue-parent-hint")
+                                    .test_support()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Not used while a parent is linked"),
+                            )
+                        },
+                    )
+                    .children(inherited_note(form, field, cx))
+                    .children(field_error(form, field, danger)),
+            ),
+        }
+    }
+}
+
+/// The value an empty row would inherit, shown muted under its control.
+fn inherited_note(form: &EditForm, field: FormField, cx: &App) -> Option<impl IntoElement> {
+    form.inherited_hint(field, cx).map(|hint| {
+        div()
+            .id(SharedString::from(format!("inherited-{field:?}")))
+            .test_support()
+            .aria_label(hint.clone())
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(hint)
+    })
+}
+
+/// The form's error when it names `target`, for display under that row.
+fn field_error(form: &EditForm, target: FormField, danger: Hsla) -> Option<impl IntoElement> {
+    form.error
+        .as_ref()
+        .filter(|error| error.field == Some(target))
+        .map(|error| {
+            div()
+                .id("edit-field-error")
+                .test_support()
+                .aria_label(error.message.clone())
+                .text_xs()
+                .text_color(danger)
+                .child(error.message.clone())
+        })
 }
 
 /// One form row: the panel's label column left, the control filling the
 /// remaining width.
 fn edit_field(label: &'static str, control: impl IntoElement) -> Div {
     h_flex()
-        .items_center()
+        .items_start()
         .gap_2()
-        .child(div().w(FIELD_LABEL_WIDTH).flex_shrink_0().child(label))
+        .child(
+            div()
+                .id(SharedString::from(format!("edit-label-{label}")))
+                .test_support()
+                .w(relative(0.35))
+                .min_w(FIELD_LABEL_WIDTH)
+                .max_w(rems(12.))
+                .flex_shrink_0()
+                .child(label),
+        )
         .child(div().flex_1().min_w_0().child(control))
-}
-
-/// Bordered field input: small kit size, then a little extra padding so the
-/// caret is not hard against the edge. Focus paint is the darker accent
-/// border from the theme (`focus_ring = false`), not an outer halo.
-fn padded_input(state: &Entity<InputState>) -> Input {
-    Input::new(state).small().px(px(10.)).py(px(5.))
 }
 
 /// Keep a usable center region, shrinking both sidebars on small windows
@@ -7002,7 +8816,7 @@ impl Render for LibraryApp {
                                                 .border_color(cx.theme().border)
                                                 .px(px(12.))
                                                 .py(px(6.))
-                                                .text_size(px(12.))
+                                                .text_size(rems(1.))
                                                 .prefix(
                                                     Icon::new(IconName::Search)
                                                         .with_size(px(13.))
@@ -8869,7 +10683,6 @@ mod detail_prefetch_tests {
             publication_method: None,
             institution: None,
             organization: None,
-            school: None,
             abstract_text: None,
             keywords: vec![],
             id,
@@ -10745,6 +12558,2184 @@ mod classification_tests {
     }
 
     #[gpui_kit::test]
+    #[ignore = "the third Escape currently clears the search filter"]
+    fn details_repeated_escape_keeps_editor_and_filters(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        f.app.update(cx, |app, cx| {
+            app.table.update(cx, |table, _| {
+                table.delegate_mut().filter.search =
+                    ibex_core::NonEmptyStr::try_new("Citation").ok()
+            });
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("edit-field-Language", window, cx);
+            window
+                .within("edit-field-Language")
+                .click("value-select", cx);
+            window.input("transient", cx);
+            window.press("escape", cx);
+            window.press("escape", cx);
+            window.press("escape", cx);
+        })
+        .unwrap();
+        f.app.read_with(cx, |app, cx| {
+            assert!(app.edit.is_some());
+            assert_eq!(
+                app.table
+                    .read(cx)
+                    .delegate()
+                    .filter
+                    .search
+                    .as_ref()
+                    .map(ibex_core::NonEmptyStr::as_str),
+                Some("Citation")
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn details_date_previews_approximate_month_and_saves_it(cx: &mut TestAppContext) {
+        use crate::edit::BibliographicField as F;
+        use ibex_core::{DateCertainty as C, DatePrecision as P, UtcMillis};
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            enter_details_field(F::Published, "c. March 1991", window, cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Published")
+                    .find("date-preview")
+                    .label(),
+                Some("March 1991 · approximate")
+            );
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let date = rt
+            .block_on(f.worker.resource(f.resource))
+            .unwrap()
+            .published
+            .unwrap();
+        assert_eq!(date.instant(), UtcMillis::from_unix_ms(667_785_600_000));
+        assert_eq!(date.precision(), P::Month);
+        assert_eq!(date.certainty(), C::Approximate);
+    }
+    #[gpui_kit::test]
+    fn details_field_errors_render_inside_their_rows(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.click("edit-title", cx);
+            window.press("cmd-a", cx);
+            window.press("backspace", cx);
+            window.click("save-edit", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Title")
+                    .find("edit-field-error")
+                    .label(),
+                Some("Title must not be empty")
+            );
+            assert!(window.try_find("edit-form-error").is_none());
+        })
+        .unwrap();
+        for (target, row) in [
+            (
+                super::FormField::Bib(super::BibliographicField::SeriesNumber),
+                "edit-field-SeriesNumber",
+            ),
+            (
+                super::FormField::Bib(super::BibliographicField::Publisher),
+                "edit-field-Publisher",
+            ),
+            (super::FormField::Series, "edit-series"),
+            (super::FormField::Identifiers, "edit-field-Identifiers"),
+        ] {
+            f.app.update(cx, |app, cx| {
+                let Some(super::EditFetch::Ready(form)) = &mut app.edit else {
+                    panic!("form")
+                };
+                form.error = Some(super::FieldError::at(target, "Bad value"));
+                cx.notify();
+            });
+            cx.update_window(f.handle, |_, window, cx| {
+                window.render_frame(cx);
+                assert_eq!(
+                    window.within(row).find("edit-field-error").label(),
+                    Some("Bad value"),
+                    "{target:?}"
+                );
+                assert_eq!(window.find_all("edit-field-error").len(), 1);
+                assert!(window.try_find("edit-form-error").is_none());
+            })
+            .unwrap();
+        }
+        f.app.update(cx, |app, cx| {
+            let Some(super::EditFetch::Ready(form)) = &mut app.edit else {
+                panic!("form")
+            };
+            form.error = Some(super::FieldError::form("Offline"));
+            cx.notify();
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("edit-form-error").label(), Some("Offline"));
+            assert!(window.find_all("edit-field-error").is_empty());
+        })
+        .unwrap();
+    }
+    #[gpui_kit::test]
+    fn details_stock_geometry_and_title_freeze(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            let title = window.find("edit-title").bounds();
+            let subtitle = window.find("edit-field-Subtitle").bounds();
+            assert_eq!(
+                title.size.height, subtitle.size.height,
+                "Stock small input geometry"
+            );
+        })
+        .unwrap();
+        let before = f.app.read_with(cx, |app, cx| {
+            let Some(super::EditFetch::Ready(form)) = &app.edit else {
+                panic!("form")
+            };
+            form.title.read(cx).value().to_string()
+        });
+        f.app.update(cx, |app, cx| {
+            let Some(super::EditFetch::Ready(form)) = &mut app.edit else {
+                panic!("form")
+            };
+            form.saving = true;
+            cx.notify();
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-title", cx);
+            window.press("cmd-a", cx);
+            window.input("blocked", cx);
+            assert_eq!(window.find("edit-title").value(), Some(before.as_str()));
+        })
+        .unwrap();
+    }
+    #[gpui_kit::test]
+    fn details_series_create_select_save_and_cancel(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            reveal_edit_control("edit-series", window, cx);
+            window.click("edit-series", cx);
+            window.input("Studies in bibliography", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let series = rt.block_on(f.worker.list_series()).unwrap();
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].title.as_str(), "Studies in bibliography");
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource))
+                .unwrap()
+                .series_id,
+            Some(series[0].id)
+        );
+        cx.update_window(f.handle, |_, window, cx| {
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            reveal_edit_control("edit-series", window, cx);
+            window.click("edit-series", cx);
+            window.input("Cancelled series", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("cancel-edit", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource))
+                .unwrap()
+                .series_id,
+            Some(series[0].id)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn details_labels_use_extra_sidebar_width(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        reveal_all_fields(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            reveal_edit_control("edit-field-PublicationMethod", window, cx);
+            let narrow = window.find("edit-label-Publication method").bounds();
+            let handle = window.find("resize-right-sidebar").bounds().center();
+            window.drag(
+                handle,
+                gpui_kit::point(handle.x - gpui_kit::px(280.), handle.y),
+                cx,
+            );
+            reveal_edit_control("edit-field-PublicationMethod", window, cx);
+            let wide = window.find("edit-label-Publication method").bounds();
+            let single_line = window.find("edit-label-Publisher").bounds();
+            assert!(
+                wide.size.width > narrow.size.width,
+                "Label column must grow with the sidebar"
+            );
+            assert!(
+                wide.size.height < narrow.size.height,
+                "Long labels should unwrap when space allows"
+            );
+            assert_eq!(
+                wide.size.height, single_line.size.height,
+                "Publication method should fit on one line in a wide sidebar"
+            );
+            let input = window.find("edit-field-PublicationMethod").bounds();
+            assert!(wide.right() < input.left());
+            assert!(
+                input.size.width > gpui_kit::px(120.),
+                "Keep space for the input"
+            );
+        })
+        .unwrap();
+    }
+    #[gpui_kit::test]
+    fn details_labels_align_at_top_and_title_fields_are_adjacent(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        reveal_all_fields(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            let title = window.find("edit-label-Title").bounds();
+            let subtitle = window.find("edit-field-Subtitle").bounds();
+            assert!(
+                subtitle.top() > title.top() && subtitle.top() - title.top() < gpui_kit::px(60.),
+                "Subtitle must immediately follow Title"
+            );
+            let addon = window.find("edit-field-TitleAddon").bounds();
+            let short = window.find("edit-field-ShortTitle").bounds();
+            assert!(
+                addon.top() > subtitle.top()
+                    && addon.top()
+                        - window
+                            .find("edit-label-Subtitle")
+                            .bounds()
+                            .bottom()
+                            .max(subtitle.bottom())
+                        < gpui_kit::px(20.)
+            );
+            assert!(
+                short.top() > addon.top()
+                    && short.top()
+                        - window
+                            .find("edit-label-Title addon")
+                            .bounds()
+                            .bottom()
+                            .max(addon.bottom())
+                        < gpui_kit::px(20.)
+            );
+            let kind = match &f.app.read(cx).edit {
+                Some(super::EditFetch::Ready(form)) => form.current_kind(cx),
+                _ => panic!("form"),
+            };
+            let labels: Vec<&str> = super::FormField::ORDER
+                .iter()
+                .map(|field| field.label(kind))
+                .collect();
+            for pair in labels.windows(2) {
+                let before = window
+                    .find(gpui_kit::SharedString::from(format!(
+                        "edit-label-{}",
+                        pair[0]
+                    )))
+                    .bounds();
+                let after = window
+                    .find(gpui_kit::SharedString::from(format!(
+                        "edit-label-{}",
+                        pair[1]
+                    )))
+                    .bounds();
+                assert!(
+                    before.bottom() <= after.top(),
+                    "{} must precede {} in topical order",
+                    pair[0],
+                    pair[1]
+                );
+            }
+            reveal_edit_control("add-creator-person", window, cx);
+            let label = window.find("edit-label-Creators").bounds();
+            let first = window.find("add-creator-person").bounds();
+            assert_eq!(
+                label.top(),
+                first.top(),
+                "Creators label must align to first control, not center of list"
+            );
+            assert!(label.right() < first.left(), "Keep the two-column layout");
+        })
+        .unwrap();
+    }
+    #[gpui_kit::test]
+    fn details_invalid_date_previews_error_and_blocks_save(cx: &mut TestAppContext) {
+        use crate::edit::BibliographicField as F;
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let original = rt.block_on(f.worker.resource(f.resource)).unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            enter_details_field(F::Published, "soon", window, cx);
+            window.render_frame(cx);
+            let preview = window
+                .within("edit-field-Published")
+                .find("date-preview")
+                .label()
+                .unwrap_or_default()
+                .to_owned();
+            assert!(preview.contains("must be a date"), "{preview}");
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        f.app.read_with(cx, |app, cx| {
+            let Some(super::EditFetch::Ready(form)) = &app.edit else {
+                panic!("form")
+            };
+            assert_eq!(
+                form.error.as_ref().and_then(|error| error.field),
+                Some(super::FormField::Bib(F::Published))
+            );
+            assert_eq!(form.fields[&F::Published].value(cx), "soon");
+        });
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource)).unwrap().to_new(),
+            original.to_new()
+        );
+    }
+    #[gpui_kit::test]
+    fn details_date_calendar_writes_a_day(cx: &mut TestAppContext) {
+        use crate::edit::BibliographicField as F;
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            enter_details_field(F::Published, "2026-09-15", window, cx);
+            window
+                .within("edit-field-Published")
+                .click("date-calendar", cx);
+            reveal_edit_control("calendar-2026-09-16-0-2", window, cx);
+            window.click("calendar-2026-09-16-0-2", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Published")
+                    .find("date-input")
+                    .value(),
+                Some("2026-09-16")
+            );
+            assert!(
+                window.try_find("calendar-2026-09-16-0-2").is_none(),
+                "Picking a day hides the calendar"
+            );
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert_eq!(
+            crate::edit::prefill_draft(&rt.block_on(f.worker.resource(f.resource)).unwrap()).fields
+                [&F::Published],
+            "2026-09-16"
+        );
+        // Typed ISO instants may add, replace or remove fractions.
+        for raw in [
+            "2026-09-16T08:00:00.123Z/2026-09-21T12:31:00.456Z~",
+            "2026-09-16T08:00:00.789Z",
+            "2026-09-16T08:00:00Z",
+        ] {
+            cx.update_window(f.handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("edit-resource", cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            cx.update_window(f.handle, |_, window, cx| {
+                enter_details_field(F::Published, raw, window, cx);
+                window.click("save-edit", cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+            assert_eq!(
+                crate::edit::prefill_draft(&saved).fields[&F::Published],
+                raw
+            );
+        }
+    }
+    #[gpui_kit::test]
+    fn details_rich_controls_disable_while_saving(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        reveal_all_fields(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("edit-field-Published", window, cx);
+        })
+        .unwrap();
+        f.app.update(cx, |app, cx| {
+            let Some(super::EditFetch::Ready(form)) = &mut app.edit else {
+                panic!("form")
+            };
+            form.saving = true;
+            cx.notify();
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            for id in ["date-calendar", "date-clear"] {
+                assert_eq!(
+                    window.within("edit-field-Published").find(id).disabled(),
+                    Some(true)
+                );
+            }
+            window
+                .within("edit-field-Published")
+                .click("date-input", cx);
+            window.input("1991", cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Published")
+                    .find("date-input")
+                    .value(),
+                Some("")
+            );
+            reveal_edit_control("edit-field-Keywords", window, cx);
+            window
+                .within("edit-field-Keywords")
+                .click("token-input", cx);
+            window.input("blocked", cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Keywords")
+                    .find("token-input")
+                    .value(),
+                Some("")
+            );
+            assert_eq!(
+                window
+                    .within("edit-field-Keywords")
+                    .find("token-add")
+                    .disabled(),
+                Some(true)
+            );
+            reveal_edit_control("edit-field-Language", window, cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Language")
+                    .find("value-select")
+                    .disabled(),
+                Some(true)
+            );
+        })
+        .unwrap();
+    }
+    #[gpui_kit::test]
+    fn details_date_clear_removes_the_date_and_its_label(cx: &mut TestAppContext) {
+        use ibex_core::{BibliographicDate, DateCertainty, DatePrecision as P, UtcMillis};
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut source = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        source.published = Some(
+            BibliographicDate::try_new_precise(
+                UtcMillis::from_unix_ms(1712345678123),
+                None,
+                P::Unspecified,
+                DateCertainty::Exact,
+                Some(NonEmptyStr::try_new("Spring 2024").unwrap()),
+            )
+            .unwrap(),
+        );
+        rt.block_on(f.worker.update_resource(f.resource, source))
+            .unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("edit-field-Published", window, cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Published")
+                    .find("date-input")
+                    .value(),
+                Some("2024-04-05T19:34:38.123Z")
+            );
+            window
+                .within("edit-field-Published")
+                .click("date-clear", cx);
+            window.render_frame(cx);
+            for id in ["date-input", "date-display"] {
+                assert_eq!(
+                    window.within("edit-field-Published").find(id).value(),
+                    Some("")
+                );
+            }
+            assert!(
+                window
+                    .within("edit-field-Published")
+                    .try_find("date-preview")
+                    .is_none()
+            );
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        assert!(
+            rt.block_on(f.worker.resource(f.resource))
+                .unwrap()
+                .published
+                .is_none()
+        );
+    }
+    #[gpui_kit::test]
+    fn details_imported_dates_keep_instants_and_unspecified_precision(cx: &mut TestAppContext) {
+        use crate::edit::BibliographicField as F;
+        use ibex_core::{BibliographicDate, DateCertainty as C, DatePrecision as P, UtcMillis};
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut source = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        let date = |precision| {
+            BibliographicDate::try_new_precise(
+                UtcMillis::from_unix_ms(1712345678123),
+                Some(UtcMillis::from_unix_ms(1745678901456)),
+                precision,
+                C::Uncertain,
+                None,
+            )
+            .unwrap()
+        };
+        source.published = Some(date(P::Unspecified));
+        source.accessed = Some(date(P::DateTime));
+        source.original_date = Some(date(P::Month));
+        source.event_date = Some(date(P::Day));
+        rt.block_on(f.worker.update_resource(f.resource, source.clone()))
+            .unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource)).unwrap().to_new(),
+            source
+        );
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        // A certainty-only edit keeps each endpoint's stored instant and precision.
+        let texts =
+            crate::edit::prefill_draft(&rt.block_on(f.worker.resource(f.resource)).unwrap()).fields;
+        for field in [F::Published, F::Accessed, F::OriginalDate, F::EventDate] {
+            cx.update_window(f.handle, |_, window, cx| {
+                enter_details_field(field, texts[&field].trim_end_matches('?'), window, cx);
+            })
+            .unwrap();
+        }
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+        for (actual, before) in [
+            (saved.published, source.published),
+            (saved.accessed, source.accessed),
+            (saved.original_date, source.original_date),
+            (saved.event_date, source.event_date),
+        ] {
+            let (actual, before) = (actual.unwrap(), before.unwrap());
+            assert_eq!(actual.instant(), before.instant());
+            assert_eq!(actual.end(), before.end());
+            assert_eq!(actual.precision(), before.precision());
+            assert_eq!(actual.certainty(), C::Exact);
+        }
+    }
+    #[gpui_kit::test]
+    fn details_autocomplete_reuses_other_resource_and_custom_values(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut source =
+            crate::metadata::empty_resource("Not in the cached grid", ResourceKind::Book).unwrap();
+        source.publisher = Some("Outside Publisher".into());
+        source.institution = Some("Outside Institution".into());
+        source.organization = Some("Outside Organization".into());
+        source.document_type = Some("Outside DocumentType".into());
+        source.publication_method = Some("Outside PublicationMethod".into());
+        rt.block_on(f.worker.create_resource(source)).unwrap();
+        select_first(&f, cx);
+        for custom in [false, true] {
+            cx.update_window(f.handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("edit-resource", cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            reveal_all_fields(&f, cx);
+            for key in [
+                "Publisher",
+                "Institution",
+                "Organization",
+                "DocumentType",
+                "PublicationMethod",
+            ] {
+                let value = format!("{} {key}", if custom { "Custom" } else { "Outside" });
+                cx.update_window(f.handle, |_, window, cx| {
+                    let id = format!("edit-field-{key}");
+                    reveal_edit_control(&id, window, cx);
+                    window
+                        .within(gpui_kit::SharedString::from(id))
+                        .click("value-select", cx);
+                    window.input(if custom { &value } else { "Outside" }, cx);
+                })
+                .unwrap();
+                settle(cx, &f.worker);
+                cx.update_window(f.handle, |_, window, cx| {
+                    window.render_frame(cx);
+                    let option = gpui_kit::SharedString::from(format!("value-option-{value}"));
+                    assert!(window.find(option.clone()).visible());
+                    if custom {
+                        assert!(
+                            window
+                                .find(option.clone())
+                                .label()
+                                .unwrap_or_default()
+                                .contains("Use")
+                        );
+                    }
+                    window.click(option, cx);
+                })
+                .unwrap();
+                settle(cx, &f.worker);
+            }
+            cx.update_window(f.handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("save-edit", cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+            let prefix = if custom { "Custom" } else { "Outside" };
+            for (value, key) in [
+                (saved.publisher, "Publisher"),
+                (saved.institution, "Institution"),
+                (saved.organization, "Organization"),
+                (saved.document_type, "DocumentType"),
+                (saved.publication_method, "PublicationMethod"),
+            ] {
+                assert_eq!(value.as_deref(), Some(format!("{prefix} {key}").as_str()));
+            }
+        }
+    }
+    #[gpui_kit::test]
+    fn details_language_search_escape_preserves_imported_selection(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut source = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        source.language = Some("Imported spelling".into());
+        rt.block_on(f.worker.update_resource(f.resource, source))
+            .unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("edit-field-Language", window, cx);
+            window
+                .within("edit-field-Language")
+                .click("value-select", cx);
+            window.input("French", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("escape", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        f.app.read_with(cx, |app, cx| {
+            let Some(super::EditFetch::Ready(form)) = &app.edit else {
+                panic!("form")
+            };
+            let super::BibliographicInput::Value(value) =
+                &form.fields[&crate::edit::BibliographicField::Language]
+            else {
+                panic!("language")
+            };
+            assert_eq!(
+                value.picker.read(cx).selected_value().map(String::as_str),
+                Some("Imported spelling")
+            );
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource))
+                .unwrap()
+                .language
+                .as_deref(),
+            Some("Imported spelling")
+        );
+    }
+    #[gpui_kit::test]
+    fn details_language_known_custom_and_clear(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for (query, expected) in [
+            ("English", Some("en")),
+            ("Old Church Custom", Some("Old Church Custom")),
+            ("", None),
+        ] {
+            cx.update_window(f.handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("edit-resource", cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            reveal_all_fields(&f, cx);
+            cx.update_window(f.handle, |_, window, cx| {
+                reveal_edit_control("edit-field-Language", window, cx);
+                if query.is_empty() {
+                    window.within("edit-field-Language").click("clean", cx);
+                } else {
+                    window
+                        .within("edit-field-Language")
+                        .click("value-select", cx);
+                    window.input(query, cx);
+                }
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            if !query.is_empty() {
+                cx.update_window(f.handle, |_, window, cx| {
+                    window.click(
+                        gpui_kit::SharedString::from(format!("value-option-{}", expected.unwrap())),
+                        cx,
+                    );
+                })
+                .unwrap();
+                settle(cx, &f.worker);
+            }
+            cx.update_window(f.handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("save-edit", cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            assert_eq!(
+                rt.block_on(f.worker.resource(f.resource))
+                    .unwrap()
+                    .language
+                    .as_deref(),
+                expected
+            );
+        }
+    }
+    #[gpui_kit::test]
+    fn details_tokens_keyboard_removal_rejects_invalid_pending_and_preserves_identifiers(
+        cx: &mut TestAppContext,
+    ) {
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut source = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        source.isbns = vec![ibex_core::Identifier {
+            original: "Imported, custom identifier".into(),
+            canonical: Some("custom-key".into()),
+        }];
+        rt.block_on(f.worker.update_resource(f.resource, source.clone()))
+            .unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("edit-field-Keywords", window, cx);
+            window
+                .within("edit-field-Keywords")
+                .click("token-input", cx);
+            window.press("backspace", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .within("edit-field-Keywords")
+                    .try_find(("token-remove", 0usize))
+                    .is_none()
+            );
+            window
+                .within("edit-field-Keywords")
+                .click("token-input", cx);
+            window.input("   ", cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        f.app.read_with(cx, |app, _| {
+            let Some(super::EditFetch::Ready(form)) = &app.edit else {
+                panic!("invalid pending must remain editable")
+            };
+            let error = form.error.as_ref().unwrap();
+            assert!(error.message.contains("Keywords"));
+            assert_eq!(
+                error.field,
+                Some(super::FormField::Bib(super::BibliographicField::Keywords))
+            );
+        });
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource)).unwrap().to_new(),
+            source
+        );
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("edit-field-Keywords", window, cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Keywords")
+                    .find("token-input")
+                    .value(),
+                Some("   ")
+            );
+            window
+                .within("edit-field-Keywords")
+                .click("token-input", cx);
+            window.press("cmd-a", cx);
+            window.input("valid, token", cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+        assert_eq!(saved.keywords, vec!["valid, token"]);
+        assert_eq!(saved.isbns, source.isbns);
+    }
+    #[gpui_kit::test]
+    fn details_tokens_add_remove_pending_save_and_cancel(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("edit-field-Keywords", window, cx);
+            window
+                .within("edit-field-Keywords")
+                .click("token-input", cx);
+            window.input("beta, gamma", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .within("edit-field-Keywords")
+                    .find(("token-remove", 1usize))
+                    .visible()
+            );
+            window.input("temporary", cx);
+            reveal_edit_control("edit-field-Keywords", window, cx);
+            window.within("edit-field-Keywords").click("token-add", cx);
+            window
+                .within("edit-field-Keywords")
+                .click(("token-remove", 2usize), cx);
+            window
+                .within("edit-field-Keywords")
+                .click("token-input", cx);
+            window.input("pending", cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+        assert_eq!(
+            saved.keywords,
+            vec!["Bibliometrics", "beta, gamma", "pending"]
+        );
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("edit-field-Keywords", window, cx);
+            window
+                .within("edit-field-Keywords")
+                .click(("token-remove", 0usize), cx);
+            window.click("cancel-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource)).unwrap().to_new(),
+            saved.to_new()
+        );
+    }
+    #[gpui_kit::test]
+    fn details_typed_date_range_saves_and_clear_cancels(cx: &mut TestAppContext) {
+        use crate::edit::BibliographicField as F;
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            enter_details_field(F::Published, "February 2024 to March 2024~", window, cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Published")
+                    .find("date-preview")
+                    .label(),
+                Some("February 2024 – March 2024 · approximate")
+            );
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+        assert_eq!(
+            crate::edit::prefill_draft(&saved).fields[&F::Published],
+            "2024-02/2024-03~"
+        );
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("edit-field-Published", window, cx);
+            window
+                .within("edit-field-Published")
+                .click("date-clear", cx);
+            window.click("cancel-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource)).unwrap().to_new(),
+            saved.to_new()
+        );
+    }
+    #[gpui_kit::test]
+    fn details_date_display_as_round_trips_the_label(cx: &mut TestAppContext) {
+        use crate::edit::BibliographicField as F;
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            enter_details_field(F::Published, "1991", window, cx);
+            assert!(
+                window
+                    .within("edit-field-Published")
+                    .try_find("date-display")
+                    .is_none(),
+                "An empty label stays behind Display as…"
+            );
+            enter_details_field(F::PublishedDisplay, "Spring 1991", window, cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+        assert_eq!(
+            saved.published.as_ref().and_then(|date| date.display()),
+            Some("Spring 1991")
+        );
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("edit-field-Published", window, cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Published")
+                    .find("date-display")
+                    .value(),
+                Some("Spring 1991")
+            );
+            assert!(
+                window
+                    .within("edit-field-Published")
+                    .try_find("date-display-toggle")
+                    .is_none()
+            );
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource)).unwrap().to_new(),
+            saved.to_new()
+        );
+    }
+    #[gpui_kit::test]
+    fn details_all_fields_save_and_reopen(cx: &mut TestAppContext) {
+        use crate::edit::{BibliographicField as F, prefill_draft};
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        reveal_all_fields(&f, cx);
+        let values: Vec<_> = F::ALL
+            .iter()
+            // A series number is rejected without a series; edit.rs covers it.
+            // Identifiers share one row, entered below.
+            .filter(|field| {
+                **field != F::SeriesNumber
+                    && super::FormField::for_bib(**field) != super::FormField::Identifiers
+            })
+            .map(|field| {
+                (
+                    *field,
+                    match field {
+                        F::Published | F::Accessed | F::OriginalDate | F::EventDate => "2024-02-29",
+                        F::Pages => "12–19",
+                        _ => "Edited value",
+                    },
+                )
+            })
+            .collect();
+        let identifiers = [
+            (F::Doi, "doi:10.1000/edited", "10.1000/edited"),
+            (F::Eprint, "arxiv:2101.00001", "2101.00001"),
+            (F::Isbns, "9780306406157", "9780306406157"),
+            (F::Issns, "2049-3630", "2049-3630"),
+            (F::Isrns, "isrn:TEST-2024", "TEST-2024"),
+        ];
+        cx.update_window(f.handle, |_, window, cx| {
+            enter_identifiers(identifiers.map(|(_, typed, _)| typed), window, cx);
+        })
+        .unwrap();
+        for (field, value) in &values {
+            cx.update_window(f.handle, |_, window, cx| {
+                enter_details_field(*field, value, window, cx);
+                assert!(
+                    window.find("save-edit").visible(),
+                    "Save must stay visible while scrolling"
+                );
+            })
+            .unwrap();
+            if super::details_suggestion_field(*field).is_some() {
+                settle(cx, &f.worker);
+                cx.update_window(f.handle, |_, window, cx| {
+                    window.render_frame(cx);
+                    window.click(
+                        gpui_kit::SharedString::from(format!("value-option-{value}")),
+                        cx,
+                    );
+                })
+                .unwrap();
+                settle(cx, &f.worker);
+            }
+        }
+        cx.update_window(f.handle, |_, window, cx| {
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        f.app.read_with(cx, |app, _| {
+            if let Some(super::EditFetch::Ready(form)) = &app.edit {
+                panic!("save failed: {:?}", form.error);
+            }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+        let draft = prefill_draft(&saved);
+        for (field, value) in values {
+            assert_eq!(draft.fields[&field], value, "{field:?}");
+        }
+        for (field, _, stored) in identifiers {
+            assert_eq!(draft.fields[&field], stored, "{field:?}");
+        }
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        f.app.read_with(cx, |app, cx| {
+            let Some(super::EditFetch::Ready(form)) = &app.edit else {
+                panic!("form should reopen")
+            };
+            assert_eq!(form.draft(cx).unwrap().fields, draft.fields);
+        });
+    }
+    #[gpui_kit::test]
+    fn details_identifiers_share_one_list(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        open_edit_with(&f, cx, |source| source.kind = ResourceKind::Book);
+        reveal_all_fields(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            enter_identifiers(["10.1000/xyz", "978-0-306-40615-7"], window, cx);
+            window.render_frame(cx);
+            let row = window.within("edit-field-Identifiers");
+            assert_eq!(row.find(("identifier-badge", 0usize)).label(), Some("DOI"));
+            assert_eq!(row.find(("identifier-badge", 1usize)).label(), Some("ISBN"));
+            window
+                .within("edit-field-Identifiers")
+                .click("identifier-input", cx);
+            window.input("not an id", cx);
+            window.click("save-edit", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window
+                    .within("edit-field-Identifiers")
+                    .find("edit-field-error")
+                    .label(),
+                Some(
+                    "Unrecognized identifier; prefix it with doi:, isbn:, issn:, isrn:, or arxiv:"
+                )
+            );
+            window
+                .within("edit-field-Identifiers")
+                .click("identifier-input", cx);
+            window.press("cmd-a", cx);
+            window.press("backspace", cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        f.app.read_with(cx, |app, _| {
+            if let Some(super::EditFetch::Ready(form)) = &app.edit {
+                panic!("save failed: {:?}", form.error);
+            }
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+        assert_eq!(saved.doi.as_deref(), Some("10.1000/xyz"));
+        assert_eq!(
+            saved
+                .isbns
+                .iter()
+                .map(|isbn| isbn.as_str())
+                .collect::<Vec<_>>(),
+            ["978-0-306-40615-7"]
+        );
+    }
+    /// Replaces the identifiers row's entries with `texts`, added one by one.
+    fn enter_identifiers<'a>(
+        texts: impl IntoIterator<Item = &'a str>,
+        window: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::App,
+    ) {
+        let scope = gpui_kit::SharedString::from("edit-field-Identifiers");
+        reveal_edit_control(&scope, window, cx);
+        while window
+            .within(scope.clone())
+            .try_find(("identifier-remove", 0usize))
+            .is_some()
+        {
+            window
+                .within(scope.clone())
+                .click(("identifier-remove", 0usize), cx);
+        }
+        for text in texts {
+            // Each entry grows the row; keep its input in view.
+            reveal_edit_control(&scope, window, cx);
+            window.within(scope.clone()).click("identifier-input", cx);
+            window.press("cmd-a", cx);
+            window.input(text, cx);
+            window.within(scope.clone()).click("identifier-add", cx);
+        }
+    }
+    fn enter_details_field(
+        field: crate::edit::BibliographicField,
+        text: &str,
+        window: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::App,
+    ) {
+        use crate::edit::BibliographicField as F;
+        let id = format!("edit-field-{field:?}");
+        let date = match field {
+            F::PublishedDisplay => Some(F::Published),
+            F::AccessedDisplay => Some(F::Accessed),
+            F::OriginalDateDisplay => Some(F::OriginalDate),
+            F::EventDateDisplay => Some(F::EventDate),
+            _ => None,
+        };
+        if let Some(date) = date {
+            let scope = gpui_kit::SharedString::from(format!("edit-field-{date:?}"));
+            reveal_edit_control(&scope, window, cx);
+            if window
+                .within(scope.clone())
+                .try_find("date-display")
+                .is_none()
+            {
+                window
+                    .within(scope.clone())
+                    .click("date-display-toggle", cx);
+                reveal_edit_control(&scope, window, cx);
+            }
+            window.within(scope).click("date-display", cx);
+            window.press("cmd-a", cx);
+            window.input(text, cx);
+            return;
+        }
+        reveal_edit_control(&id, window, cx);
+        if super::details_suggestion_field(field).is_some() {
+            window
+                .within(gpui_kit::SharedString::from(id))
+                .click("value-select", cx);
+            window.input(text, cx);
+            return;
+        }
+        if matches!(
+            field,
+            F::Published | F::Accessed | F::OriginalDate | F::EventDate
+        ) {
+            window
+                .within(gpui_kit::SharedString::from(id))
+                .click("date-input", cx);
+        } else if field == F::Keywords {
+            let scope = gpui_kit::SharedString::from(id);
+            while window
+                .within(scope.clone())
+                .try_find(("token-remove", 0usize))
+                .is_some()
+            {
+                window
+                    .within(scope.clone())
+                    .click(("token-remove", 0usize), cx);
+            }
+            for line in text.split('\n') {
+                window.within(scope.clone()).click("token-input", cx);
+                window.press("cmd-a", cx);
+                window.input(line, cx);
+                window.within(scope.clone()).click("token-add", cx);
+            }
+            return;
+        } else {
+            window.click(gpui_kit::SharedString::from(id), cx);
+        }
+        window.press("cmd-a", cx);
+        for (ix, line) in text.split('\n').enumerate() {
+            if ix > 0 {
+                window.press("shift-enter", cx);
+            }
+            window.input(line, cx);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn details_creator_drag_moves_rows_and_stages_until_save(cx: &mut TestAppContext) {
+        use ibex_core::{CreatorRole as R, CreatorSpec, Name};
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let person =
+            rt.block_on(f.worker.create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            ))
+            .unwrap();
+        let mut new = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        new.creators = [R::Author, R::Editor, R::Translator]
+            .into_iter()
+            .zip(["A. L.", "Ada", "Augusta"])
+            .map(|(role, credit)| CreatorSpec {
+                person_id: person.id,
+                role,
+                credited_as: Some(NonEmptyStr::try_new(credit).unwrap()),
+            })
+            .collect();
+        let before = new.creators.clone();
+        let expected = vec![before[1].clone(), before[2].clone(), before[0].clone()];
+        rt.block_on(f.worker.update_resource(f.resource, new))
+            .unwrap();
+        select_first(&f, cx);
+        for save in [false, true] {
+            cx.update_window(f.handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("edit-resource", cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            cx.update_window(f.handle, |_, window, cx| {
+                reveal_edit_control("creator-drag-2", window, cx);
+                let first = window.find("creator-drag-0").bounds();
+                assert_eq!(
+                    window.find("edit-label-Creators").bounds().top(),
+                    first.top()
+                );
+                // Editable credit inputs are not drag handles.
+                window.drag_to("creator-credit-0", "creator-drag-2", cx);
+                assert!(
+                    window.find("creator-row-0").bounds().top()
+                        < window.find("creator-row-1").bounds().top()
+                );
+                window.drag_to("creator-drag-0", "creator-drag-2", cx);
+                assert!(
+                    window.find("creator-row-1").bounds().top()
+                        < window.find("creator-row-2").bounds().top()
+                );
+                assert!(
+                    window.find("creator-row-2").bounds().top()
+                        < window.find("creator-row-0").bounds().top(),
+                    "Dragging down must move, not swap rows"
+                );
+                window.drag_to("creator-drag-0", "creator-drag-1", cx);
+                assert!(
+                    window.find("creator-row-0").bounds().top()
+                        < window.find("creator-row-1").bounds().top(),
+                    "Dragging upward inserts before the target"
+                );
+                window.drag_to("creator-drag-0", "creator-drag-2", cx);
+            })
+            .unwrap();
+            assert_eq!(
+                rt.block_on(f.worker.resource(f.resource))
+                    .unwrap()
+                    .to_new()
+                    .creators,
+                before,
+                "Drag must not persist before Save"
+            );
+            cx.update_window(f.handle, |_, window, cx| {
+                window.click(if save { "save-edit" } else { "cancel-edit" }, cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            assert_eq!(
+                rt.block_on(f.worker.resource(f.resource))
+                    .unwrap()
+                    .to_new()
+                    .creators,
+                if save {
+                    expected.clone()
+                } else {
+                    before.clone()
+                }
+            );
+        }
+        cx.update_window(f.handle, |_, window, cx| {
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        f.app.read_with(cx, |app, cx| {
+            let Some(super::EditFetch::Ready(form)) = &app.edit else {
+                panic!("form should reopen")
+            };
+            assert_eq!(form.draft(cx).unwrap().creators, expected);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn details_creator_roles_credit_and_order_roundtrip(cx: &mut TestAppContext) {
+        use ibex_core::{CreatorRole as R, CreatorSpec, Name};
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let person =
+            rt.block_on(f.worker.create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            ))
+            .unwrap();
+        let mut new = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        new.creators = vec![
+            CreatorSpec {
+                person_id: person.id,
+                role: R::Author,
+                credited_as: Some(NonEmptyStr::try_new("A. L.").unwrap()),
+            },
+            CreatorSpec {
+                person_id: person.id,
+                role: R::Editor,
+                credited_as: Some(NonEmptyStr::try_new("Ada").unwrap()),
+            },
+        ];
+        rt.block_on(f.worker.update_resource(f.resource, new))
+            .unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("creator-credit-1", cx);
+            window.press("cmd-a", cx);
+            window.input("Augusta Ada", cx);
+            window.click("creator-role-1", cx);
+            window.input("Translator", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("creator-menu-0", cx);
+            window.render_frame(cx);
+            window.click("creator-down-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        assert_eq!(
+            saved.creators,
+            vec![
+                CreatorSpec {
+                    person_id: person.id,
+                    role: R::Translator,
+                    credited_as: Some(NonEmptyStr::try_new("Augusta Ada").unwrap())
+                },
+                CreatorSpec {
+                    person_id: person.id,
+                    role: R::Author,
+                    credited_as: Some(NonEmptyStr::try_new("A. L.").unwrap())
+                },
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn details_edit_save_keeps_the_stored_favorite(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(f.worker.set_resource_favorite(f.resource, true))
+            .unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("edit-favorite").is_none());
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        f.app.read_with(cx, |app, _| assert!(app.edit.is_none()));
+        assert!(rt.block_on(f.worker.resource(f.resource)).unwrap().favorite);
+    }
+
+    /// Stores `edit` on the fixture's resource, then opens its edit form.
+    fn open_edit_with(
+        f: &Fixture,
+        cx: &mut TestAppContext,
+        edit: impl FnOnce(&mut ibex_core::NewResource),
+    ) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut source = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        edit(&mut source);
+        rt.block_on(f.worker.update_resource(f.resource, source))
+            .unwrap();
+        select_first(f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+    }
+
+    #[gpui_kit::test]
+    fn details_webpage_shows_its_fields_only(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        open_edit_with(&f, cx, |source| source.kind = ResourceKind::Webpage);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("edit-field-Url").is_some());
+            assert!(window.try_find("edit-field-Accessed").is_some());
+            assert!(window.try_find("edit-label-Website").is_some());
+            assert!(window.try_find("edit-field-Volume").is_none());
+            assert!(window.try_find("edit-field-Identifiers").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn details_add_field_menu_reveals_a_hidden_row(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        open_edit_with(&f, cx, |_| {});
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("edit-field-Volume").is_none());
+            reveal_edit_control("add-field-menu", window, cx);
+            window.click("add-field-menu", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("add-field-Bib(TitleAddon)").is_some());
+            assert!(
+                window.try_find("add-field-Bib(Subtitle)").is_none(),
+                "Shown rows stay out of the menu"
+            );
+            window.click("add-field-Bib(Volume)", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("popup-menu").is_none());
+            assert!(window.try_find("edit-field-Volume").is_some());
+            let Some(super::EditFetch::Ready(form)) = &f.app.read(cx).edit else {
+                panic!("form")
+            };
+            let super::BibliographicInput::Single(volume) =
+                &form.fields[&crate::edit::BibliographicField::Volume]
+            else {
+                panic!("volume input")
+            };
+            let focus = gpui_kit::Focusable::focus_handle(volume.read(cx), cx);
+            assert!(focus.is_focused(window), "Volume takes focus");
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn details_kind_change_recomputes_visible_rows(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        open_edit_with(&f, cx, |_| {});
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("edit-field-Edition").is_some());
+            assert!(window.try_find("edit-field-Venue").is_none());
+            let Some(super::EditFetch::Ready(form)) = &f.app.read(cx).edit else {
+                panic!("form")
+            };
+            let kind = form.kind.clone();
+            kind.update(cx, |state, cx| {
+                state.set_selected_values(&[ResourceKind::JournalArticle], window, cx)
+            });
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("edit-label-Parent").is_some());
+            assert!(window.try_find("edit-field-Venue").is_some());
+            assert!(window.try_find("edit-field-Edition").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn details_empty_rows_show_values_inherited_from_the_parent(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let issue = rt.block_on(async {
+            let mut journal =
+                crate::metadata::empty_resource("Nature", ResourceKind::Journal).unwrap();
+            journal.publisher = Some("Springer Nature".into());
+            let journal = f.worker.create_resource(journal).await.unwrap();
+            let mut issue =
+                crate::metadata::empty_resource("Vol. 12, no. 3", ResourceKind::Issue).unwrap();
+            issue.parent_id = Some(journal.id);
+            issue.volume = Some("12".into());
+            f.worker.create_resource(issue).await.unwrap()
+        });
+        open_edit_with(&f, cx, |source| {
+            source.kind = ResourceKind::JournalArticle;
+            source.parent_id = Some(issue.id);
+        });
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("inherited-Bib(Volume)").label(),
+                Some("From Vol. 12, no. 3: 12")
+            );
+            assert_eq!(
+                window.find("inherited-Bib(Publisher)").label(),
+                Some("From Nature: Springer Nature")
+            );
+            let Some(super::EditFetch::Ready(form)) = &f.app.read(cx).edit else {
+                panic!("form")
+            };
+            assert!(
+                !form.revealed.contains(&super::FormField::Bib(
+                    crate::edit::BibliographicField::Volume
+                )),
+                "Inherited rows are not pinned open"
+            );
+            let super::BibliographicInput::Single(volume) =
+                &form.fields[&crate::edit::BibliographicField::Volume]
+            else {
+                panic!("volume input")
+            };
+            let volume = volume.clone();
+            let parent = form.parent.clone();
+            volume.update(cx, |input, cx| input.set_value("7", window, cx));
+            window.render_frame(cx);
+            assert!(
+                window.try_find("inherited-Bib(Volume)").is_none(),
+                "An own value replaces the hint"
+            );
+            volume.update(cx, |input, cx| input.set_value("", window, cx));
+            window.render_frame(cx);
+            assert!(window.try_find("inherited-Bib(Volume)").is_some());
+            parent.update(cx, |state, cx| state.clear_selection(cx));
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("inherited-Bib(Volume)").is_none());
+            assert!(window.try_find("inherited-Bib(Publisher)").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn details_book_with_a_volume_still_shows_it(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        open_edit_with(&f, cx, |source| source.volume = Some("3".into()));
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("edit-field-Volume").is_some());
+            assert!(window.try_find("edit-field-Issue").is_none());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn details_sections_follow_the_registry_order(cx: &mut TestAppContext) {
+        use super::{FormField, Section};
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            let (kind, shown): (_, Vec<FormField>) = match &f.app.read(cx).edit {
+                Some(super::EditFetch::Ready(form)) => (
+                    form.current_kind(cx),
+                    FormField::ORDER
+                        .iter()
+                        .copied()
+                        .filter(|field| form.visible(*field, cx))
+                        .collect(),
+                ),
+                _ => panic!("form"),
+            };
+            let sections: Vec<Section> = Section::ALL
+                .into_iter()
+                .filter(|section| shown.iter().any(|field| field.section() == *section))
+                .collect();
+            for section in Section::ALL {
+                let id = gpui_kit::SharedString::from(format!("edit-section-{section:?}"));
+                assert_eq!(
+                    window.try_find(id).is_some(),
+                    sections.contains(&section),
+                    "{section:?} has a header only when it shows rows"
+                );
+            }
+            let header = |section: Section| {
+                window
+                    .find(gpui_kit::SharedString::from(format!(
+                        "edit-section-{section:?}"
+                    )))
+                    .bounds()
+            };
+            let headers: Vec<_> = sections.iter().copied().map(header).collect();
+            for pair in headers.windows(2) {
+                assert!(pair[0].bottom() <= pair[1].top());
+            }
+            let row = |field: FormField| {
+                window
+                    .find(gpui_kit::SharedString::from(format!(
+                        "edit-label-{}",
+                        field.label(kind)
+                    )))
+                    .bounds()
+            };
+            let kind_row = row(FormField::Kind);
+            assert!(headers[0].bottom() <= kind_row.top());
+            for field in &shown[1..] {
+                assert!(
+                    kind_row.bottom() <= row(*field).top(),
+                    "Kind precedes {field:?}"
+                );
+            }
+            for field in &shown {
+                let ix = sections
+                    .iter()
+                    .position(|section| *section == field.section())
+                    .unwrap();
+                let bounds = row(*field);
+                assert!(
+                    headers[ix].bottom() <= bounds.top(),
+                    "{field:?} under its header"
+                );
+                if let Some(next) = headers.get(ix + 1) {
+                    assert!(
+                        bounds.bottom() <= next.top(),
+                        "{field:?} before the next section"
+                    );
+                }
+            }
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn details_create_person_add_remove_preserves_all_other_roles(cx: &mut TestAppContext) {
+        use ibex_core::{CreatorRole::*, CreatorSpec, Name};
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let person =
+            rt.block_on(f.worker.create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            ))
+            .unwrap();
+        let mut new = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        let roles = [Author, Editor, Translator, Contributor, Host, Director];
+        new.creators = roles
+            .iter()
+            .map(|role| CreatorSpec {
+                person_id: person.id,
+                role: *role,
+                credited_as: Some(NonEmptyStr::try_new("A. L.").unwrap()),
+            })
+            .collect();
+        let expected = new.creators[1..].to_vec();
+        rt.block_on(f.worker.update_resource(f.resource, new))
+            .unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("creator-menu-0", cx);
+            window.render_frame(cx);
+            window.click("creator-remove-0", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("add-creator-person", window, cx);
+            window.click("add-creator-person", cx);
+            window.input("Grace Hopper", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        assert_eq!(&saved.creators[..5], expected);
+        assert_eq!(saved.creators.len(), 6);
+        let people = rt.block_on(f.worker.list_persons()).unwrap();
+        let grace = people
+            .iter()
+            .find(|p| p.name.display() == "Grace Hopper")
+            .unwrap();
+        assert_eq!(saved.creators[5].person_id, grace.id);
+        assert_eq!(saved.creators[5].role, Author);
+    }
+
+    #[gpui_kit::test]
+    fn details_creator_credit_line_and_add_on_select(cx: &mut TestAppContext) {
+        use ibex_core::{CreatorRole as R, CreatorSpec, Name};
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let person =
+            rt.block_on(f.worker.create_person(
+                Name::try_new(Some("Ada"), Some("Lovelace"), None::<&str>).unwrap(),
+            ))
+            .unwrap();
+        let mut new = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        new.creators = vec![
+            CreatorSpec {
+                person_id: person.id,
+                role: R::Editor,
+                credited_as: Some(NonEmptyStr::try_new("A. L.").unwrap()),
+            },
+            CreatorSpec {
+                person_id: person.id,
+                role: R::Translator,
+                credited_as: None,
+            },
+        ];
+        rt.block_on(f.worker.update_resource(f.resource, new))
+            .unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("creator-credit-0").is_some(),
+                "A credited creator shows its credit line on open"
+            );
+            assert!(
+                window.try_find("creator-credit-1").is_none(),
+                "An uncredited creator hides the credit line"
+            );
+            window.click("creator-menu-1", cx);
+            window.render_frame(cx);
+            window.click("creator-credit-as-1", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("creator-credit-1").is_some());
+            window.click("creator-credit-clear-0", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("creator-credit-0").is_none());
+            reveal_edit_control("add-creator-person", window, cx);
+            window.click("add-creator-person", cx);
+            window.input("Ada Lovelace", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.press("down", cx);
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        f.app.read_with(cx, |app, cx| {
+            let Some(super::EditFetch::Ready(form)) = &app.edit else {
+                panic!("form")
+            };
+            assert_eq!(form.creator_rows.len(), 3, "Selecting a person adds a row");
+            assert!(
+                form.creators.read(cx).selected_values().is_empty(),
+                "The picker clears after adding"
+            );
+        });
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("save-edit", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let saved = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        assert_eq!(
+            saved.creators,
+            [R::Editor, R::Translator, R::Author]
+                .into_iter()
+                .map(|role| CreatorSpec {
+                    person_id: person.id,
+                    role,
+                    credited_as: None,
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Opens every row the kind hides, for tests that reach all fields.
+    fn reveal_all_fields(f: &Fixture, cx: &mut TestAppContext) {
+        f.app.update(cx, |app, cx| {
+            let Some(super::EditFetch::Ready(form)) = &mut app.edit else {
+                panic!("form")
+            };
+            form.revealed
+                .extend(super::FormField::ORDER.iter().copied());
+            cx.notify();
+        });
+    }
+    fn reveal_edit_control(id: &str, window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
+        let id = gpui_kit::SharedString::from(id.to_owned());
+        window.render_frame(cx);
+        for _ in 0..100 {
+            let viewport = window.find("edit-panel").bounds();
+            let target = window.find(id.clone());
+            if target.visible()
+                && target.bounds().top() >= viewport.top()
+                && target.bounds().bottom() <= viewport.bottom()
+            {
+                return;
+            }
+            let delta = if target.bounds().top() < viewport.top() {
+                100.
+            } else {
+                -100.
+            };
+            window.scroll(
+                "edit-panel",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                    gpui_kit::px(0.),
+                    gpui_kit::px(delta),
+                )),
+                cx,
+            );
+        }
+        panic!("Could not reveal {id}");
+    }
+
+    #[gpui_kit::test]
+    fn details_multiline_rich_dates_validate_and_cancel(cx: &mut TestAppContext) {
+        use crate::edit::{BibliographicField as F, prefill_draft};
+        let f = fixture(cx);
+        select_first(&f, cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let before = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        for save in [false, true] {
+            cx.update_window(f.handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.click("edit-resource", cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            for (field, text) in [
+                (F::AbstractText, "First paragraph\nSecond paragraph"),
+                (F::Keywords, "alpha\nbeta, gamma"),
+                (F::Published, "2023-02-29"),
+            ] {
+                cx.update_window(f.handle, |_, window, cx| {
+                    enter_details_field(field, text, window, cx);
+                })
+                .unwrap();
+            }
+            cx.update_window(f.handle, |_, window, cx| {
+                window.click("save-edit", cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            f.app.read_with(cx, |app, _| {
+                let Some(super::EditFetch::Ready(form)) = &app.edit else {
+                    panic!("invalid date must keep the form open")
+                };
+                assert!(form.error.as_ref().is_some_and(|error| {
+                    error.message.contains("Published")
+                        && error.field == Some(super::FormField::Bib(F::Published))
+                }));
+            });
+            assert_eq!(
+                rt.block_on(f.worker.resource(f.resource)).unwrap().to_new(),
+                before
+            );
+            cx.update_window(f.handle, |_, window, cx| {
+                enter_details_field(F::Published, "2024-02/2024-03~", window, cx);
+                window.click(if save { "save-edit" } else { "cancel-edit" }, cx);
+            })
+            .unwrap();
+            settle(cx, &f.worker);
+            let saved = rt.block_on(f.worker.resource(f.resource)).unwrap();
+            if save {
+                assert_eq!(
+                    saved.abstract_text.as_deref(),
+                    Some("First paragraph\nSecond paragraph")
+                );
+                assert_eq!(saved.keywords, vec!["alpha", "beta, gamma"]);
+                assert_eq!(
+                    prefill_draft(&saved).fields[&F::Published],
+                    "2024-02/2024-03~"
+                );
+            } else {
+                assert_eq!(saved.to_new(), before);
+            }
+        }
+    }
+
+    #[gpui_kit::test]
+    fn details_multiline_cmd_enter_saves_without_inserting_newline(cx: &mut TestAppContext) {
+        let f = fixture(cx);
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click("edit-resource", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        cx.update_window(f.handle, |_, window, cx| {
+            reveal_edit_control("edit-field-AbstractText", window, cx);
+            window.click("edit-field-AbstractText", cx);
+            window.input("First", cx);
+            window.press("enter", cx);
+            window.input("Second", cx);
+            window.press("cmd-enter", cx);
+        })
+        .unwrap();
+        settle(cx, &f.worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert_eq!(
+            rt.block_on(f.worker.resource(f.resource))
+                .unwrap()
+                .abstract_text
+                .as_deref(),
+            Some("First\nSecond")
+        );
+        f.app.read_with(cx, |app, _| assert!(app.edit.is_none()));
+    }
+
+    #[gpui_kit::test]
     fn keyword_suggestions_accept_one_then_add_all(cx: &mut TestAppContext) {
         let f = fixture(cx);
         select_first(&f, cx);
@@ -11148,6 +15139,41 @@ mod classification_tests {
         });
     }
 
+    #[gpui_kit::test]
+    fn inline_edit_prefills_unspecified_new_year_as_year_and_keeps_it(cx: &mut TestAppContext) {
+        use ibex_core::{BibliographicDate, DatePrecision as P, UtcMillis};
+        let f = fixture(cx);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut source = rt.block_on(f.worker.resource(f.resource)).unwrap().to_new();
+        source.published =
+            Some(BibliographicDate::try_new(UtcMillis::jan_1_utc(1991).unwrap(), None).unwrap());
+        rt.block_on(f.worker.update_resource(f.resource, source.clone()))
+            .unwrap();
+        select_first(&f, cx);
+        cx.update_window(f.handle, |_, window, cx| window.press("e", cx))
+            .unwrap();
+        settle(cx, &f.worker);
+        let published = f.app.read_with(cx, |app, cx| {
+            app.table
+                .read(cx)
+                .delegate()
+                .inline
+                .as_ref()
+                .and_then(|session| session.ready_form())
+                .map(|form| form.published.read(cx).value().to_string())
+        });
+        assert_eq!(published.as_deref(), Some("1991"));
+        cx.update_window(f.handle, |_, window, cx| window.press("cmd-enter", cx))
+            .unwrap();
+        settle(cx, &f.worker);
+        let saved = rt
+            .block_on(f.worker.resource(f.resource))
+            .unwrap()
+            .published
+            .unwrap();
+        assert_eq!(Some(&saved), source.published.as_ref());
+        assert_eq!(saved.precision(), P::Unspecified);
+    }
     #[gpui_kit::test]
     fn inline_content_edit_invalidates_jev_and_rejects_old_reply(cx: &mut TestAppContext) {
         let f = fixture(cx);

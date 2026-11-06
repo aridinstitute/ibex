@@ -72,7 +72,6 @@ fn container_new(kind: ResourceKind, title: &str) -> NewResource {
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: None,
         keywords: vec![],
     }
@@ -172,7 +171,6 @@ async fn detail_resolves_names_roles_and_linked_titles() {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -296,7 +294,6 @@ async fn detail_emits_exactly_one_ok_event() {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },

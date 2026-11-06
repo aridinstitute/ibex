@@ -5,6 +5,7 @@ mod db;
 mod detail;
 mod documentation;
 mod edit;
+mod edit_layout;
 mod icons;
 mod import_dialog;
 mod inline_edit;

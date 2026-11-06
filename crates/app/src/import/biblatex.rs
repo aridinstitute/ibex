@@ -496,9 +496,8 @@ fn map_entry(entry: &Entry) -> Result<MappedEntry, MapError> {
             _ => None,
         }),
         publication_method: value(entry, "howpublished"),
-        institution: value(entry, "institution"),
+        institution: value(entry, "institution").or_else(|| value(entry, "school")),
         organization: value(entry, "organization"),
-        school: value(entry, "school"),
         abstract_text: value(entry, "abstract"),
         keywords: value(entry, "keywords")
             .map(|s| {

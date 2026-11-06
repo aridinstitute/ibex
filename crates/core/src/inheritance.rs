@@ -73,7 +73,7 @@ pub fn fields_inherited_from(
 }
 
 /// Where an effective value came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ValueOrigin {
     Absent,
     Explicit,
@@ -81,7 +81,7 @@ pub enum ValueOrigin {
 }
 
 /// One resolved field: value plus provenance.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Effective<T> {
     pub value: Option<T>,
     pub origin: ValueOrigin,
@@ -137,7 +137,7 @@ pub enum InheritanceError {
 /// Stored child fields that are not allowlisted (DOI, pages, accessed,
 /// creators, title, …) are intentionally omitted — callers keep using the
 /// resource row for those.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct EffectiveValues {
     pub publisher: Effective<String>,
     pub published: Effective<BibliographicDate>,
@@ -185,79 +185,109 @@ pub fn resolve_effective(
     resource: &Resource,
     ancestors: &[Resource],
 ) -> Result<EffectiveValues, InheritanceError> {
-    validate_ancestor_chain(resource, ancestors)?;
+    validate_chain(
+        Some(resource.id),
+        resource.kind,
+        resource.parent_id,
+        ancestors,
+    )?;
+    Ok(resolve_values(resource.kind, Some(resource), ancestors))
+}
 
-    Ok(EffectiveValues {
+/// What an otherwise-empty child of `kind` would inherit from `ancestors`
+/// (`[immediate parent, …]`). Values are Inherited or Absent, never Explicit.
+pub fn resolve_inherited(
+    kind: ResourceKind,
+    ancestors: &[Resource],
+) -> Result<EffectiveValues, InheritanceError> {
+    validate_chain(None, kind, ancestors.first().map(|a| a.id), ancestors)?;
+    Ok(resolve_values(kind, None, ancestors))
+}
+
+fn resolve_values(
+    kind: ResourceKind,
+    child: Option<&Resource>,
+    ancestors: &[Resource],
+) -> EffectiveValues {
+    let no_ids: &[Identifier] = &[];
+    EffectiveValues {
         publisher: resolve_string(
-            resource.kind,
-            resource.publisher.as_deref(),
+            kind,
+            child.and_then(|r| r.publisher.as_deref()),
             ancestors,
             InheritableField::Publisher,
             |r| r.publisher.as_deref(),
         ),
-        published: resolve_published(resource, ancestors),
+        published: resolve_published(kind, child.and_then(|r| r.published.as_ref()), ancestors),
         place: resolve_string(
-            resource.kind,
-            resource.place.as_deref(),
+            kind,
+            child.and_then(|r| r.place.as_deref()),
             ancestors,
             InheritableField::Place,
             |r| r.place.as_deref(),
         ),
         volume: resolve_string(
-            resource.kind,
-            resource.volume.as_deref(),
+            kind,
+            child.and_then(|r| r.volume.as_deref()),
             ancestors,
             InheritableField::Volume,
             |r| r.volume.as_deref(),
         ),
         issue: resolve_string(
-            resource.kind,
-            resource.issue.as_deref(),
+            kind,
+            child.and_then(|r| r.issue.as_deref()),
             ancestors,
             InheritableField::IssueNumber,
             |r| r.issue.as_deref(),
         ),
         edition: resolve_string(
-            resource.kind,
-            resource.edition.as_deref(),
+            kind,
+            child.and_then(|r| r.edition.as_deref()),
             ancestors,
             InheritableField::Edition,
             |r| r.edition.as_deref(),
         ),
         language: resolve_string(
-            resource.kind,
-            resource.language.as_deref(),
+            kind,
+            child.and_then(|r| r.language.as_deref()),
             ancestors,
             InheritableField::Language,
             |r| r.language.as_deref(),
         ),
         issns: resolve_identifiers(
-            resource.kind,
-            &resource.issns,
+            kind,
+            child.map_or(no_ids, |r| &r.issns),
             ancestors,
             InheritableField::Issns,
             |r| &r.issns,
         ),
         isbns: resolve_identifiers(
-            resource.kind,
-            &resource.isbns,
+            kind,
+            child.map_or(no_ids, |r| &r.isbns),
             ancestors,
             InheritableField::Isbns,
             |r| &r.isbns,
         ),
-        container_title: resolve_container_title(resource, ancestors),
-    })
+        container_title: resolve_container_title(
+            child.and_then(|r| r.metadata.venue.as_deref()),
+            ancestors,
+        ),
+    }
 }
 
-fn validate_ancestor_chain(
-    resource: &Resource,
+/// Check that `ancestors` is the chain starting at `parent_id` for a child of
+/// `kind` (identified by `child_id` when it already exists).
+fn validate_chain(
+    child_id: Option<ResourceId>,
+    kind: ResourceKind,
+    parent_id: Option<ResourceId>,
     ancestors: &[Resource],
 ) -> Result<(), InheritanceError> {
     if ancestors.len() > INHERITANCE_MAX_DEPTH {
         return Err(InheritanceError::DepthExceeded);
     }
 
-    let Some(mut expected_parent) = resource.parent_id else {
+    let Some(mut expected_parent) = parent_id else {
         return Ok(());
     };
 
@@ -267,8 +297,8 @@ fn validate_ancestor_chain(
         });
     }
 
-    let mut seen = HashSet::from([resource.id]);
-    let mut child_kind = resource.kind;
+    let mut seen: HashSet<ResourceId> = child_id.into_iter().collect();
+    let mut child_kind = kind;
 
     for ancestor in ancestors {
         if ancestor.id != expected_parent {
@@ -313,13 +343,16 @@ fn resolve_string(
     Effective::absent()
 }
 
-fn resolve_published(resource: &Resource, ancestors: &[Resource]) -> Effective<BibliographicDate> {
-    if let Some(value) = resource.published.clone() {
-        return Effective::explicit(value);
+fn resolve_published(
+    child_kind: ResourceKind,
+    child_value: Option<&BibliographicDate>,
+    ancestors: &[Resource],
+) -> Effective<BibliographicDate> {
+    if let Some(value) = child_value {
+        return Effective::explicit(value.clone());
     }
     for ancestor in ancestors {
-        if !fields_inherited_from(resource.kind, ancestor.kind)
-            .contains(&InheritableField::Published)
+        if !fields_inherited_from(child_kind, ancestor.kind).contains(&InheritableField::Published)
         {
             continue;
         }
@@ -352,7 +385,7 @@ fn resolve_identifiers(
     Effective::absent()
 }
 
-fn resolve_container_title(resource: &Resource, ancestors: &[Resource]) -> Effective<NonEmptyStr> {
+fn resolve_container_title(venue: Option<&str>, ancestors: &[Resource]) -> Effective<NonEmptyStr> {
     // Linked records are authoritative; imported venue text is only a fallback.
     // Prefer real containers (journal/book/…) over issue volume labels.
     for ancestor in ancestors {
@@ -366,12 +399,7 @@ fn resolve_container_title(resource: &Resource, ancestors: &[Resource]) -> Effec
     if let Some(issue) = ancestors.iter().find(|a| a.kind == ResourceKind::Issue) {
         return Effective::inherited(issue.title.clone(), issue.id);
     }
-    if let Some(venue) = resource
-        .metadata
-        .venue
-        .as_ref()
-        .and_then(|v| NonEmptyStr::try_new(v).ok())
-    {
+    if let Some(venue) = venue.and_then(|v| NonEmptyStr::try_new(v).ok()) {
         return Effective::explicit(venue);
     }
 
@@ -451,7 +479,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -722,6 +749,51 @@ mod tests {
         );
         assert!(chapter.doi.is_none());
         assert_eq!(book.doi.as_deref(), Some("10.book/xyz"));
+    }
+
+    #[test]
+    fn empty_article_under_issue_inherits_issue_and_journal_values() {
+        let mut journal = bare(ResourceKind::Journal, "Nature", None);
+        journal.publisher = Some("Springer Nature".into());
+        let mut issue = bare(ResourceKind::Issue, "Vol. 12, no. 3", Some(journal.id));
+        issue.volume = Some("12".into());
+        issue.issue = Some("3".into());
+        issue.published = Some(year(2020));
+
+        let values = resolve_inherited(
+            ResourceKind::JournalArticle,
+            &[issue.clone(), journal.clone()],
+        )
+        .unwrap();
+        let from_issue = ValueOrigin::Inherited {
+            parent_id: issue.id,
+        };
+        assert_eq!(values.volume.value.as_deref(), Some("12"));
+        assert_eq!(values.volume.origin, from_issue);
+        assert_eq!(values.issue.value.as_deref(), Some("3"));
+        assert_eq!(values.issue.origin, from_issue);
+        assert_eq!(values.published.value, Some(year(2020)));
+        assert_eq!(values.published.origin, from_issue);
+        assert_eq!(values.publisher.value.as_deref(), Some("Springer Nature"));
+        assert_eq!(
+            values.publisher.origin,
+            ValueOrigin::Inherited {
+                parent_id: journal.id
+            }
+        );
+        assert_eq!(values.edition, Effective::absent());
+    }
+
+    #[test]
+    fn inherited_preview_rejects_forbidden_parent_and_is_absent_without_one() {
+        let mut book = bare(ResourceKind::Book, "Book", None);
+        book.publisher = Some("MIT Press".into());
+        let err = resolve_inherited(ResourceKind::JournalArticle, &[book]).unwrap_err();
+        assert!(matches!(err, InheritanceError::InvalidParentKind));
+
+        let none = resolve_inherited(ResourceKind::JournalArticle, &[]).unwrap();
+        assert_eq!(none.publisher, Effective::absent());
+        assert_eq!(none.container_title, Effective::absent());
     }
 
     #[test]

@@ -64,6 +64,53 @@ async fn imports_a_book_through_the_application_command() {
     );
 }
 
+async fn import_one(source: &str) -> ibex_core::Resource {
+    let state = AppState::builder(MemoryStore::new())
+        .surface(Surface::Test)
+        .sink(MemorySink::new())
+        .build();
+    let Outcome::ImportBiblatex(report) = state
+        .execute(Command::ImportBiblatex(ImportBiblatex {
+            source_text: source.into(),
+            choices: Default::default(),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected import report");
+    };
+    assert_eq!(report.imported.len(), 1);
+    let Outcome::GetResource(resource) = state
+        .execute(Command::GetResource(GetResource {
+            id: report.imported[0].resource_id,
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected imported resource");
+    };
+    resource
+}
+
+#[tokio::test]
+async fn school_imports_as_institution() {
+    let thesis = import_one(
+        r#"@thesis{t, author={Lovelace, Ada}, title={A thesis}, year={2020}, school={MIT}}"#,
+    )
+    .await;
+    assert_eq!(thesis.institution.as_deref(), Some("MIT"));
+}
+
+#[tokio::test]
+async fn institution_wins_over_school() {
+    let thesis = import_one(
+        r#"@thesis{t, author={Lovelace, Ada}, title={A thesis}, year={2020},
+          institution={Harvard}, school={MIT}}"#,
+    )
+    .await;
+    assert_eq!(thesis.institution.as_deref(), Some("Harvard"));
+}
+
 #[tokio::test]
 async fn imports_a_mixed_batch_and_reports_skips_without_losing_fields() {
     let sink = MemorySink::new();
@@ -80,7 +127,7 @@ async fn imports_a_mixed_batch_and_reports_skips_without_losing_fields() {
           eprint={1234.5678}, isbn={978-0-306-40615-7}, issn={1234-5678}, isrn={EXAMPLE-1},
           date={2024-03-15}, origdate={1960}, eventdate={2023-06-01}, urldate={2025-01-02},
           language={en}, type={Essay}, howpublished={Online},
-          institution={Institute}, organization={Society}, school={History},
+          institution={Institute}, organization={Society},
           abstract={A summary}, keywords={history, research}, note={Ignore note}, annotation={Ignore annotation}}
         @article{paper, title={A paper}, journaltitle={Journal}, date={2022},
           author={Lovelace, Ada}, translator={Turing, Alan}, volume={12}, number={4}}
@@ -146,7 +193,6 @@ async fn imports_a_mixed_batch_and_reports_skips_without_losing_fields() {
         ("publication_method", "Online"),
         ("institution", "Institute"),
         ("organization", "Society"),
-        ("school", "History"),
         ("abstract_text", "A summary"),
     ] {
         assert_eq!(data[key], expected, "mapping {key}");

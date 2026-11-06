@@ -5,6 +5,31 @@ use crate::{
     deserialize_identifiers, deserialize_pages_opt,
 };
 
+/// Scalar resource metadata supported by value autocomplete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResourceTextField {
+    Publisher,
+    Institution,
+    Organization,
+    DocumentType,
+    PublicationMethod,
+    Language,
+}
+
+impl ResourceTextField {
+    /// Stable metadata field name; also the adapter's allowlisted column.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Publisher => "publisher",
+            Self::Institution => "institution",
+            Self::Organization => "organization",
+            Self::DocumentType => "document_type",
+            Self::PublicationMethod => "publication_method",
+            Self::Language => "language",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ResourceId(ulid::Ulid);
 
@@ -656,7 +681,6 @@ pub struct ResourceDetail {
     pub publication_method: Option<String>,
     pub institution: Option<String>,
     pub organization: Option<String>,
-    pub school: Option<String>,
     pub abstract_text: Option<String>,
     pub keywords: Vec<String>,
 }
@@ -916,7 +940,6 @@ pub struct NewResource {
     pub publication_method: Option<String>,
     pub institution: Option<String>,
     pub organization: Option<String>,
-    pub school: Option<String>,
     /// Bibliographic abstract, not a user note or annotation.
     pub abstract_text: Option<String>,
     #[serde(default)]
@@ -987,7 +1010,6 @@ pub struct Resource {
     pub publication_method: Option<String>,
     pub institution: Option<String>,
     pub organization: Option<String>,
-    pub school: Option<String>,
     pub abstract_text: Option<String>,
     pub keywords: Vec<String>,
 }
@@ -1081,7 +1103,6 @@ impl Resource {
             publication_method: new.publication_method,
             institution: new.institution,
             organization: new.organization,
-            school: new.school,
             abstract_text: new.abstract_text,
             keywords: new.keywords,
             favorite: false,
@@ -1167,7 +1188,6 @@ impl Resource {
             publication_method: None,
             institution: None,
             organization: None,
-            school: None,
             abstract_text: None,
             keywords: vec![],
             favorite,
@@ -1218,7 +1238,6 @@ impl Resource {
             publication_method: self.publication_method.clone(),
             institution: self.institution.clone(),
             organization: self.organization.clone(),
-            school: self.school.clone(),
             abstract_text: self.abstract_text.clone(),
             keywords: self.keywords.clone(),
         }
@@ -1299,7 +1318,6 @@ mod tests {
             publication_method: None,
             institution: None,
             organization: None,
-            school: None,
             abstract_text: None,
             keywords: vec![],
         }
@@ -1441,7 +1459,6 @@ mod tests {
                     publication_method: None,
                     institution: None,
                     organization: None,
-                    school: None,
                     abstract_text: None,
                     keywords: vec![],
                 },
@@ -1489,7 +1506,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -1622,7 +1638,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -1671,7 +1686,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -1718,7 +1732,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -1767,7 +1780,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -1817,7 +1829,6 @@ mod tests {
                 publication_method: None,
                 institution: None,
                 organization: None,
-                school: None,
                 abstract_text: None,
                 keywords: vec![],
             },
@@ -1988,7 +1999,6 @@ mod tests {
             publication_method: None,
             institution: None,
             organization: None,
-            school: None,
             abstract_text: None,
             keywords: vec![],
         };
@@ -2199,7 +2209,6 @@ mod biblatex_field_tests {
             publication_method: Some("online".into()),
             institution: Some("Example University".into()),
             organization: None,
-            school: Some("Example School".into()),
             abstract_text: Some("Summary".into()),
             keywords: vec!["history".into(), "bibliography".into()],
         };

@@ -53,6 +53,8 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/rust
       - run: cargo fmt --all -- --check
+      - name: Validate changelog
+        run: python3 scripts/changelog.py validate changelog.json
       - name: Validate GitHub Actions
         run: |
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12

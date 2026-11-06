@@ -15,7 +15,7 @@ pub const PANEL_WIDTH: Pixels = px(320.);
 /// Label column width inside the panel; values take the remaining width.
 pub const FIELD_LABEL_WIDTH: Pixels = px(88.);
 /// Matches the grid's cell text so the two panes read as one view.
-pub const FIELD_TEXT_SIZE: Pixels = px(12.);
+pub const FIELD_TEXT_SIZE: Rems = rems(1.);
 /// Detail fetch state for the selected resource. The loaded detail is boxed
 /// to keep the enum small; only one exists at a time.
 pub enum DetailFetch {
@@ -126,7 +126,6 @@ pub fn field_rows(detail: &ResourceDetail) -> Vec<(String, Vec<String>)> {
         ("Publication method", detail.publication_method.as_deref()),
         ("Institution", detail.institution.as_deref()),
         ("Organization", detail.organization.as_deref()),
-        ("School", detail.school.as_deref()),
         ("Abstract", detail.abstract_text.as_deref()),
     ] {
         if let Some(value) = value {
@@ -243,7 +242,7 @@ fn field_value_element(label: &str, lines: &[String], cx: &App) -> AnyElement {
                     .hover(|style| style.text_color(link))
                     .active(|style| style.text_color(link.opacity(0.6)))
                     .focus_visible(|style| style.border_color(ring))
-                    .child(Icon::new(IconName::ExternalLink).with_size(FIELD_TEXT_SIZE)),
+                    .child(Icon::new(IconName::ExternalLink).with_size(cx.theme().font_size)),
             )
             .into_any_element();
     }
@@ -276,7 +275,7 @@ pub fn render_panel(
                 .id("detail-selection-count")
                 .test_support()
                 .aria_label(label.clone())
-                .text_size(px(18.))
+                .text_size(rems(1.5))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(label)
                 .into_any_element()
@@ -300,7 +299,7 @@ pub fn render_panel(
                     h_flex()
                         .gap_1()
                         .items_center()
-                        .text_size(px(10.))
+                        .text_size(rems(0.9))
                         .child(
                             kind_symbol(detail.kind)
                                 .with_size(px(14.))
@@ -314,7 +313,7 @@ pub fn render_panel(
                         .gap(px(1.))
                         .child(
                             div()
-                                .text_size(px(18.))
+                                .text_size(rems(1.5))
                                 .line_height(relative(1.15))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(detail.title.as_str().to_owned()),
@@ -696,7 +695,6 @@ mod tests {
             publication_method: None,
             institution: None,
             organization: None,
-            school: None,
             abstract_text: None,
             keywords: vec![],
             id: ResourceId::generate(),

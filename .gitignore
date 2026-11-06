@@ -23,3 +23,7 @@
 !/docs/surrealdb-4-benchmarks.md
 /skills-lock.json
 solo.yml
+
+# Local-only release helper
+/scripts/release-local.sh
+/.projects/

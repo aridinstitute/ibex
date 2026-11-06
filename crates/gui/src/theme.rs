@@ -9,9 +9,8 @@ pub fn apply(mode: ThemeMode, settings: &ThemeSettings, cx: &mut App) {
     Theme::change(mode, None, cx);
     Theme::update(cx, |theme| {
         theme.colors = configured_palette(mode, theme.colors, settings);
-        // Root sets the window rem size from this, so every rem-based size
-        // in the kit shrinks with it.
-        theme.font_size = px(11.);
+        // Root uses this as the rem scale for text, inputs, and control spacing.
+        theme.font_size = px(13.);
         // No outer halo on focused controls: the input border itself picks up
         // the accent ring color (see palette), which reads cleaner in dense
         // filter rows and the detail pane.
@@ -117,6 +116,19 @@ mod tests {
     use gpui_kit::component::{ThemeColor, ThemeMode};
     use gpui_kit::{Hsla, rgb};
 
+    #[gpui_kit::test]
+    fn base_font_is_readable_in_both_appearances(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            for mode in [ThemeMode::Light, ThemeMode::Dark] {
+                super::apply(mode, &crate::settings::ThemeSettings::default(), cx);
+                assert_eq!(
+                    gpui_kit::component::Theme::global(cx).font_size,
+                    gpui_kit::px(13.)
+                );
+            }
+        });
+    }
     fn neutral_base() -> ThemeColor {
         let grey = |l| Hsla {
             h: 0.,

@@ -441,7 +441,6 @@ fn map_item(
         publication_method: None,
         institution: None,
         organization: None,
-        school: None,
         abstract_text: abstract_text.filter(|s| !s.trim().is_empty()),
         keywords,
     };

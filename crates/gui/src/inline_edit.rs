@@ -17,7 +17,8 @@ use ibex_core::{
 };
 
 use crate::edit::{
-    EditDraft, KindItem, creators_from_person_ids, empty_create_draft, kind_items, prefill_draft,
+    BibliographicField, EditDraft, KindItem, creators_from_person_ids, empty_create_draft,
+    kind_items, prefill_draft,
 };
 use crate::library::LibraryApp;
 
@@ -95,7 +96,7 @@ pub struct InlineRowEdit {
     pub row_ix: usize,
     pub title: Entity<InputState>,
     pub publisher: Entity<InputState>,
-    pub published_year: Entity<InputState>,
+    pub published: Entity<InputState>,
     pub kind: Entity<ComboboxState<SearchableVec<KindItem>>>,
     pub creators: Entity<ComboboxState<PersonDelegate>>,
     /// Creator specs at open time, so person re-picks keep role/credited-as.
@@ -303,8 +304,26 @@ impl InlineRowEdit {
 
         Self {
             title: prefill_input(draft.title, "Title", window, cx),
-            publisher: prefill_input(draft.publisher, "Publisher", window, cx),
-            published_year: prefill_input(draft.published_year, "Year", window, cx),
+            publisher: prefill_input(
+                draft
+                    .fields
+                    .get(&BibliographicField::Publisher)
+                    .cloned()
+                    .unwrap_or_default(),
+                "Publisher",
+                window,
+                cx,
+            ),
+            published: prefill_input(
+                draft
+                    .fields
+                    .get(&BibliographicField::Published)
+                    .cloned()
+                    .unwrap_or_default(),
+                "Published",
+                window,
+                cx,
+            ),
             kind,
             creators,
             previous_creators,
@@ -332,8 +351,10 @@ impl InlineRowEdit {
             })
     }
 
-    /// Read widgets into an [`EditDraft`] for save. Parent/series/accessed
-    /// ride through from the stored record on update; create leaves them empty.
+    /// Read widgets into an [`EditDraft`] for save. Parent/series ride through
+    /// from the stored record on update; create leaves them empty. Only the
+    /// Published field is present, so every other bibliographic field keeps
+    /// its stored value.
     pub fn draft(&self, cx: &App) -> EditDraft {
         let value = |input: &Entity<InputState>| input.read(cx).value().to_string();
         let kind = self
@@ -352,22 +373,17 @@ impl InlineRowEdit {
         let creators = creators_from_person_ids(&person_ids, &self.previous_creators);
         let ridden = self.record.as_ref().map(prefill_draft);
         EditDraft {
+            fields: [
+                (BibliographicField::Published, value(&self.published)),
+                (BibliographicField::Publisher, value(&self.publisher)),
+            ]
+            .into(),
             title: value(&self.title),
             kind,
             parent: self.record.as_ref().and_then(|r| r.parent_id),
-            publisher: value(&self.publisher),
-            published_year: value(&self.published_year),
-            accessed_year: ridden
-                .as_ref()
-                .map(|d| d.accessed_year.clone())
-                .unwrap_or_default(),
             series: ridden
                 .as_ref()
                 .map(|d| d.series.clone())
-                .unwrap_or_default(),
-            series_number: ridden
-                .as_ref()
-                .map(|d| d.series_number.clone())
                 .unwrap_or_default(),
             creators,
             // Inline row edit does not touch tags/collections; keep the stored set.
