@@ -1,0 +1,27 @@
+[
+  {
+    "version": "0.2",
+    "changes": [
+      {
+        "type": "improvement",
+        "title": "Complete bibliography editing",
+        "description": "Edit more bibliographic fields directly in the resource details panel, with fields that fit the resource type."
+      },
+      {
+        "type": "improvement",
+        "title": "Clearer inherited values",
+        "description": "See values inherited from related resources while editing, and spot errors beside the field that needs attention."
+      },
+      {
+        "type": "improvement",
+        "title": "Faster metadata entry",
+        "description": "Choose previously used values, edit identifiers together, and enter publication dates in one field."
+      },
+      {
+        "type": "improvement",
+        "title": "More readable editing",
+        "description": "Larger text and compact creator rows make the details panel easier to scan."
+      }
+    ]
+  }
+]
