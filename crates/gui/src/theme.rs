@@ -1,5 +1,5 @@
-//! Ibex's light and dark palettes: the kit's neutral surfaces with the
-//! configurable accents over the kit's neutral surfaces.
+//! Ibex's light and dark palettes: glassy translucent surfaces over the
+//! workspace wash, with the configurable accents on top.
 
 use crate::settings::{ThemeColorTarget, ThemeSettings};
 use gpui_kit::component::{Theme, ThemeColor, ThemeMode};
@@ -19,10 +19,11 @@ pub fn apply(mode: ThemeMode, settings: &ThemeSettings, cx: &mut App) {
     });
 }
 
-/// Recolors only accent-bearing fields; backgrounds, text, borders, and
-/// hover fills keep the kit's neutral values. Dark uses AppKit's dark
-/// `systemBlue`. Light uses a deeper blue: GPUI paints in sRGB, where
-/// `#007AFF` reads paler than the Display P3 `systemBlue` macOS draws.
+/// Accent plus glass surfaces. Kit widgets (table, list, sidebar, inputs)
+/// paint these fills; keeping them translucent is what makes the whole
+/// window read as one frosted sheet over the workspace gradient.
+/// Dark uses AppKit's dark `systemBlue`. Light uses a deeper blue: GPUI
+/// paints in sRGB, where `#007AFF` reads paler than Display P3 `systemBlue`.
 fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     let dark = mode.is_dark();
     let pick = |light: u32, dark_value: u32| if dark { dark_value } else { light };
@@ -30,10 +31,64 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     // Focused borders use a step darker than the fill accent so the edge
     // reads against light surfaces without a glow ring.
     let focus_border = rgb(pick(0x0047bd, 0x0071db)).into();
-    // Selections tint neutral surfaces while retaining the normal text color;
-    // the table uses a lighter wash and a hairline in the accent hue.
+    // Selections tint while retaining the normal text color.
     let tint = rgba(pick(0x0064ff47, 0x0a84ff4d)).into();
-    let row_tint = rgba(pick(0x0064ff26, 0x0a84ff33)).into();
+    let row_tint = rgba(pick(0x0064ff33, 0x0a84ff40)).into();
+
+    // Glass sheets: translucent white/ink so the atmospheric wash shows through.
+    let glass = if dark {
+        rgba(0x14182066) // ~40% ink
+    } else {
+        rgba(0xffffff59) // ~35% white
+    }
+    .into();
+    let glass_raised = if dark {
+        rgba(0x1c223080)
+    } else {
+        rgba(0xffffff73)
+    }
+    .into();
+    let glass_hover = if dark {
+        rgba(0xffffff14)
+    } else {
+        rgba(0x0000000f)
+    }
+    .into();
+    let hairline = if dark {
+        rgba(0xffffff1f)
+    } else {
+        rgba(0x0000001a)
+    }
+    .into();
+
+    colors.background = glass;
+    colors.secondary = glass;
+    colors.secondary_hover = glass_hover;
+    colors.secondary_active = glass_raised;
+    colors.muted = glass_raised;
+    colors.accent = glass_hover;
+    colors.border = hairline;
+    colors.input = hairline;
+    colors.sidebar = glass;
+    colors.sidebar_border = hairline;
+    colors.sidebar_accent = glass_hover;
+    colors.list = glass;
+    colors.list_even = glass;
+    colors.list_head = glass_raised;
+    colors.list_hover = glass_hover;
+    colors.table = glass;
+    colors.table_even = glass;
+    colors.table_head = glass_raised;
+    colors.table_hover = glass_hover;
+    colors.table_row_border = hairline;
+    colors.popover = glass_raised;
+    colors.tab = glass;
+    colors.tab_active = glass_raised;
+    colors.tab_bar = glass;
+    colors.title_bar = rgba(0x00000000).into();
+    colors.title_bar_border = rgba(0x00000000).into();
+    colors.status_bar = glass;
+    colors.status_bar_border = rgba(0x00000000).into();
 
     colors.primary = blue;
     colors.primary_hover = rgb(pick(0x0055e0, 0x3b9cff)).into();
@@ -139,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn accent_is_system_blue_and_surfaces_stay_neutral() {
+    fn accent_is_system_blue_and_surfaces_go_glass() {
         for (mode, blue, focus) in [
             (ThemeMode::Light, 0x0064ff, 0x0047bd),
             (ThemeMode::Dark, 0x0a84ff, 0x0071db),
@@ -155,29 +210,26 @@ mod tests {
             assert!(colors.primary.s > 0.95, "accent must be fully saturated");
             assert_eq!(colors.table_active.h, blue.h);
             assert!(
-                colors.table_active.a < 0.25,
+                colors.table_active.a <= 0.26,
                 "selected rows should tint, not fill"
             );
             assert!(colors.list_active.a < 1., "dropdown highlights tint");
             assert!(colors.selection.a < 1., "text selection tints");
-            for (field, after, before) in [
-                ("background", colors.background, base.background),
-                ("foreground", colors.foreground, base.foreground),
-                ("border", colors.border, base.border),
-                ("accent", colors.accent, base.accent),
-                ("table", colors.table, base.table),
-                ("table_even", colors.table_even, base.table_even),
-                ("table_head", colors.table_head, base.table_head),
-                ("table_hover", colors.table_hover, base.table_hover),
-                ("muted", colors.muted, base.muted),
-            ] {
-                assert_eq!(after, before, "{field} must keep the neutral base");
-            }
+            // Surfaces go glass: translucent so the workspace wash reads through.
+            assert!(
+                colors.background.a < 0.55,
+                "background should be a glass sheet, got a={}",
+                colors.background.a
+            );
+            assert!(colors.table.a < 0.55, "table should be glass");
+            assert!(colors.border.a < 0.2, "borders should be hairlines");
+            assert_eq!(colors.foreground, base.foreground);
+            assert_eq!(colors.title_bar.a, 0., "title bar must stay seamless");
         }
     }
 
     #[test]
-    fn configured_accent_updates_both_modes_without_recoloring_surfaces() {
+    fn configured_accent_updates_both_modes_keeping_glass_surfaces() {
         for mode in [ThemeMode::Light, ThemeMode::Dark] {
             let custom = crate::settings::ThemeColors {
                 accent: Some("#FFFF00".into()),
@@ -192,9 +244,8 @@ mod tests {
             assert_eq!(colors.button_primary, colors.primary);
             assert_eq!(colors.primary_foreground, Hsla::from(rgb(0x000000)));
             assert_eq!(colors.table_active.h, colors.primary.h);
-            assert!(colors.table_active.a < 0.25);
-            assert_eq!(colors.background, neutral_base().background);
-            assert_eq!(colors.accent, neutral_base().accent);
+            assert!(colors.table_active.a < 0.35);
+            assert!(colors.background.a < 0.55, "glass must survive custom accents");
         }
     }
 

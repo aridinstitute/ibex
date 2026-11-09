@@ -6611,9 +6611,9 @@ fn sidebar_target_widths(
     (px(left * scale), px(right * scale))
 }
 
-// Sidebar navigation is neutral; the table keeps its blue active-row tint.
+// Sidebar selection is a soft glass wash; the table keeps its blue active tint.
 fn sidebar_selected_background(theme: &ThemeColor) -> Hsla {
-    theme.accent
+    theme.primary.opacity(0.14)
 }
 
 /// Warm gold for favorite stars (outline and fill). Dark mode lifts the
@@ -6665,11 +6665,11 @@ const SIDEBAR_KIND_ORDER: [ResourceKind; 21] = [
     ResourceKind::ComputerProgram,
 ];
 
-// Cool mist → slate (light) and ink → cool charcoal (dark). Deliberately not
-// warm cream, purple-indigo, or broadsheet ink — atmosphere borrowed from
-// zeron's shell wash, recolored for Ibex's blue accent.
-const LIGHT_GRADIENT: (u32, u32) = (0xe8eef4, 0xd5dde8);
-const DARK_GRADIENT: (u32, u32) = (0x12141a, 0x1a222c);
+// Vivid cool atmosphere (not cream / purple-indigo / broadsheet). Light is a
+// bright mist into steel-blue; dark is deep ink into blue-slate — loud enough
+// to read through glass sheets.
+const LIGHT_GRADIENT: (u32, u32) = (0xdce8f5, 0xb8c9de);
+const DARK_GRADIENT: (u32, u32) = (0x0a0c12, 0x152033);
 // CSS angles rotate clockwise from up: 225° points toward the bottom-left.
 const WORKSPACE_GRADIENT_ANGLE: f32 = 225.;
 
@@ -6707,7 +6707,7 @@ fn workspace_gradient_stops(dark: bool, secondary: Option<u32>) -> (Rgba, Rgba) 
 }
 
 /// Gradient fraction at which the accent glow has fully dissolved.
-const GLOW_REACH: f32 = 0.45;
+const GLOW_REACH: f32 = 0.62;
 
 /// A vivid accent glow in the top-right corner that dissolves into the wash
 /// well before the middle. GPUI gradients carry only two stops, so the glow is
@@ -6722,9 +6722,9 @@ impl WorkspaceGlow {
     fn new(dark: bool, accent: Hsla) -> Self {
         Self {
             accent: accent.to_rgb(),
-            // Slightly stronger than the island-era glow so atmosphere still
-            // reads through flush translucent panes.
-            alpha: if dark { 0.42 } else { 0.30 },
+            // Strong corner bloom — glass sheets let this read across chrome
+            // and content as one continuous atmosphere.
+            alpha: if dark { 0.55 } else { 0.42 },
         }
     }
 
@@ -6745,19 +6745,34 @@ impl WorkspaceGlow {
     }
 }
 
-/// Translucent pane fill so the workspace gradient reads through continuous
-/// surfaces (zeron-style glass without requiring compositor backdrop blur).
-fn pane_fill(theme: &ThemeColor, dark: bool) -> Hsla {
-    theme.background.opacity(if dark { 0.78 } else { 0.84 })
+/// Ultra-light glass wash for column panes. Theme widgets already paint
+/// translucent table/list fills; this is just a whisper so columns don't look
+/// like solid cards against the wash.
+fn pane_fill(dark: bool) -> Hsla {
+    if dark {
+        rgba(0xffffff0a).into()
+    } else {
+        rgba(0xffffff1a).into()
+    }
 }
 
 /// Hairline divider: soft white on dark, soft ink on light — zeron's low-alpha
 /// borders adapted to Ibex panes.
 fn pane_hairline(dark: bool) -> Hsla {
     if dark {
-        rgba(0xffffff14).into()
+        rgba(0xffffff22).into()
     } else {
-        rgba(0x00000014).into()
+        rgba(0x00000018).into()
+    }
+}
+
+/// Full-window glass scrim — one sheet under chrome and body so the header
+/// and content read as a single frosted surface.
+fn window_glass(dark: bool) -> Hsla {
+    if dark {
+        rgba(0x0c101866).into()
+    } else {
+        rgba(0xffffff4d).into()
     }
 }
 impl Render for LibraryApp {
@@ -6839,9 +6854,14 @@ impl Render for LibraryApp {
             linear_color_stop(Hsla::from(stops.1), 1.),
         );
         let glow = WorkspaceGlow::new(dark, cx.theme().primary);
-        let fill = pane_fill(cx.theme(), dark);
+        let fill = pane_fill(dark);
         let hairline = pane_hairline(dark);
-        let search_fill = cx.theme().muted.opacity(if dark { 0.55 } else { 0.62 });
+        let glass = window_glass(dark);
+        let search_fill: Hsla = if dark {
+            rgba(0xffffff18).into()
+        } else {
+            rgba(0xffffff66).into()
+        };
 
         v_flex()
             .size_full()
@@ -6962,12 +6982,14 @@ impl Render for LibraryApp {
             }))
             // Static accent glow (one continuous layer under chrome + body).
             .child(div().absolute().inset_0().bg(glow.background()))
+            // One glass sheet for the whole window — header and body share it.
+            .child(div().absolute().inset_0().bg(glass))
             // A second soft wash breathes so the atmosphere has presence.
             .child(
                 div()
                     .absolute()
                     .inset_0()
-                    .bg(cx.theme().primary.opacity(if dark { 0.10 } else { 0.06 }))
+                    .bg(cx.theme().primary.opacity(if dark { 0.14 } else { 0.09 }))
                     .with_animation(
                         "workspace-glow-pulse",
                         Animation::new(Duration::from_millis(3200))
@@ -6980,13 +7002,11 @@ impl Render for LibraryApp {
                     ),
             )
             .child(
-                // The toolbar doubles as the window's title bar; reserve space
-                // for the native traffic lights without adding a bottom rule.
+                // Seamless chrome: same glass as the body, no divider below.
                 TitleBar::new()
-                    .h(px(44.))
+                    .h(px(48.))
                     .pl_0()
                     .border_0()
-                    // Share the viewport backdrop instead of restarting the gradient here.
                     .bg(transparent_black())
                     .child(
                         h_flex()
@@ -7083,8 +7103,8 @@ impl Render for LibraryApp {
                                             Input::new(input)
                                                 // Input::h only affects multiline editors; constrain
                                                 // the single-line frame through its style instead.
-                                                .min_h(px(30.))
-                                                .rounded(px(8.))
+                                                .min_h(px(32.))
+                                                .rounded(px(10.))
                                                 .bg(search_fill)
                                                 .border_color(hairline)
                                                 .px(px(12.))
@@ -7260,8 +7280,8 @@ impl Render for LibraryApp {
                     ),
             )
             .child(
-                // Continuous flush panes (no floating islands). Hairlines and
-                // translucent fills let the workspace gradient show through.
+                // Seamless with the title bar: no top rule, shared glass scrim.
+                // Columns are whispers of glass with hairlines only.
                 h_flex()
                     .id("workspace-body")
                     .test_support()
@@ -7270,8 +7290,6 @@ impl Render for LibraryApp {
                     .min_w_0()
                     .items_stretch()
                     .gap_0()
-                    .border_t_1()
-                    .border_color(hairline)
                     .with_animation(
                         "workspace-body-enter",
                         Animation::new(Duration::from_millis(380)).with_easing(ease_in_out),
@@ -8662,16 +8680,17 @@ mod sidebar_selection_tests {
     use gpui_kit::{Hsla, rgb};
 
     #[test]
-    fn selected_navigation_uses_neutral_surface_not_blue_list_selection() {
-        let neutral: Hsla = rgb(0xe7e7e7).into();
+    fn selected_navigation_uses_soft_primary_wash_not_list_selection() {
         let blue: Hsla = rgb(0x0064ff).into();
         let theme = ThemeColor {
-            accent: neutral,
+            primary: blue,
             list_active: blue,
             ..ThemeColor::default()
         };
-        assert_eq!(sidebar_selected_background(&theme), neutral);
-        assert_ne!(sidebar_selected_background(&theme), theme.list_active);
+        let selected = sidebar_selected_background(&theme);
+        assert_eq!(selected.h, blue.h);
+        assert!((selected.a - 0.14).abs() < 1e-6);
+        assert_ne!(selected, theme.list_active);
     }
 }
 
@@ -8698,12 +8717,12 @@ mod gradient_tests {
     #[test]
     fn wash_runs_neutral_to_the_exact_secondary_in_both_modes() {
         for dark in [false, true] {
-            let neutral = rgb(if dark { 0x12141a } else { 0xe8eef4 });
+            let neutral = rgb(if dark { 0x0a0c12 } else { 0xdce8f5 });
             assert_eq!(
                 workspace_gradient_stops(dark, Some(0x102030)),
                 (neutral, rgb(0x102030))
             );
-            let end = rgb(if dark { 0x1a222c } else { 0xd5dde8 });
+            let end = rgb(if dark { 0x152033 } else { 0xb8c9de });
             assert_eq!(workspace_gradient_stops(dark, None), (neutral, end));
         }
     }
