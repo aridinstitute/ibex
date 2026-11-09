@@ -6617,7 +6617,7 @@ fn sidebar_selected_background(theme: &ThemeColor) -> Hsla {
 }
 
 /// Warm gold for favorite stars (outline and fill). Dark mode lifts the
-/// same hue so the glyph stays legible on the darker island surface.
+/// same hue so the glyph stays legible on translucent pane surfaces.
 fn favorite_star_color(dark: bool) -> Hsla {
     rgb(if dark { 0xf5c542 } else { 0xd4a017 }).into()
 }
@@ -6665,12 +6665,16 @@ const SIDEBAR_KIND_ORDER: [ResourceKind; 21] = [
     ResourceKind::ComputerProgram,
 ];
 
-const LIGHT_GRADIENT: (u32, u32) = (0xeae8e2, 0xd9dde5);
-const DARK_GRADIENT: (u32, u32) = (0x292722, 0x262c35);
+// Cool mist → slate (light) and ink → cool charcoal (dark). Deliberately not
+// warm cream, purple-indigo, or broadsheet ink — atmosphere borrowed from
+// zeron's shell wash, recolored for Ibex's blue accent.
+const LIGHT_GRADIENT: (u32, u32) = (0xe8eef4, 0xd5dde8);
+const DARK_GRADIENT: (u32, u32) = (0x12141a, 0x1a222c);
 // CSS angles rotate clockwise from up: 225° points toward the bottom-left.
 const WORKSPACE_GRADIENT_ANGLE: f32 = 225.;
 
 /// Mirror the pinned GPUI renderer's aspect-corrected linear-gradient projection.
+#[cfg(test)]
 fn workspace_gradient_fraction(x: f32, y: f32, width: f32, height: f32) -> f32 {
     let width = width.max(1.);
     let height = height.max(1.);
@@ -6684,8 +6688,8 @@ fn workspace_gradient_fraction(x: f32, y: f32, width: f32, height: f32) -> f32 {
     let span = if dx.abs() > dy.abs() { width } else { height };
     (0.5 + distance / span).clamp(0., 1.)
 }
-const ISLAND_RADIUS: Pixels = px(16.);
 
+#[cfg(test)]
 fn mix_rgb(from: Rgba, to: Rgba, amount: f32) -> Rgba {
     Rgba {
         r: from.r + (to.r - from.r) * amount,
@@ -6697,14 +6701,13 @@ fn mix_rgb(from: Rgba, to: Rgba, amount: f32) -> Rgba {
 
 /// A neutral wash from the top-right to the bottom-left end; a configured
 /// secondary replaces that end exactly. The accent lives in [`WorkspaceGlow`].
-/// Share the stops with the corner mask so its cutouts match the backdrop.
 fn workspace_gradient_stops(dark: bool, secondary: Option<u32>) -> (Rgba, Rgba) {
     let (start, end) = if dark { DARK_GRADIENT } else { LIGHT_GRADIENT };
     (rgb(start), secondary.map(rgb).unwrap_or(rgb(end)))
 }
 
 /// Gradient fraction at which the accent glow has fully dissolved.
-const GLOW_REACH: f32 = 0.4;
+const GLOW_REACH: f32 = 0.45;
 
 /// A vivid accent glow in the top-right corner that dissolves into the wash
 /// well before the middle. GPUI gradients carry only two stops, so the glow is
@@ -6719,7 +6722,9 @@ impl WorkspaceGlow {
     fn new(dark: bool, accent: Hsla) -> Self {
         Self {
             accent: accent.to_rgb(),
-            alpha: if dark { 0.35 } else { 0.25 },
+            // Slightly stronger than the island-era glow so atmosphere still
+            // reads through flush translucent panes.
+            alpha: if dark { 0.42 } else { 0.30 },
         }
     }
 
@@ -6733,51 +6738,27 @@ impl WorkspaceGlow {
     }
 
     /// The opaque color the glow composited over the wash produces at `t`.
+    #[cfg(test)]
     fn over(self, stops: (Rgba, Rgba), t: f32) -> Rgba {
         let alpha = self.alpha * (1. - t / GLOW_REACH).max(0.);
         mix_rgb(mix_rgb(stops.0, stops.1, t), self.accent, alpha)
     }
 }
 
-/// GPUI's overflow clip is rectangular. Paint just the four regions outside
-/// the island's round outline over its square-edged children, without insetting
-/// the table or inspector. This canvas has no hitbox and cannot block clicks.
-fn island_corner_mask(stops: (Rgba, Rgba), glow: WorkspaceGlow) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let radius = f32::from(ISLAND_RADIUS);
-            let x0 = f32::from(bounds.origin.x);
-            let x1 = x0 + f32::from(bounds.size.width);
-            let y0 = f32::from(bounds.origin.y);
-            let y1 = y0 + f32::from(bounds.size.height);
-            let width = f32::from(window.viewport_size().width);
-            let height = f32::from(window.viewport_size().height);
-            for right in [false, true] {
-                let x = if right { x1 } else { x0 };
-                for bottom in [false, true] {
-                    let y = if bottom { y1 } else { y0 };
-                    let t = workspace_gradient_fraction(x, y, width, height);
-                    let color = Hsla::from(glow.over(stops, t));
-                    let sx = if right { -1. } else { 1. };
-                    let sy = if bottom { -1. } else { 1. };
-                    let at = |u: f32, v: f32| point(px(x + sx * u), px(y + sy * v));
-                    let mut path = PathBuilder::fill();
-                    path.move_to(at(0., 0.));
-                    path.line_to(at(radius, 0.));
-                    let control = radius * (1. - 0.552_284_8);
-                    path.cubic_bezier_to(at(0., radius), at(control, 0.), at(0., control));
-                    path.close();
-                    if let Ok(path) = path.build() {
-                        window.paint_path(path, color);
-                    }
-                }
-            }
-        },
-    )
-    .absolute()
-    .inset_0()
-    .size_full()
+/// Translucent pane fill so the workspace gradient reads through continuous
+/// surfaces (zeron-style glass without requiring compositor backdrop blur).
+fn pane_fill(theme: &ThemeColor, dark: bool) -> Hsla {
+    theme.background.opacity(if dark { 0.78 } else { 0.84 })
+}
+
+/// Hairline divider: soft white on dark, soft ink on light — zeron's low-alpha
+/// borders adapted to Ibex panes.
+fn pane_hairline(dark: bool) -> Hsla {
+    if dark {
+        rgba(0xffffff14).into()
+    } else {
+        rgba(0x00000014).into()
+    }
 }
 impl Render for LibraryApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -6850,13 +6831,17 @@ impl Render for LibraryApp {
         // The accent caret stays visible on the pale selection tint.
         let editing = self.has_inline(cx);
 
-        let stops = workspace_gradient_stops(cx.theme().is_dark(), secondary);
+        let dark = cx.theme().is_dark();
+        let stops = workspace_gradient_stops(dark, secondary);
         let background = linear_gradient(
             WORKSPACE_GRADIENT_ANGLE,
             linear_color_stop(Hsla::from(stops.0), 0.),
             linear_color_stop(Hsla::from(stops.1), 1.),
         );
-        let glow = WorkspaceGlow::new(cx.theme().is_dark(), cx.theme().primary);
+        let glow = WorkspaceGlow::new(dark, cx.theme().primary);
+        let fill = pane_fill(cx.theme(), dark);
+        let hairline = pane_hairline(dark);
+        let search_fill = cx.theme().muted.opacity(if dark { 0.55 } else { 0.62 });
 
         v_flex()
             .size_full()
@@ -6975,13 +6960,30 @@ impl Render for LibraryApp {
                     cx.propagate();
                 }
             }))
-            // First child paints beneath the toolbar and body; it has no hitbox.
+            // Static accent glow (one continuous layer under chrome + body).
             .child(div().absolute().inset_0().bg(glow.background()))
+            // A second soft wash breathes so the atmosphere has presence.
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(cx.theme().primary.opacity(if dark { 0.10 } else { 0.06 }))
+                    .with_animation(
+                        "workspace-glow-pulse",
+                        Animation::new(Duration::from_millis(3200))
+                            .repeat()
+                            .with_easing(ease_in_out),
+                        |el, t| {
+                            let breath = 0.25 + 0.75 * (std::f32::consts::PI * t).sin().abs();
+                            el.opacity(breath)
+                        },
+                    ),
+            )
             .child(
                 // The toolbar doubles as the window's title bar; reserve space
                 // for the native traffic lights without adding a bottom rule.
                 TitleBar::new()
-                    .h(px(40.))
+                    .h(px(44.))
                     .pl_0()
                     .border_0()
                     // Share the viewport backdrop instead of restarting the gradient here.
@@ -7000,14 +7002,36 @@ impl Render for LibraryApp {
                                     // Keep edge insets on the controls, not these regions,
                                     // so padding cannot offset the search from window center.
                                     .items_center()
+                                    .gap_1()
                                     .child(
-                                        Button::new("toggle-left-panel")
-                                            .ghost()
+                                        // Brand-first: mark + wordmark lead the chrome.
+                                        h_flex()
+                                            .id("toolbar-brand")
+                                            .test_support()
+                                            .items_center()
+                                            .gap_1()
                                             .ml(if cfg!(target_os = "macos") {
                                                 px(80.)
                                             } else {
                                                 px(12.)
                                             })
+                                            .child(
+                                                img("images/ibex-mark.png")
+                                                    .w(px(18.))
+                                                    .h(px(18.))
+                                                    .flex_shrink_0(),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(cx.theme().foreground)
+                                                    .child("Ibex"),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("toggle-left-panel")
+                                            .ghost()
                                             .icon(if self.left_panel_open {
                                                 Icon::new(AssetIconName::PanelLeftClose)
                                                     .with_size(px(12.))
@@ -7061,8 +7085,8 @@ impl Render for LibraryApp {
                                                 // the single-line frame through its style instead.
                                                 .min_h(px(30.))
                                                 .rounded(px(8.))
-                                                .bg(cx.theme().muted)
-                                                .border_color(cx.theme().border)
+                                                .bg(search_fill)
+                                                .border_color(hairline)
                                                 .px(px(12.))
                                                 .py(px(6.))
                                                 .text_size(px(12.))
@@ -7167,8 +7191,8 @@ impl Render for LibraryApp {
                                             .pl_2()
                                             .rounded(px(8.))
                                             .border_1()
-                                            .border_color(cx.theme().border)
-                                            .bg(cx.theme().background)
+                                            .border_color(hairline)
+                                            .bg(fill)
                                             .id("toolbar-theme")
                                             .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                                 cx.stop_propagation()
@@ -7236,15 +7260,23 @@ impl Render for LibraryApp {
                     ),
             )
             .child(
-                // Each pane owns its surface; the row's gutters reveal the
-                // window gradient without changing the table or inspector.
+                // Continuous flush panes (no floating islands). Hairlines and
+                // translucent fills let the workspace gradient show through.
                 h_flex()
+                    .id("workspace-body")
+                    .test_support()
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
                     .items_stretch()
-                    .gap_2()
-                    .p_2()
+                    .gap_0()
+                    .border_t_1()
+                    .border_color(hairline)
+                    .with_animation(
+                        "workspace-body-enter",
+                        Animation::new(Duration::from_millis(380)).with_easing(ease_in_out),
+                        |el, t| el.opacity(0.35 + 0.65 * t),
+                    )
                     .when(left_panel_width > px(0.5), |el| {
                         el.child(
                             div()
@@ -7254,10 +7286,9 @@ impl Render for LibraryApp {
                                 .flex_shrink_0()
                                 .h_full()
                                 .overflow_hidden()
-                                .rounded(ISLAND_RADIUS)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().background)
+                                .border_r_1()
+                                .border_color(hairline)
+                                .bg(fill)
                                 .child(self.render_left_panel(cx))
                                 .when(self.left_panel_open, |el| {
                                     el.child(self.sidebar_resize_handle(true, left_panel_width, cx))
@@ -7297,10 +7328,7 @@ impl Render for LibraryApp {
                                 .min_w_0()
                                 .h_full()
                                 .relative()
-                                .rounded(ISLAND_RADIUS)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().background)
+                                .bg(fill)
                                 .overflow_hidden();
                             // While inline editing, keep Root Tab/TabPrev inside
                             // the grid so focus cannot walk to toolbar/sidebar.
@@ -7308,12 +7336,9 @@ impl Render for LibraryApp {
                                 wrap.track_focus(&self.inline_trap)
                                     .focus_trap("inline-edit-trap", &self.inline_trap)
                                     .child(table)
-                                    .child(island_corner_mask(stops, glow))
                                     .into_any_element()
                             } else {
-                                wrap.child(table)
-                                    .child(island_corner_mask(stops, glow))
-                                    .into_any_element()
+                                wrap.child(table).into_any_element()
                             }
                         },
                     )
@@ -7327,29 +7352,29 @@ impl Render for LibraryApp {
                                 .h_full()
                                 .w(sidebar_width)
                                 .flex_shrink_0()
+                                .border_l_1()
+                                .border_color(hairline)
+                                .bg(fill)
                                 .child(
                                     v_flex()
                                         .h_full()
                                         .w_full()
-                                        .gap_2()
+                                        .gap_0()
                                         .when(self.detail_open, |column| {
                                             column.child(
                                                 div()
                                                     .relative()
                                                     .w_full()
                                                     .overflow_hidden()
-                                                    .rounded(ISLAND_RADIUS)
-                                                    .border_1()
-                                                    .border_color(cx.theme().border)
-                                                    .bg(cx.theme().background)
-                                                    .when(detail_limit.is_none(), |island| {
-                                                        island.flex_1().min_h_0()
+                                                    .border_b_1()
+                                                    .border_color(hairline)
+                                                    .when(detail_limit.is_none(), |pane| {
+                                                        pane.flex_1().min_h_0()
                                                     })
-                                                    .when(detail_limit.is_some(), |island| {
-                                                        island.flex_shrink_0()
+                                                    .when(detail_limit.is_some(), |pane| {
+                                                        pane.flex_shrink_0()
                                                     })
-                                                    .child(self.render_side_panel(detail_limit, cx))
-                                                    .child(island_corner_mask(stops, glow)),
+                                                    .child(self.render_side_panel(detail_limit, cx)),
                                             )
                                         })
                                         .when(notes_open, |column| {
@@ -7362,10 +7387,6 @@ impl Render for LibraryApp {
                                                     .flex_1()
                                                     .min_h_0()
                                                     .overflow_hidden()
-                                                    .rounded(ISLAND_RADIUS)
-                                                    .border_1()
-                                                    .border_color(cx.theme().border)
-                                                    .bg(cx.theme().background)
                                                     .child(
                                                         div()
                                                             .id("notes-island-scroll")
@@ -7376,8 +7397,7 @@ impl Render for LibraryApp {
                                                             .overflow_y_scroll()
                                                             .p_3()
                                                             .child(self.notes.clone()),
-                                                    )
-                                                    .child(island_corner_mask(stops, glow)),
+                                                    ),
                                             )
                                         }),
                                 )
@@ -8678,12 +8698,12 @@ mod gradient_tests {
     #[test]
     fn wash_runs_neutral_to_the_exact_secondary_in_both_modes() {
         for dark in [false, true] {
-            let neutral = rgb(if dark { 0x292722 } else { 0xeae8e2 });
+            let neutral = rgb(if dark { 0x12141a } else { 0xe8eef4 });
             assert_eq!(
                 workspace_gradient_stops(dark, Some(0x102030)),
                 (neutral, rgb(0x102030))
             );
-            let end = rgb(if dark { 0x262c35 } else { 0xd9dde5 });
+            let end = rgb(if dark { 0x1a222c } else { 0xd5dde8 });
             assert_eq!(workspace_gradient_stops(dark, None), (neutral, end));
         }
     }

@@ -83,14 +83,34 @@ struct DocumentationView {
 
 impl Render for DocumentationView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let dark = cx.theme().is_dark();
+        let wash = gpui_kit::linear_gradient(
+            225.,
+            gpui_kit::linear_color_stop(
+                gpui_kit::Hsla::from(gpui_kit::rgb(if dark { 0x12141a } else { 0xe8eef4 })),
+                0.,
+            ),
+            gpui_kit::linear_color_stop(
+                gpui_kit::Hsla::from(gpui_kit::rgb(if dark { 0x1a222c } else { 0xd5dde8 })),
+                1.,
+            ),
+        );
+        let surface = cx.theme().background.opacity(if dark { 0.82 } else { 0.88 });
         v_flex()
             .id("documentation-content")
             .test_support()
+            .relative()
             .size_full()
-            .bg(cx.theme().background)
+            .bg(wash)
             .text_color(cx.theme().foreground)
-            .p_6()
-            .child(TextView::new(&self.text).scrollable(true).size_full())
+            .child(
+                v_flex()
+                    .relative()
+                    .size_full()
+                    .bg(surface)
+                    .p_6()
+                    .child(TextView::new(&self.text).scrollable(true).size_full()),
+            )
     }
 }
 

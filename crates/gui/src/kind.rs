@@ -43,6 +43,9 @@ pub struct AppAssets;
 
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == "images/ibex-mark.png" {
+            return Ok(Some(Cow::Borrowed(include_bytes!("../assets/ibex-mark.png"))));
+        }
         if let Some(bytes) = KindIcons.load(path)? {
             return Ok(Some(bytes));
         }
@@ -52,6 +55,9 @@ impl AssetSource for AppAssets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut paths = Assets.list(path)?;
         paths.extend(KindIcons.list(path)?);
+        if path.is_empty() || path == "images" || path == "images/" {
+            paths.push("images/ibex-mark.png".into());
+        }
         paths.sort();
         paths.dedup();
         Ok(paths)

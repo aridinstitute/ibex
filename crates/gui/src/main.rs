@@ -238,16 +238,64 @@ struct StartupError {
 }
 
 impl Render for StartupError {
-    fn render(&mut self, _: &mut Window, _: &mut gpui_kit::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut gpui_kit::Context<Self>) -> impl IntoElement {
+        use gpui_kit::component::{ActiveTheme as _, h_flex};
+        let dark = cx.theme().is_dark();
+        let wash = linear_gradient(
+            225.,
+            linear_color_stop(
+                Hsla::from(rgb(if dark { 0x12141a } else { 0xe8eef4 })),
+                0.,
+            ),
+            linear_color_stop(
+                Hsla::from(rgb(if dark { 0x1a222c } else { 0xd5dde8 })),
+                1.,
+            ),
+        );
+        let glow = linear_gradient(
+            225.,
+            linear_color_stop(
+                cx.theme().primary.opacity(if dark { 0.35 } else { 0.22 }),
+                0.,
+            ),
+            linear_color_stop(cx.theme().primary.opacity(0.), 0.45),
+        );
         div()
             .id("startup-error")
+            .relative()
             .size_full()
-            .p_6()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(div().text_lg().child("Ibex could not open the library"))
-            .child(div().child(self.message.clone()))
+            .bg(wash)
+            .text_color(cx.theme().foreground)
+            .child(div().absolute().inset_0().bg(glow))
+            .child(
+                div()
+                    .relative()
+                    .size_full()
+                    .p_8()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .justify_center()
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(img("images/ibex-mark.png").w(px(28.)).h(px(28.)))
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Ibex"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .opacity(0.7)
+                            .child("Could not open the library"),
+                    )
+                    .child(div().text_sm().opacity(0.85).child(self.message.clone())),
+            )
     }
 }
 
