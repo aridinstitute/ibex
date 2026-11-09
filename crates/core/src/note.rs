@@ -1,13 +1,24 @@
 //! Markdown notes are independent records, not resource metadata.
 use crate::{ResourceId, StoreError, UtcMillis};
 use std::fmt;
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NoteId(ulid::Ulid);
 
 impl NoteId {
+    /// Monotonic so two notes created in the same millisecond still list in
+    /// creation order. `list_notes` sorts by `created_at`, then id, and a
+    /// random id can sort before one created earlier in that same millisecond.
     pub fn generate() -> Self {
-        Self(ulid::Ulid::generate())
+        static GENERATOR: Mutex<ulid::Generator> = Mutex::new(ulid::Generator::new());
+        let mut generator = GENERATOR
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let id = generator
+            .generate()
+            .unwrap_or_else(|overflow| overflow.commit_overflow_increment());
+        Self(id)
     }
     pub fn parse(s: &str) -> Result<Self, ulid::DecodeError> {
         Ok(Self(ulid::Ulid::from_string(s)?))
@@ -101,4 +112,19 @@ pub struct Note {
     pub content: NoteContent,
     pub created_at: UtcMillis,
     pub updated_at: UtcMillis,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NoteId;
+
+    #[test]
+    fn generated_ids_increase() {
+        let mut previous = NoteId::generate().to_string();
+        for _ in 0..32 {
+            let next = NoteId::generate().to_string();
+            assert!(previous < next);
+            previous = next;
+        }
+    }
 }
