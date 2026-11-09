@@ -487,7 +487,7 @@ impl Render for NotesPanel {
                         .test_support()
                         .gap_2()
                         .border_t_1()
-                        .border_color(cx.theme().border)
+                        .border_color(cx.theme().input)
                         .pt_2()
                         .child(
                             h_flex()

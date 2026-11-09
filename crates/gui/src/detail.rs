@@ -338,7 +338,6 @@ pub fn render_panel(
             v_flex()
                 .gap_3()
                 .child(header)
-                .child(div().border_b_1().border_color(cx.theme().border))
                 .child(
                     DescriptionList::new()
                         .bordered(false)
@@ -361,7 +360,9 @@ pub fn render_panel(
     v_flex()
         .flex_shrink_0()
         .w_full()
-        .bg(cx.theme().background)
+        // Stay clear of the workspace wash — a solid/glass fill reads as a
+        // boxed island against the seamless sheet.
+        .bg(rgba(0x00000000))
         .text_size(FIELD_TEXT_SIZE)
         .when_some(max_height, |panel, max| panel.max_h(max))
         .when(max_height.is_none(), |panel| panel.h_full())

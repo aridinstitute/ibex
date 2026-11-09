@@ -230,7 +230,8 @@ fn membership_chip(label: String, cx: &App) -> Div {
         .min_h(px(20.))
         .rounded(px(6.))
         .border_1()
-        .border_color(cx.theme().border)
+        // theme.border is invisible (DataTable header seam); chips need a whisper.
+        .border_color(cx.theme().input)
         .child(div().pr_1().child(label))
 }
 
@@ -265,7 +266,7 @@ impl Render for CollectionDragGhost {
             .text_color(cx.theme().popover_foreground)
             .text_size(px(12.))
             .border_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().input)
             .child(self.name.clone())
     }
 }
@@ -697,10 +698,10 @@ impl LibraryDelegate {
             .h(Size::XSmall.table_row_height())
             .items_center()
             .px(pad.left)
-            .border_t_1()
+            // No top rule — a border_t under Title/Authors is the "weird line".
             .border_r_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+            .border_color(cx.theme().input)
+            .bg(rgba(0x00000000))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(|_, _, cx| cx.stop_propagation());
         let (Some(inputs), Some(field)) =
@@ -766,7 +767,7 @@ impl LibraryDelegate {
                         .w(px(1.))
                         .h_full()
                         .flex_shrink_0()
-                        .bg(cx.theme().border),
+                        .bg(cx.theme().input),
                 )
                 .child(
                     Input::new(&inputs.published_to)
@@ -6745,24 +6746,18 @@ impl WorkspaceGlow {
     }
 }
 
-/// Ultra-light glass wash for column panes. Theme widgets already paint
-/// translucent table/list fills; this is just a whisper so columns don't look
-/// like solid cards against the wash.
-fn pane_fill(dark: bool) -> Hsla {
-    if dark {
-        rgba(0xffffff0a).into()
-    } else {
-        rgba(0xffffff1a).into()
-    }
+/// Column panes stay fully clear — theme glass already paints the widgets.
+/// Extra fills made the detail rail read as a boxed island.
+fn pane_fill(_dark: bool) -> Hsla {
+    rgba(0x00000000).into()
 }
 
-/// Hairline divider: soft white on dark, soft ink on light — zeron's low-alpha
-/// borders adapted to Ibex panes.
+/// Soft column guides only (search/theme chips). Pane chrome itself is borderless.
 fn pane_hairline(dark: bool) -> Hsla {
     if dark {
-        rgba(0xffffff22).into()
+        rgba(0xffffff18).into()
     } else {
-        rgba(0x00000018).into()
+        rgba(0x00000014).into()
     }
 }
 
@@ -7304,8 +7299,7 @@ impl Render for LibraryApp {
                                 .flex_shrink_0()
                                 .h_full()
                                 .overflow_hidden()
-                                .border_r_1()
-                                .border_color(hairline)
+                                // No vertical rule — sidebar flows into the grid.
                                 .bg(fill)
                                 .child(self.render_left_panel(cx))
                                 .when(self.left_panel_open, |el| {
@@ -7370,8 +7364,7 @@ impl Render for LibraryApp {
                                 .h_full()
                                 .w(sidebar_width)
                                 .flex_shrink_0()
-                                .border_l_1()
-                                .border_color(hairline)
+                                // No left rule / fill — detail is the same glass sheet.
                                 .bg(fill)
                                 .child(
                                     v_flex()
@@ -7384,8 +7377,6 @@ impl Render for LibraryApp {
                                                     .relative()
                                                     .w_full()
                                                     .overflow_hidden()
-                                                    .border_b_1()
-                                                    .border_color(hairline)
                                                     .when(detail_limit.is_none(), |pane| {
                                                         pane.flex_1().min_h_0()
                                                     })

@@ -36,16 +36,18 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     let row_tint = rgba(pick(0x0064ff33, 0x0a84ff40)).into();
 
     // Glass sheets: translucent white/ink so the atmospheric wash shows through.
+    // Keep head/row surfaces the SAME alpha — a raised head band reads as the
+    // "weird line" under Title/Authors and breaks header→content seamlessness.
     let glass = if dark {
-        rgba(0x14182066) // ~40% ink
+        rgba(0x14182055) // ~33% ink
     } else {
-        rgba(0xffffff59) // ~35% white
+        rgba(0xffffff4d) // ~30% white
     }
     .into();
     let glass_raised = if dark {
-        rgba(0x1c223080)
+        rgba(0x1c223070)
     } else {
-        rgba(0xffffff73)
+        rgba(0xffffff66)
     }
     .into();
     let glass_hover = if dark {
@@ -54,10 +56,13 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
         rgba(0x0000000f)
     }
     .into();
+    // Invisible by default: DataTable paints `border_b` with table_row_border
+    // under the column header; any visible alpha becomes that seam.
+    let invisible = rgba(0x00000000).into();
     let hairline = if dark {
-        rgba(0xffffff1f)
+        rgba(0xffffff14)
     } else {
-        rgba(0x0000001a)
+        rgba(0x00000012)
     }
     .into();
 
@@ -67,28 +72,33 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     colors.secondary_active = glass_raised;
     colors.muted = glass_raised;
     colors.accent = glass_hover;
-    colors.border = hairline;
+    // DataTable's column header paints border_b with `theme.border` (not
+    // table_row_border). Any visible alpha becomes the Title/Authors seam.
+    colors.border = invisible;
+    // Inputs/search keep an explicit hairline via `input` or local colors.
     colors.input = hairline;
     colors.sidebar = glass;
-    colors.sidebar_border = hairline;
+    colors.sidebar_border = invisible;
     colors.sidebar_accent = glass_hover;
     colors.list = glass;
     colors.list_even = glass;
-    colors.list_head = glass_raised;
+    // Heads stay fully clear so Title/Authors sits on the wash — any glass
+    // alpha here reads as a raised strip and a seam under the labels.
+    colors.list_head = invisible;
     colors.list_hover = glass_hover;
     colors.table = glass;
     colors.table_even = glass;
-    colors.table_head = glass_raised;
+    colors.table_head = invisible;
     colors.table_hover = glass_hover;
-    colors.table_row_border = hairline;
+    colors.table_row_border = invisible; // row separators stay off too
     colors.popover = glass_raised;
     colors.tab = glass;
     colors.tab_active = glass_raised;
     colors.tab_bar = glass;
-    colors.title_bar = rgba(0x00000000).into();
-    colors.title_bar_border = rgba(0x00000000).into();
+    colors.title_bar = invisible;
+    colors.title_bar_border = invisible;
     colors.status_bar = glass;
-    colors.status_bar_border = rgba(0x00000000).into();
+    colors.status_bar_border = invisible;
 
     colors.primary = blue;
     colors.primary_hover = rgb(pick(0x0055e0, 0x3b9cff)).into();
@@ -217,12 +227,23 @@ mod tests {
             assert!(colors.selection.a < 1., "text selection tints");
             // Surfaces go glass: translucent so the workspace wash reads through.
             assert!(
-                colors.background.a < 0.55,
+                colors.background.a < 0.45,
                 "background should be a glass sheet, got a={}",
                 colors.background.a
             );
-            assert!(colors.table.a < 0.55, "table should be glass");
-            assert!(colors.border.a < 0.2, "borders should be hairlines");
+            assert!(colors.table.a < 0.45, "table should be glass");
+            assert_eq!(
+                colors.table_head.a, 0.,
+                "table head must be clear (no raised header band over the wash)"
+            );
+            assert_eq!(
+                colors.table_row_border.a, 0.,
+                "table row borders must be invisible"
+            );
+            assert_eq!(
+                colors.border.a, 0.,
+                "theme.border must be invisible — DataTable header uses it for the Title/Authors seam"
+            );
             assert_eq!(colors.foreground, base.foreground);
             assert_eq!(colors.title_bar.a, 0., "title bar must stay seamless");
         }
