@@ -11694,13 +11694,31 @@ mod notes_shortcut_tests {
         }
         cx.run_until_parked();
     }
+
+    /// Row whose demo index is outside the seeded-notes tail.
+    ///
+    /// The grid default is newest-first, and a fast seed can share one
+    /// timestamp, so `rows[0]` is not a stable empty resource.
+    fn row_titled(app: &gpui_kit::Entity<LibraryApp>, cx: &TestAppContext, title: &str) -> usize {
+        app.read_with(cx, |app, cx| {
+            app.table
+                .read(cx)
+                .delegate()
+                .rows
+                .iter()
+                .position(|row| row.title.as_str() == title)
+                .unwrap_or_else(|| panic!("missing row {title}"))
+        })
+    }
+
     #[gpui_kit::test]
     fn note_shortcut_saves_markdown_and_cancel_does_not_create(cx: &mut TestAppContext) {
         let (handle, app, worker, _dir) = fixture(cx);
-        let target = app.read_with(cx, |app, cx| app.table.read(cx).delegate().rows[0].id);
+        let row = row_titled(&app, cx, "Margin Notes 007");
+        let target = app.read_with(cx, |app, cx| app.table.read(cx).delegate().rows[row].id);
         cx.update_window(handle, |_, window, cx| {
             app.update(cx, |app, cx| {
-                app.select_row(0, window, cx);
+                app.select_row(row, window, cx);
                 app.focus_table(window, cx);
             });
             window.render_frame(cx);
@@ -11736,10 +11754,11 @@ mod notes_shortcut_tests {
     #[gpui_kit::test]
     fn notes_edit_types_locations_and_confirm_delete(cx: &mut TestAppContext) {
         let (handle, app, worker, _dir) = fixture(cx);
-        let target = app.read_with(cx, |app, cx| app.table.read(cx).delegate().rows[0].id);
+        let row = row_titled(&app, cx, "Margin Notes 007");
+        let target = app.read_with(cx, |app, cx| app.table.read(cx).delegate().rows[row].id);
         cx.update_window(handle, |_, window, cx| {
             app.update(cx, |app, cx| {
-                app.select_row(0, window, cx);
+                app.select_row(row, window, cx);
                 app.focus_table(window, cx);
             });
             window.render_frame(cx);
@@ -11882,13 +11901,15 @@ mod notes_shortcut_tests {
     #[gpui_kit::test]
     fn note_validation_preserves_draft_and_save_keeps_original_resource(cx: &mut TestAppContext) {
         let (handle, app, worker, _dir) = fixture(cx);
+        let target_row = row_titled(&app, cx, "Margin Notes 007");
+        let other_row = row_titled(&app, cx, "Field Report 005");
         let (target, other) = app.read_with(cx, |app, cx| {
             let rows = &app.table.read(cx).delegate().rows;
-            (rows[0].id, rows[1].id)
+            (rows[target_row].id, rows[other_row].id)
         });
         cx.update_window(handle, |_, window, cx| {
             app.update(cx, |app, cx| {
-                app.select_row(0, window, cx);
+                app.select_row(target_row, window, cx);
                 app.focus_table(window, cx);
             })
         })
@@ -11910,7 +11931,7 @@ mod notes_shortcut_tests {
             window.input(" intact", cx);
             window.click("note-save", cx);
             app.update(cx, |app, cx| {
-                app.select_row(1, window, cx);
+                app.select_row(other_row, window, cx);
                 app.focus_table(window, cx);
             });
         })
@@ -11925,7 +11946,7 @@ mod notes_shortcut_tests {
             window.render_frame(cx);
             assert!(window.try_find("note-editor").is_none());
             assert!(window.try_find(format!("note-{}", notes[0].id)).is_none());
-            app.update(cx, |app, cx| app.select_row(0, window, cx));
+            app.update(cx, |app, cx| app.select_row(target_row, window, cx));
         })
         .unwrap();
         settle(cx, &worker);

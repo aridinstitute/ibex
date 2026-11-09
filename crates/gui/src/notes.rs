@@ -442,7 +442,8 @@ impl Render for NotesPanel {
                             Button::new("note-new")
                                 .ghost()
                                 .small()
-                                .label("Add note")
+                                .icon(IconName::Plus)
+                                .accessibility_label("Add note")
                                 .tooltip("Add note (⌘⇧N)")
                                 .disabled(self.pending || self.resource.is_none())
                                 .on_click(
@@ -603,8 +604,16 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let store = ibex_app::testing::MemoryStore::new();
         let resource = rt.block_on(async {
-            ibex_app::seed::seed_demo_library(&store, 1).await.unwrap();
-            store.list_resources().await.unwrap()[0].id
+            // Index 0 stays empty: demo notes attach only to the newest tail.
+            ibex_app::seed::seed_demo_library(&store, 12).await.unwrap();
+            store
+                .list_resources()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|row| row.title.as_str() == "Citation Networks 000")
+                .unwrap()
+                .id
         });
         let worker = DbWorker::spawn(
             ibex_app::AppState::builder(store)
