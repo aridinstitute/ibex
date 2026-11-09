@@ -1,3 +1,4 @@
+use ibex_core::{Note, NoteContent, NoteId};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
@@ -26,6 +27,32 @@ const COLLECTION_TABLE: &str = "collection";
 const CHILD_OF_TABLE: &str = "child_of";
 const RESOURCE_TABLE: &str = "resource";
 const ATTACHMENT_TABLE: &str = "attachment";
+
+const NOTE_TABLE: &str = "note";
+
+#[derive(SurrealValue)]
+struct NoteDoc {
+    id: RecordId,
+    resource: Option<RecordId>,
+    content: SerdeWrapper<NoteContent>,
+    created_at: i64,
+    updated_at: i64,
+}
+impl NoteDoc {
+    fn into_note(self) -> Result<Note, StoreError> {
+        Ok(Note {
+            id: NoteId::parse(&record_key(&self.id)).map_err(|e| StoreError::new(e.to_string()))?,
+            resource_id: self
+                .resource
+                .as_ref()
+                .map(SurrealStore::thing_to_resource_id)
+                .transpose()?,
+            content: self.content.0,
+            created_at: UtcMillis::from_unix_ms(self.created_at),
+            updated_at: UtcMillis::from_unix_ms(self.updated_at),
+        })
+    }
+}
 
 #[derive(Debug, Clone, SurrealValue)]
 struct AttachmentDoc {
@@ -606,6 +633,8 @@ impl SurrealStore {
     }
 
     async fn ensure_schema(&self) -> Result<(), StoreError> {
+        self.db.query("DEFINE TABLE IF NOT EXISTS note SCHEMALESS; DEFINE INDEX IF NOT EXISTS note_resource ON note FIELDS resource;")
+            .await.map_err(map_err)?.check().map_err(map_err)?;
         // Base tables before relation DDL or indexes that would otherwise
         // implicitly create `created` as a plain table (skipping ENFORCED).
         let _ = self
@@ -1744,6 +1773,71 @@ fn open_error(path: &Path, err: surrealdb::Error) -> StoreError {
 
 #[async_trait::async_trait]
 impl Store for SurrealStore {
+    async fn create_note(
+        &self,
+        resource_id: ResourceId,
+        content: NoteContent,
+    ) -> Result<Note, StoreError> {
+        content.validate()?;
+        self.get_resource(resource_id).await?;
+        let id = NoteId::generate();
+        let now = UtcMillis::now().as_unix_ms();
+        let row: Option<NoteDoc> = self
+            .db
+            .create((NOTE_TABLE, id.to_string()))
+            .content(NoteDoc {
+                id: RecordId::new(NOTE_TABLE, id.to_string()),
+                resource: Some(Self::resource_key(resource_id)),
+                content: SerdeWrapper(content),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .map_err(map_err)?;
+        row.ok_or_else(|| StoreError::new("create_note returned no record"))?
+            .into_note()
+    }
+
+    async fn update_note(&self, id: NoteId, content: NoteContent) -> Result<Note, StoreError> {
+        content.validate()?;
+        let mut response = self
+            .db
+            .query("UPDATE $id SET content = $content, updated_at = $now RETURN AFTER")
+            .bind(("id", RecordId::new(NOTE_TABLE, id.to_string())))
+            .bind(("content", SerdeWrapper(content)))
+            .bind(("now", UtcMillis::now().as_unix_ms()))
+            .await
+            .map_err(map_err)?
+            .check()
+            .map_err(map_err)?;
+        let row: Option<NoteDoc> = response.take(0).map_err(map_err)?;
+        row.ok_or_else(|| StoreError::not_found(format!("note {id}")))?
+            .into_note()
+    }
+
+    async fn delete_note(&self, id: NoteId) -> Result<(), StoreError> {
+        let row: Option<NoteDoc> = self
+            .db
+            .delete((NOTE_TABLE, id.to_string()))
+            .await
+            .map_err(map_err)?;
+        row.ok_or_else(|| StoreError::not_found(format!("note {id}")))?;
+        Ok(())
+    }
+
+    async fn list_notes(&self, resource_id: ResourceId) -> Result<Vec<Note>, StoreError> {
+        self.get_resource(resource_id).await?;
+        let mut response = self
+            .db
+            .query("SELECT * FROM note WHERE resource = $resource ORDER BY created_at ASC, id ASC")
+            .bind(("resource", Self::resource_key(resource_id)))
+            .await
+            .map_err(map_err)?
+            .check()
+            .map_err(map_err)?;
+        let rows: Vec<NoteDoc> = response.take(0).map_err(map_err)?;
+        rows.into_iter().map(NoteDoc::into_note).collect()
+    }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         self.db.query("RETURN true").await.map_err(map_err)?;
         Ok(StoreHealth {

@@ -67,6 +67,7 @@ use crate::inline_edit::{
     creators_badge_trigger, person_items, person_name_from_query, selected_person_ids,
 };
 use crate::kind::{kind_color, kind_label, kind_symbol};
+use crate::notes::{AddNote, NotesPanel};
 use crate::settings::{Settings, ThemeColorTarget};
 use crate::tags::{TagChoice, TagDelegate};
 use crate::theme_editor::{ThemeEditor, ThemeEditorEvent};
@@ -1868,6 +1869,7 @@ enum ImportState {
     Importing,
 }
 pub struct LibraryApp {
+    notes: Entity<NotesPanel>,
     import_state: ImportState,
     import_gen: u64,
     import_task: Option<Task<()>>,
@@ -2264,6 +2266,7 @@ impl LibraryApp {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.bind_keys([
+            KeyBinding::new("cmd-shift-n", AddNote, Some("LibraryApp")),
             KeyBinding::new(
                 "shift-up",
                 ExtendResourceSelectionUp,
@@ -2715,6 +2718,12 @@ impl LibraryApp {
         .detach();
         Self {
             import_state: ImportState::Idle,
+            notes: {
+                let worker = table.read(cx).delegate().worker().clone();
+                let notes = cx.new(|_| NotesPanel::new(worker));
+                cx.observe(&notes, |_, _, cx| cx.notify()).detach();
+                notes
+            },
             import_gen: 0,
             import_task: None,
             table,
@@ -4308,11 +4317,31 @@ impl LibraryApp {
         cx.notify();
     }
 
+    fn add_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected else {
+            return;
+        };
+        if self.table.read(cx).delegate().selected_ids.len() > 1
+            || self.edit.is_some()
+            || self.has_inline(cx)
+        {
+            return;
+        }
+        self.detail_open = true;
+        self.notes.update(cx, |notes, cx| {
+            notes.select(id, window, cx);
+            notes.begin_new(window, cx);
+        });
+        cx.notify();
+    }
+
     /// Point the panel at `id`'s detail: a prefetch hit renders the fields
     /// immediately; a miss shows loading while the one fetch for this id
     /// fills it. A slot already serving this id is left alone, so a
     /// reselect never restarts a finished or in-flight fetch.
     fn show_detail(&mut self, id: ResourceId, window: &mut Window, cx: &mut Context<Self>) {
+        self.notes
+            .update(cx, |notes, cx| notes.select(id, window, cx));
         if let Some(detail) = self.detail_cache.get(&id) {
             self.detail = Some((id, DetailFetch::Loaded(Box::new(detail.clone()))));
             self.sync_tag_picker(window, cx);
@@ -5946,13 +5975,42 @@ impl LibraryApp {
     /// row selected means nothing to edit, and an open form means the
     /// sidebar already is the editor.
     fn render_side_panel(&self, cx: &mut Context<Self>) -> Div {
+        if self.selected.is_some()
+            && self.table.read(cx).delegate().selected_ids.len() <= 1
+            && self.edit.is_none()
+            && self.notes.read(cx).is_editing()
+        {
+            return v_flex()
+                .h_full()
+                .w_full()
+                .bg(cx.theme().background)
+                .text_size(FIELD_TEXT_SIZE)
+                .child(
+                    div()
+                        .id("note-editor-panel")
+                        .test_support()
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .p_3()
+                        .child(self.notes.clone()),
+                );
+        }
         let selected_count = self.table.read(cx).delegate().selected_ids.len();
         if selected_count > 1 {
-            return render_panel(DetailView::Multiple(selected_count), None, Vec::new(), cx);
+            return render_panel(
+                DetailView::Multiple(selected_count),
+                None,
+                Vec::new(),
+                None,
+                cx,
+            );
         }
         match &self.edit {
             Some(EditFetch::Ready(form)) => self.render_edit_panel(form, cx),
-            Some(EditFetch::Loading(_)) => render_panel(DetailView::Loading, None, Vec::new(), cx),
+            Some(EditFetch::Loading(_)) => {
+                render_panel(DetailView::Loading, None, Vec::new(), None, cx)
+            }
             None => {
                 let favorited = match self.detail_view() {
                     DetailView::Fields(detail) => Some(detail.favorite),
@@ -6155,7 +6213,13 @@ impl LibraryApp {
                         extra_rows.push(("Suggested".into(), row));
                     }
                 }
-                render_panel(self.detail_view(), actions, extra_rows, cx)
+                render_panel(
+                    self.detail_view(),
+                    actions,
+                    extra_rows,
+                    self.selected.map(|_| self.notes.clone().into_any_element()),
+                    cx,
+                )
             }
         }
     }
@@ -6818,6 +6882,7 @@ impl Render for LibraryApp {
             } else {
                 "LibraryApp"
             })
+            .on_action(cx.listener(|this, _: &AddNote, window, cx| this.add_note(window, cx)))
             .on_action(cx.listener(|this, _: &ImportBiblatexFile, window, cx| {
                 this.import_biblatex(window, cx);
             }))
@@ -11524,5 +11589,331 @@ mod classification_tests {
             assert_eq!(rules.row_count(), 4);
             assert_eq!(rules.row_state(0).unwrap().0.id, added.id);
         });
+    }
+}
+
+#[cfg(test)]
+mod notes_shortcut_tests {
+    use super::{DbWorker, LibraryApp, LibraryDelegate, Settings, TableState};
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, TestAppContext};
+    use ibex_core::{ResourceGridParent, ResourceQuery};
+    fn fixture(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui_kit::AnyWindowHandle,
+        gpui_kit::Entity<LibraryApp>,
+        DbWorker,
+        tempfile::TempDir,
+    ) {
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let store = ibex_app::testing::MemoryStore::new();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            ibex_app::seed::seed_demo_library(&store, 20).await.unwrap();
+        });
+        let worker = DbWorker::spawn(
+            ibex_app::AppState::builder(store)
+                .surface(ibex_app::Surface::Test)
+                .build(),
+        );
+        let first = worker
+            .list_grid_page_blocking(
+                ResourceGridParent::Roots,
+                ResourceQuery::newest_first(),
+                0,
+                50,
+            )
+            .unwrap();
+        let (handle, app) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::bind_favorite_keys(cx);
+            gpui_kit::open_window(Default::default(), cx, |window, cx| {
+                let table = cx.new(|cx| {
+                    TableState::new(
+                        LibraryDelegate::new(worker.clone(), first, Settings::default()),
+                        window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| LibraryApp::new(table, dir.path().to_path_buf(), window, cx))
+            })
+            .unwrap()
+        });
+        (handle, app, worker, dir)
+    }
+
+    fn settle(cx: &mut TestAppContext, worker: &DbWorker) {
+        // Each fence lets the foreground completion enqueue its next worker hop.
+        for _ in 0..6 {
+            cx.run_until_parked();
+            worker.list_page_blocking(None, 1).unwrap();
+        }
+        cx.run_until_parked();
+    }
+    #[gpui_kit::test]
+    fn note_shortcut_saves_markdown_and_cancel_does_not_create(cx: &mut TestAppContext) {
+        let (handle, app, worker, _dir) = fixture(cx);
+        let target = app.read_with(cx, |app, cx| app.table.read(cx).delegate().rows[0].id);
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.select_row(0, window, cx);
+                app.focus_table(window, cx);
+            });
+            window.render_frame(cx);
+            window.press("cmd-shift-n", cx);
+            window.render_frame(cx);
+            assert_eq!(window.find("note-editor").label(), Some("Markdown note"));
+            window.input("**Research**\n\nA paragraph.", cx);
+            window.render_frame(cx);
+            window.click("note-save", cx);
+        })
+        .unwrap();
+        settle(cx, &worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let notes = rt.block_on(worker.list_notes(target)).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(
+            notes[0].content.body_markdown,
+            "**Research**\n\nA paragraph."
+        );
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press("cmd-shift-n", cx);
+            window.render_frame(cx);
+            window.input("discard me", cx);
+            window.render_frame(cx);
+            window.click("note-cancel", cx);
+        })
+        .unwrap();
+        settle(cx, &worker);
+        assert_eq!(rt.block_on(worker.list_notes(target)).unwrap().len(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn notes_edit_types_locations_and_confirm_delete(cx: &mut TestAppContext) {
+        let (handle, app, worker, _dir) = fixture(cx);
+        let target = app.read_with(cx, |app, cx| app.table.read(cx).delegate().rows[0].id);
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.select_row(0, window, cx);
+                app.focus_table(window, cx);
+            });
+            window.render_frame(cx);
+            window.press("cmd-shift-n", cx);
+            window.render_frame(cx);
+            window.input("> A quotation", cx);
+            window.click("note-kind", cx);
+            for _ in 0..4 {
+                window.press("down", cx);
+            }
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("popup-menu").is_none(),
+                "choosing a type must close its menu"
+            );
+            window.click("note-add-location", cx);
+            window.render_frame(cx);
+            window.click("location-value-0", cx);
+            window.input("12–15", cx);
+            window.click("note-add-location", cx);
+            window.render_frame(cx);
+            window.click("location-kind-1", cx);
+            for _ in 0..3 {
+                window.press("down", cx);
+            }
+            window.press("enter", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("popup-menu").is_none(),
+                "choosing a type must close its menu"
+            );
+            window.click("location-value-1", cx);
+            window.input("2.1", cx);
+            window.click("note-save", cx);
+        })
+        .unwrap();
+        settle(cx, &worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let notes = rt.block_on(worker.list_notes(target)).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content.kind, ibex_core::NoteKind::Quote);
+        assert_eq!(
+            notes[0].content.locations,
+            vec![
+                ibex_core::CitationLocation {
+                    kind: ibex_core::LocationKind::Page,
+                    value: "12–15".into()
+                },
+                ibex_core::CitationLocation {
+                    kind: ibex_core::LocationKind::Section,
+                    value: "2.1".into()
+                },
+            ]
+        );
+        let id = notes[0].id;
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(
+                "detail-panel",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                    gpui_kit::px(0.),
+                    gpui_kit::px(-4000.),
+                )),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click(format!("edit-note-{id}"), cx);
+            window.render_frame(cx);
+            window.press("cmd-a", cx);
+            window.input("Edited **Markdown**", cx);
+            window.click("remove-location-0", cx);
+            window.render_frame(cx);
+            window.click("note-save", cx);
+        })
+        .unwrap();
+        settle(cx, &worker);
+        let notes = rt.block_on(worker.list_notes(target)).unwrap();
+        assert_eq!(notes[0].content.body_markdown, "Edited **Markdown**");
+        assert_eq!(notes[0].content.locations.len(), 1);
+        assert_eq!(notes[0].content.locations[0].value, "2.1");
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.scroll(
+                "detail-panel",
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
+                    gpui_kit::px(0.),
+                    gpui_kit::px(-4000.),
+                )),
+                cx,
+            );
+            window.render_frame(cx);
+            window.click(format!("delete-note-{id}"), cx);
+            window.render_frame(cx);
+            window.click(format!("cancel-delete-note-{id}"), cx);
+        })
+        .unwrap();
+        assert_eq!(rt.block_on(worker.list_notes(target)).unwrap().len(), 1);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.click(format!("delete-note-{id}"), cx);
+            window.render_frame(cx);
+            window.click(format!("confirm-delete-note-{id}"), cx);
+        })
+        .unwrap();
+        settle(cx, &worker);
+        assert!(rt.block_on(worker.list_notes(target)).unwrap().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn notes_require_single_resource_selection(cx: &mut TestAppContext) {
+        let (handle, app, _worker, _dir) = fixture(cx);
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| app.focus_table(window, cx));
+            window.render_frame(cx);
+            window.press("cmd-shift-n", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("note-editor").is_none());
+            app.update(cx, |app, cx| app.select_row(0, window, cx));
+            window.press("cmd-a", cx);
+            window.press("cmd-shift-n", cx);
+            window.render_frame(cx);
+            assert!(window.try_find("note-editor").is_none());
+        })
+        .unwrap();
+        app.read_with(cx, |app, cx| {
+            assert!(app.table.read(cx).delegate().selected_ids.len() > 1)
+        });
+    }
+
+    #[gpui_kit::test]
+    fn note_validation_preserves_draft_and_save_keeps_original_resource(cx: &mut TestAppContext) {
+        let (handle, app, worker, _dir) = fixture(cx);
+        let (target, other) = app.read_with(cx, |app, cx| {
+            let rows = &app.table.read(cx).delegate().rows;
+            (rows[0].id, rows[1].id)
+        });
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.select_row(0, window, cx);
+                app.focus_table(window, cx);
+            })
+        })
+        .unwrap();
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, _| app.detail_open = false);
+            window.render_frame(cx);
+            window.press("cmd-shift-n", cx);
+            window.render_frame(cx);
+            window.click("note-save", cx);
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("note-error").label(),
+                Some("note body must not be empty")
+            );
+            window.press("cmd-shift-n", cx);
+            window.input("Keep **my draft**", cx);
+            window.press("cmd-shift-n", cx);
+            window.input(" intact", cx);
+            window.click("note-save", cx);
+            app.update(cx, |app, cx| {
+                app.select_row(1, window, cx);
+                app.focus_table(window, cx);
+            });
+        })
+        .unwrap();
+        settle(cx, &worker);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let notes = rt.block_on(worker.list_notes(target)).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content.body_markdown, "Keep **my draft** intact");
+        assert!(rt.block_on(worker.list_notes(other)).unwrap().is_empty());
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("note-editor").is_none());
+            assert!(window.try_find(format!("note-{}", notes[0].id)).is_none());
+            app.update(cx, |app, cx| app.select_row(0, window, cx));
+        })
+        .unwrap();
+        settle(cx, &worker);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find(format!("note-{}", notes[0].id)).is_some());
+        })
+        .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn initial_note_load_does_not_clear_editor_validation(cx: &mut TestAppContext) {
+        let (handle, app, worker, _dir) = fixture(cx);
+        cx.update_window(handle, |_, window, cx| {
+            app.update(cx, |app, cx| {
+                app.select_row(0, window, cx);
+                app.focus_table(window, cx);
+            });
+            window.render_frame(cx);
+            window.press("cmd-shift-n", cx);
+            window.render_frame(cx);
+            window.click("note-save", cx);
+        })
+        .unwrap();
+        settle(cx, &worker);
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("note-error").label(),
+                Some("note body must not be empty")
+            );
+        })
+        .unwrap();
     }
 }

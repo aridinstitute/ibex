@@ -10,6 +10,7 @@ use ibex_app::command::{
     ListCollectionForest, ListPersons, ListResourcesQueryPage, ListTags, RemoveCollectionParent,
     RenameCollection, SetCollectionClassification, SetResourceFavorite, UpdateResource,
 };
+use ibex_app::command::{CreateNote, DeleteNote, ListNotes, UpdateNote};
 use ibex_app::command::{ImportBiblatex, ImportReport, PreviewBiblatex};
 use ibex_app::{AppState, Command, Outcome};
 #[cfg(test)]
@@ -19,6 +20,7 @@ use ibex_core::{
     NewResource, NonEmptyStr, Person, Resource, ResourceCounts, ResourceDetail, ResourceId,
     ResourceQuery, SortedResourcePage, Tag,
 };
+use ibex_core::{Note, NoteContent, NoteId};
 use ibex_core::{ResourceGridPage, ResourceGridParent};
 use std::{io::Read as _, path::PathBuf};
 use tokio::sync::oneshot;
@@ -31,6 +33,24 @@ pub struct BiblatexImportPlan {
 }
 
 pub enum DbRequest {
+    CreateNote {
+        resource_id: ResourceId,
+        content: NoteContent,
+        reply: oneshot::Sender<Result<Note, String>>,
+    },
+    UpdateNote {
+        id: NoteId,
+        content: NoteContent,
+        reply: oneshot::Sender<Result<Note, String>>,
+    },
+    DeleteNote {
+        id: NoteId,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ListNotes {
+        resource_id: ResourceId,
+        reply: oneshot::Sender<Result<Vec<Note>, String>>,
+    },
     PreviewBiblatex {
         path: PathBuf,
         reply: oneshot::Sender<Result<BiblatexImportPlan, String>>,
@@ -161,6 +181,45 @@ pub struct DbWorker {
 }
 
 impl DbWorker {
+    pub async fn create_note(
+        &self,
+        resource_id: ResourceId,
+        content: NoteContent,
+    ) -> Result<Note, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::CreateNote {
+                resource_id,
+                content,
+                reply,
+            })
+            .map_err(|e| e.to_string())?;
+        rx.await.map_err(|e| e.to_string())?
+    }
+
+    pub async fn update_note(&self, id: NoteId, content: NoteContent) -> Result<Note, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::UpdateNote { id, content, reply })
+            .map_err(|e| e.to_string())?;
+        rx.await.map_err(|e| e.to_string())?
+    }
+
+    pub async fn delete_note(&self, id: NoteId) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::DeleteNote { id, reply })
+            .map_err(|e| e.to_string())?;
+        rx.await.map_err(|e| e.to_string())?
+    }
+
+    pub async fn list_notes(&self, resource_id: ResourceId) -> Result<Vec<Note>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(DbRequest::ListNotes { resource_id, reply })
+            .map_err(|e| e.to_string())?;
+        rx.await.map_err(|e| e.to_string())?
+    }
     /// Read a bibliography and build a shared preview (no writes).
     pub async fn preview_biblatex(&self, path: PathBuf) -> Result<BiblatexImportPlan, String> {
         let (tx, rx) = oneshot::channel();
@@ -327,6 +386,57 @@ impl DbWorker {
                                     .and_then(|outcome| match outcome {
                                         Outcome::CountResources(counts) => Ok(counts),
                                         _ => Err("unexpected outcome from count_resources".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::CreateNote {
+                                resource_id,
+                                content,
+                                reply,
+                            } => {
+                                let result = state
+                                    .execute(Command::CreateNote(CreateNote {
+                                        resource_id,
+                                        content,
+                                    }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::CreateNote(value) => Ok(value),
+                                        _ => Err("unexpected note outcome".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::UpdateNote { id, content, reply } => {
+                                let result = state
+                                    .execute(Command::UpdateNote(UpdateNote { id, content }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::UpdateNote(value) => Ok(value),
+                                        _ => Err("unexpected note outcome".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::DeleteNote { id, reply } => {
+                                let result = state
+                                    .execute(Command::DeleteNote(DeleteNote { id }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::DeleteNote(value) => Ok(value),
+                                        _ => Err("unexpected note outcome".into()),
+                                    });
+                                let _ = reply.send(result);
+                            }
+                            DbRequest::ListNotes { resource_id, reply } => {
+                                let result = state
+                                    .execute(Command::ListNotes(ListNotes { resource_id }))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|outcome| match outcome {
+                                        Outcome::ListNotes(value) => Ok(value),
+                                        _ => Err("unexpected note outcome".into()),
                                     });
                                 let _ = reply.send(result);
                             }

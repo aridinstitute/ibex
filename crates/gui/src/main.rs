@@ -12,6 +12,7 @@ mod jev;
 mod kind;
 mod library;
 mod metadata;
+mod notes;
 mod settings;
 mod tags;
 mod theme;

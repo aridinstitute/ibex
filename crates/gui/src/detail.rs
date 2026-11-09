@@ -264,6 +264,7 @@ pub fn render_panel(
     view: DetailView<'_>,
     actions: Option<AnyElement>,
     extra_rows: Vec<(SharedString, AnyElement)>,
+    notes: Option<AnyElement>,
     cx: &App,
 ) -> Div {
     let muted = cx.theme().muted_foreground;
@@ -363,11 +364,13 @@ pub fn render_panel(
         .child(
             div()
                 .id("detail-panel")
+                .test_support()
                 .flex_1()
                 .min_h_0()
                 .p_3()
                 .overflow_y_scroll()
-                .child(content),
+                .child(content)
+                .when_some(notes, |panel, notes| panel.child(div().mt_4().child(notes))),
         )
 }
 
@@ -500,6 +503,7 @@ mod tests {
                     super::DetailView::Fields(&self.0),
                     None,
                     Vec::new(),
+                    None,
                     cx,
                 ))
         }
