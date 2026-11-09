@@ -6,8 +6,9 @@
 //! seeding is not idempotent.
 
 use ibex_core::{
-    BibliographicDate, CreatorRole, CreatorSpec, Name, NewResource, NonEmptyStr, PersonId,
-    ResourceKind, Store, StoreError, UtcMillis,
+    BibliographicDate, CitationLocation, CreatorRole, CreatorSpec, LocationKind, Name, NewResource,
+    NonEmptyStr, NoteContent, NoteKind, PersonId, ResourceId, ResourceKind, Store, StoreError,
+    UtcMillis,
 };
 
 /// Demo library size: large enough that scrolling, filtering, and sorting
@@ -27,7 +28,8 @@ const DEMO_PEOPLE: [(&str, &str); 8] = [
 ];
 
 /// Populate a fresh store with a demo library: a few people, the containers
-/// parented kinds need, nested collections, tags, and `count` resources.
+/// parented kinds need, nested collections, tags, `count` resources, and
+/// notes on the newest resources.
 pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), StoreError> {
     let people: Vec<PersonId> = {
         let mut ids = Vec::with_capacity(DEMO_PEOPLE.len());
@@ -498,7 +500,45 @@ pub async fn seed_demo_library(store: &impl Store, count: usize) -> Result<(), S
             }
             new.collection_ids = vec![collections[n % collections.len()]];
         }
-        store.create_resource(new).await?;
+        let created = store.create_resource(new).await?;
+        // Newest-first is the grid default, so notes belong on the tail of
+        // the loop. Older rows stay empty.
+        if n + 8 >= count {
+            seed_notes(store, created.id, n).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Two notes per resource: a summary and a quotation, oldest first.
+async fn seed_notes(
+    store: &impl Store,
+    resource_id: ResourceId,
+    n: usize,
+) -> Result<(), StoreError> {
+    let notes = [
+        NoteContent {
+            kind: NoteKind::Summary,
+            body_markdown: format!(
+                "A working summary of item {n}.\n\nThe catalogue entry is stable, but **local headings** still drift.\n\n- Compare the shelfmark\n- Keep the original date"
+            ),
+            locations: vec![CitationLocation {
+                kind: LocationKind::Chapter,
+                value: "2".into(),
+            }],
+        },
+        NoteContent {
+            kind: NoteKind::Quote,
+            body_markdown:
+                "> A finding worth keeping: the heading holds even when the shelfmark moves.".into(),
+            locations: vec![CitationLocation {
+                kind: LocationKind::Page,
+                value: format!("{}–{}", 12 + n % 7, 18 + n % 5),
+            }],
+        },
+    ];
+    for content in notes {
+        store.create_note(resource_id, content).await?;
     }
     Ok(())
 }
@@ -723,5 +763,33 @@ mod tests {
                 .filter_map(|row| row.published_label.as_ref())
                 .all(|label| label.as_str().parse::<u16>().is_ok())
         );
+    }
+
+    #[tokio::test]
+    async fn newest_resources_carry_demo_notes() {
+        let store = MemoryStore::new();
+        seed_demo_library(&store, 12).await.unwrap();
+        let rows = store.list_resources().await.unwrap();
+        let newest = rows
+            .iter()
+            .find(|row| row.title.as_str() == "Preprint Findings 011")
+            .unwrap();
+        let notes = store.list_notes(newest.id).await.unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[0].content.kind, NoteKind::Summary);
+        assert!(
+            notes[0]
+                .content
+                .body_markdown
+                .contains("**local headings**")
+        );
+        assert_eq!(notes[1].content.kind, NoteKind::Quote);
+        assert_eq!(notes[1].content.locations.len(), 1);
+
+        let older = rows
+            .iter()
+            .find(|row| row.title.as_str() == "Citation Networks 000")
+            .unwrap();
+        assert!(store.list_notes(older.id).await.unwrap().is_empty());
     }
 }

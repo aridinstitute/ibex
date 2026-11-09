@@ -5971,45 +5971,24 @@ impl LibraryApp {
 
     /// The right-side sidebar: the edit form while one is open, the detail
     /// fields otherwise. The form keeps the sidebar's anchor, width, and
-    /// surface. The detail shows the edit pencil below the byline; no
-    /// row selected means nothing to edit, and an open form means the
-    /// sidebar already is the editor.
-    fn render_side_panel(&self, cx: &mut Context<Self>) -> Div {
-        if self.selected.is_some()
-            && self.table.read(cx).delegate().selected_ids.len() <= 1
-            && self.edit.is_none()
-            && self.notes.read(cx).is_editing()
-        {
-            return v_flex()
-                .h_full()
-                .w_full()
-                .bg(cx.theme().background)
-                .text_size(FIELD_TEXT_SIZE)
-                .child(
-                    div()
-                        .id("note-editor-panel")
-                        .test_support()
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .p_3()
-                        .child(self.notes.clone()),
-                );
-        }
+    /// surface. Notes stay in their own card stacked under this one. The detail
+    /// shows the edit pencil below the byline; no row selected means nothing
+    /// to edit, and an open form means the sidebar already is the editor.
+    fn render_side_panel(&self, max_height: Option<Pixels>, cx: &mut Context<Self>) -> Div {
         let selected_count = self.table.read(cx).delegate().selected_ids.len();
         if selected_count > 1 {
             return render_panel(
                 DetailView::Multiple(selected_count),
                 None,
                 Vec::new(),
-                None,
+                max_height,
                 cx,
             );
         }
         match &self.edit {
-            Some(EditFetch::Ready(form)) => self.render_edit_panel(form, cx),
+            Some(EditFetch::Ready(form)) => self.render_edit_panel(form, max_height, cx),
             Some(EditFetch::Loading(_)) => {
-                render_panel(DetailView::Loading, None, Vec::new(), None, cx)
+                render_panel(DetailView::Loading, None, Vec::new(), max_height, cx)
             }
             None => {
                 let favorited = match self.detail_view() {
@@ -6213,13 +6192,7 @@ impl LibraryApp {
                         extra_rows.push(("Suggested".into(), row));
                     }
                 }
-                render_panel(
-                    self.detail_view(),
-                    actions,
-                    extra_rows,
-                    self.selected.map(|_| self.notes.clone().into_any_element()),
-                    cx,
-                )
+                render_panel(self.detail_view(), actions, extra_rows, max_height, cx)
             }
         }
     }
@@ -6405,22 +6378,29 @@ impl LibraryApp {
     /// short window still reaches every row. Parent is a searchable
     /// dropdown of library titles, not an id to type: users pick the
     /// containing work by name.
-    fn render_edit_panel(&self, form: &EditForm, cx: &mut Context<Self>) -> Div {
+    fn render_edit_panel(
+        &self,
+        form: &EditForm,
+        max_height: Option<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let saving = form.saving || form.author_creating;
         let error = form.error.clone();
         let danger = cx.theme().danger;
 
         v_flex()
-            .h_full()
             .flex_shrink_0()
             .w_full()
             .bg(cx.theme().background)
             .text_size(FIELD_TEXT_SIZE)
+            .when_some(max_height, |column, max| column.max_h(max))
+            .when(max_height.is_none(), |column| column.h_full())
             .child(
                 v_flex()
                     .id("edit-panel")
-                    .size_full()
                     .p_3()
+                    .when_some(max_height, |body, max| body.max_h(max))
+                    .when(max_height.is_none(), |body| body.size_full())
                     .gap_2()
                     .overflow_y_scroll()
                     .child(
@@ -6601,6 +6581,9 @@ fn padded_input(state: &Entity<InputState>) -> Input {
 
 /// Keep a usable center region, shrinking both sidebars on small windows
 /// without overwriting the user's preferred widths.
+/// Toolbar plus the row padding above the stacked right rail.
+const RAIL_CHROME: f32 = 88.;
+
 fn sidebar_target_widths(
     viewport: Pixels,
     left: Option<Option<f64>>,
@@ -6821,10 +6804,25 @@ impl Render for LibraryApp {
             },
             ThemeColorTarget::Secondary,
         );
+        let notes_open = self.selected.is_some() && delegate.selected_ids.len() <= 1;
+        let note_editing = notes_open && self.notes.read(cx).is_editing();
+        // The metadata card ends at its fields. The notes card takes the
+        // rest of the rail, with a floor so a long field list cannot
+        // shrink it away. While editing, the floor grows so Save stays up.
+        let rail_height = (f32::from(window.viewport_size().height) - RAIL_CHROME).max(280.);
+        let notes_floor = if note_editing {
+            (rail_height * 0.55).clamp(240., 460.)
+        } else {
+            (rail_height * 0.34).clamp(160., 360.)
+        };
+        let detail_limit = notes_open.then(|| px((rail_height - notes_floor - 8.).max(140.)));
+        // Notes stack in the right column, so a closed detail panel still
+        // keeps that column open while one resource is selected.
+        let right_open = self.detail_open || notes_open;
         let (left_target, right_target) = sidebar_target_widths(
             window.viewport_size().width,
             self.left_panel_open.then_some(settings.left_sidebar_width),
-            self.detail_open.then_some(settings.right_sidebar_width),
+            right_open.then_some(settings.right_sidebar_width),
         );
         let motion = cx.theme().motion_tokens();
         // Dragging follows the pointer without easing; toggles still animate.
@@ -7319,8 +7317,8 @@ impl Render for LibraryApp {
                             }
                         },
                     )
-                    // Clip the panel during the width animation; keep it mounted
-                    // animates; keep it mounted until the close finishes.
+                    // Metadata ends at its fields. Notes fill the height left
+                    // in the rail, and grow or shrink with the window.
                     .when(sidebar_width > px(0.5), |el| {
                         el.child(
                             div()
@@ -7328,17 +7326,62 @@ impl Render for LibraryApp {
                                 .relative()
                                 .h_full()
                                 .w(sidebar_width)
-                                .overflow_hidden()
-                                .rounded(ISLAND_RADIUS)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().background)
                                 .flex_shrink_0()
-                                .child(self.render_side_panel(cx))
-                                .child(island_corner_mask(stops, glow))
-                                .when(self.detail_open, |el| {
-                                    el.child(self.sidebar_resize_handle(false, sidebar_width, cx))
-                                }),
+                                .child(
+                                    v_flex()
+                                        .h_full()
+                                        .w_full()
+                                        .gap_2()
+                                        .when(self.detail_open, |column| {
+                                            column.child(
+                                                div()
+                                                    .relative()
+                                                    .w_full()
+                                                    .overflow_hidden()
+                                                    .rounded(ISLAND_RADIUS)
+                                                    .border_1()
+                                                    .border_color(cx.theme().border)
+                                                    .bg(cx.theme().background)
+                                                    .when(detail_limit.is_none(), |island| {
+                                                        island.flex_1().min_h_0()
+                                                    })
+                                                    .when(detail_limit.is_some(), |island| {
+                                                        island.flex_shrink_0()
+                                                    })
+                                                    .child(self.render_side_panel(detail_limit, cx))
+                                                    .child(island_corner_mask(stops, glow)),
+                                            )
+                                        })
+                                        .when(notes_open, |column| {
+                                            column.child(
+                                                div()
+                                                    .id("notes-island")
+                                                    .test_support()
+                                                    .relative()
+                                                    .w_full()
+                                                    .flex_1()
+                                                    .min_h_0()
+                                                    .overflow_hidden()
+                                                    .rounded(ISLAND_RADIUS)
+                                                    .border_1()
+                                                    .border_color(cx.theme().border)
+                                                    .bg(cx.theme().background)
+                                                    .child(
+                                                        div()
+                                                            .id("notes-island-scroll")
+                                                            .test_support()
+                                                            .flex_1()
+                                                            .min_h_0()
+                                                            .h_full()
+                                                            .overflow_y_scroll()
+                                                            .p_3()
+                                                            .child(self.notes.clone()),
+                                                    )
+                                                    .child(island_corner_mask(stops, glow)),
+                                            )
+                                        }),
+                                )
+                                .child(self.sidebar_resize_handle(false, sidebar_width, cx)),
                         )
                     }),
             )
@@ -11651,13 +11694,31 @@ mod notes_shortcut_tests {
         }
         cx.run_until_parked();
     }
+
+    /// Row whose demo index is outside the seeded-notes tail.
+    ///
+    /// The grid default is newest-first, and a fast seed can share one
+    /// timestamp, so `rows[0]` is not a stable empty resource.
+    fn row_titled(app: &gpui_kit::Entity<LibraryApp>, cx: &TestAppContext, title: &str) -> usize {
+        app.read_with(cx, |app, cx| {
+            app.table
+                .read(cx)
+                .delegate()
+                .rows
+                .iter()
+                .position(|row| row.title.as_str() == title)
+                .unwrap_or_else(|| panic!("missing row {title}"))
+        })
+    }
+
     #[gpui_kit::test]
     fn note_shortcut_saves_markdown_and_cancel_does_not_create(cx: &mut TestAppContext) {
         let (handle, app, worker, _dir) = fixture(cx);
-        let target = app.read_with(cx, |app, cx| app.table.read(cx).delegate().rows[0].id);
+        let row = row_titled(&app, cx, "Margin Notes 007");
+        let target = app.read_with(cx, |app, cx| app.table.read(cx).delegate().rows[row].id);
         cx.update_window(handle, |_, window, cx| {
             app.update(cx, |app, cx| {
-                app.select_row(0, window, cx);
+                app.select_row(row, window, cx);
                 app.focus_table(window, cx);
             });
             window.render_frame(cx);
@@ -11693,10 +11754,11 @@ mod notes_shortcut_tests {
     #[gpui_kit::test]
     fn notes_edit_types_locations_and_confirm_delete(cx: &mut TestAppContext) {
         let (handle, app, worker, _dir) = fixture(cx);
-        let target = app.read_with(cx, |app, cx| app.table.read(cx).delegate().rows[0].id);
+        let row = row_titled(&app, cx, "Margin Notes 007");
+        let target = app.read_with(cx, |app, cx| app.table.read(cx).delegate().rows[row].id);
         cx.update_window(handle, |_, window, cx| {
             app.update(cx, |app, cx| {
-                app.select_row(0, window, cx);
+                app.select_row(row, window, cx);
                 app.focus_table(window, cx);
             });
             window.render_frame(cx);
@@ -11764,7 +11826,7 @@ mod notes_shortcut_tests {
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             window.scroll(
-                "detail-panel",
+                "notes-island-scroll",
                 gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
                     gpui_kit::px(0.),
                     gpui_kit::px(-4000.),
@@ -11774,7 +11836,8 @@ mod notes_shortcut_tests {
             window.render_frame(cx);
             window.click(format!("edit-note-{id}"), cx);
             window.render_frame(cx);
-            window.press("cmd-a", cx);
+            // `secondary-a` is select-all on both macOS (⌘A) and Linux (Ctrl+A).
+            window.press("secondary-a", cx);
             window.input("Edited **Markdown**", cx);
             window.click("remove-location-0", cx);
             window.render_frame(cx);
@@ -11789,7 +11852,7 @@ mod notes_shortcut_tests {
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             window.scroll(
-                "detail-panel",
+                "notes-island-scroll",
                 gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
                     gpui_kit::px(0.),
                     gpui_kit::px(-4000.),
@@ -11838,13 +11901,15 @@ mod notes_shortcut_tests {
     #[gpui_kit::test]
     fn note_validation_preserves_draft_and_save_keeps_original_resource(cx: &mut TestAppContext) {
         let (handle, app, worker, _dir) = fixture(cx);
+        let target_row = row_titled(&app, cx, "Margin Notes 007");
+        let other_row = row_titled(&app, cx, "Field Report 005");
         let (target, other) = app.read_with(cx, |app, cx| {
             let rows = &app.table.read(cx).delegate().rows;
-            (rows[0].id, rows[1].id)
+            (rows[target_row].id, rows[other_row].id)
         });
         cx.update_window(handle, |_, window, cx| {
             app.update(cx, |app, cx| {
-                app.select_row(0, window, cx);
+                app.select_row(target_row, window, cx);
                 app.focus_table(window, cx);
             })
         })
@@ -11866,7 +11931,7 @@ mod notes_shortcut_tests {
             window.input(" intact", cx);
             window.click("note-save", cx);
             app.update(cx, |app, cx| {
-                app.select_row(1, window, cx);
+                app.select_row(other_row, window, cx);
                 app.focus_table(window, cx);
             });
         })
@@ -11881,7 +11946,7 @@ mod notes_shortcut_tests {
             window.render_frame(cx);
             assert!(window.try_find("note-editor").is_none());
             assert!(window.try_find(format!("note-{}", notes[0].id)).is_none());
-            app.update(cx, |app, cx| app.select_row(0, window, cx));
+            app.update(cx, |app, cx| app.select_row(target_row, window, cx));
         })
         .unwrap();
         settle(cx, &worker);

@@ -14,6 +14,23 @@ use ibex_core::{CitationLocation, LocationKind, Note, NoteContent, NoteId, NoteK
 
 gpui_kit::actions!([AddNote]);
 
+/// Text color for a note type. Light variants stay deep enough to read on
+/// the white card; dark variants lift the same hue. The four hues sit well
+/// apart so Summary, Quote, Paraphrase, and Note stay distinct.
+fn note_kind_color(kind: NoteKind, dark: bool) -> Hsla {
+    let hex = match (kind, dark) {
+        (NoteKind::Note, false) => 0x0369a1,
+        (NoteKind::Note, true) => 0x38bdf8,
+        (NoteKind::Summary, false) => 0x15803d,
+        (NoteKind::Summary, true) => 0x4ade80,
+        (NoteKind::Paraphrase, false) => 0xc2410c,
+        (NoteKind::Paraphrase, true) => 0xfb923c,
+        (NoteKind::Quote, false) => 0x7e22ce,
+        (NoteKind::Quote, true) => 0xc084fc,
+    };
+    rgb(hex).into()
+}
+
 struct NoteView {
     note: Note,
     markdown: Entity<TextViewState>,
@@ -64,7 +81,6 @@ impl NotesPanel {
     pub fn is_editing(&self) -> bool {
         self.editor.is_some()
     }
-
     pub fn select(&mut self, resource: ResourceId, window: &mut Window, cx: &mut Context<Self>) {
         if self.resource == Some(resource) {
             return;
@@ -443,7 +459,8 @@ impl Render for NotesPanel {
                             Button::new("note-new")
                                 .ghost()
                                 .small()
-                                .label("Add note")
+                                .icon(IconName::Plus)
+                                .accessibility_label("Add note")
                                 .tooltip("Add note (⌘⇧N)")
                                 .disabled(self.pending || self.resource.is_none())
                                 .on_click(
@@ -476,9 +493,14 @@ impl Render for NotesPanel {
                             h_flex()
                                 .gap_1()
                                 .child(div().flex_1())
-                                .child(div().text_color(cx.theme().muted_foreground).child(
-                                    format!("Note type: {}", entry.note.content.kind.label()),
-                                ))
+                                .child(
+                                    div()
+                                        .text_color(note_kind_color(
+                                            entry.note.content.kind,
+                                            cx.theme().is_dark(),
+                                        ))
+                                        .child(entry.note.content.kind.label()),
+                                )
                                 .child(
                                     Button::new(SharedString::from(format!("edit-note-{id}")))
                                         .ghost()
@@ -591,12 +613,34 @@ impl Render for NotesPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::NotesPanel;
+    use super::{NotesPanel, note_kind_color};
     use crate::db::DbWorker;
     use gpui_kit::component::ThemeMode;
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AppContext as _, TestAppContext};
-    use ibex_core::{NoteContent, Store as _};
+    use ibex_core::{NoteContent, NoteKind, Store as _};
+
+    #[test]
+    fn note_kinds_use_distinct_colors() {
+        let light: Vec<_> = NoteKind::ALL
+            .into_iter()
+            .map(|kind| note_kind_color(kind, false))
+            .collect();
+        for (i, color) in light.iter().enumerate() {
+            for other in &light[i + 1..] {
+                assert_ne!(color, other);
+            }
+        }
+        for kind in NoteKind::ALL {
+            let light = note_kind_color(kind, false);
+            let dark = note_kind_color(kind, true);
+            assert!(dark.l > light.l, "{kind:?} must lighten in dark mode");
+            assert!(
+                (dark.h - light.h).abs() < 0.04,
+                "{kind:?} must keep its hue across modes"
+            );
+        }
+    }
 
     #[gpui_kit::test]
     fn saved_notes_render_markdown_in_both_themes(cx: &mut TestAppContext) {
@@ -604,8 +648,16 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let store = ibex_app::testing::MemoryStore::new();
         let resource = rt.block_on(async {
-            ibex_app::seed::seed_demo_library(&store, 1).await.unwrap();
-            store.list_resources().await.unwrap()[0].id
+            // Index 0 stays empty: demo notes attach only to the newest tail.
+            ibex_app::seed::seed_demo_library(&store, 12).await.unwrap();
+            store
+                .list_resources()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|row| row.title.as_str() == "Citation Networks 000")
+                .unwrap()
+                .id
         });
         let worker = DbWorker::spawn(
             ibex_app::AppState::builder(store)
