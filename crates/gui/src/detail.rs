@@ -257,6 +257,7 @@ fn field_value_element(label: &str, lines: &[String], cx: &App) -> AnyElement {
 /// grid gives way when the window is too narrow to hold both — and scrollable
 /// when the field list outgrows the window.
 /// The loaded resource's identity, actions and metadata share one scroll area.
+/// Notes are a sibling island, not a footer of this scroll.
 /// `extra_rows` are caller-built trailing fields (tags, collections,
 /// suggestions) appended after the metadata, in order. Ignored unless the
 /// panel is showing a loaded resource.
@@ -264,7 +265,6 @@ pub fn render_panel(
     view: DetailView<'_>,
     actions: Option<AnyElement>,
     extra_rows: Vec<(SharedString, AnyElement)>,
-    notes: Option<AnyElement>,
     cx: &App,
 ) -> Div {
     let muted = cx.theme().muted_foreground;
@@ -369,8 +369,7 @@ pub fn render_panel(
                 .min_h_0()
                 .p_3()
                 .overflow_y_scroll()
-                .child(content)
-                .when_some(notes, |panel, notes| panel.child(div().mt_4().child(notes))),
+                .child(content),
         )
 }
 
@@ -503,7 +502,6 @@ mod tests {
                     super::DetailView::Fields(&self.0),
                     None,
                     Vec::new(),
-                    None,
                     cx,
                 ))
         }

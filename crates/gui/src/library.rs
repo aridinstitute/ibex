@@ -5971,46 +5971,17 @@ impl LibraryApp {
 
     /// The right-side sidebar: the edit form while one is open, the detail
     /// fields otherwise. The form keeps the sidebar's anchor, width, and
-    /// surface. The detail shows the edit pencil below the byline; no
-    /// row selected means nothing to edit, and an open form means the
-    /// sidebar already is the editor.
+    /// surface. Notes stay in their own island beside this one. The detail
+    /// shows the edit pencil below the byline; no row selected means nothing
+    /// to edit, and an open form means the sidebar already is the editor.
     fn render_side_panel(&self, cx: &mut Context<Self>) -> Div {
-        if self.selected.is_some()
-            && self.table.read(cx).delegate().selected_ids.len() <= 1
-            && self.edit.is_none()
-            && self.notes.read(cx).is_editing()
-        {
-            return v_flex()
-                .h_full()
-                .w_full()
-                .bg(cx.theme().background)
-                .text_size(FIELD_TEXT_SIZE)
-                .child(
-                    div()
-                        .id("note-editor-panel")
-                        .test_support()
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .p_3()
-                        .child(self.notes.clone()),
-                );
-        }
         let selected_count = self.table.read(cx).delegate().selected_ids.len();
         if selected_count > 1 {
-            return render_panel(
-                DetailView::Multiple(selected_count),
-                None,
-                Vec::new(),
-                None,
-                cx,
-            );
+            return render_panel(DetailView::Multiple(selected_count), None, Vec::new(), cx);
         }
         match &self.edit {
             Some(EditFetch::Ready(form)) => self.render_edit_panel(form, cx),
-            Some(EditFetch::Loading(_)) => {
-                render_panel(DetailView::Loading, None, Vec::new(), None, cx)
-            }
+            Some(EditFetch::Loading(_)) => render_panel(DetailView::Loading, None, Vec::new(), cx),
             None => {
                 let favorited = match self.detail_view() {
                     DetailView::Fields(detail) => Some(detail.favorite),
@@ -6213,13 +6184,7 @@ impl LibraryApp {
                         extra_rows.push(("Suggested".into(), row));
                     }
                 }
-                render_panel(
-                    self.detail_view(),
-                    actions,
-                    extra_rows,
-                    self.selected.map(|_| self.notes.clone().into_any_element()),
-                    cx,
-                )
+                render_panel(self.detail_view(), actions, extra_rows, cx)
             }
         }
     }
@@ -6601,11 +6566,14 @@ fn padded_input(state: &Entity<InputState>) -> Input {
 
 /// Keep a usable center region, shrinking both sidebars on small windows
 /// without overwriting the user's preferred widths.
+const NOTES_ISLAND_WIDTH: f32 = 300.;
+
 fn sidebar_target_widths(
     viewport: Pixels,
     left: Option<Option<f64>>,
     right: Option<Option<f64>>,
-) -> (Pixels, Pixels) {
+    notes: bool,
+) -> (Pixels, Pixels, Pixels) {
     fn width(value: Option<Option<f64>>, default: f32, min: f32, max: f32) -> f32 {
         match value {
             None => 0.,
@@ -6618,14 +6586,18 @@ fn sidebar_target_widths(
     }
     let left = width(left, 180., 140., 420.);
     let right = width(right, f32::from(PANEL_WIDTH), 240., 640.);
-    // Outer padding and two gutters occupy 32px; reserve 240px for the grid.
-    let available = (f32::from(viewport) - 272.).max(0.);
-    let scale = if left + right > available {
-        available / (left + right)
+    let notes = if notes { NOTES_ISLAND_WIDTH } else { 0. };
+    // Padding is 16px. Each open side pane adds an 8px gutter. Reserve 240px
+    // for the grid, then scale the panes together if they would consume it.
+    let chrome = if notes > 0. { 40. } else { 32. };
+    let available = (f32::from(viewport) - chrome - 240.).max(0.);
+    let total = left + right + notes;
+    let scale = if total > available && total > 0. {
+        available / total
     } else {
         1.
     };
-    (px(left * scale), px(right * scale))
+    (px(left * scale), px(right * scale), px(notes * scale))
 }
 
 // Sidebar navigation is neutral; the table keeps its blue active-row tint.
@@ -6821,10 +6793,12 @@ impl Render for LibraryApp {
             },
             ThemeColorTarget::Secondary,
         );
-        let (left_target, right_target) = sidebar_target_widths(
+        let notes_open = self.selected.is_some() && delegate.selected_ids.len() <= 1;
+        let (left_target, right_target, notes_target) = sidebar_target_widths(
             window.viewport_size().width,
             self.left_panel_open.then_some(settings.left_sidebar_width),
             self.detail_open.then_some(settings.right_sidebar_width),
+            notes_open,
         );
         let motion = cx.theme().motion_tokens();
         // Dragging follows the pointer without easing; toggles still animate.
@@ -7339,6 +7313,37 @@ impl Render for LibraryApp {
                                 .when(self.detail_open, |el| {
                                     el.child(self.sidebar_resize_handle(false, sidebar_width, cx))
                                 }),
+                        )
+                    })
+                    // Notes are their own island, to the right of the metadata,
+                    // so a long field list cannot push them below the fold.
+                    .when(notes_open && notes_target > px(0.5), |el| {
+                        el.child(
+                            div()
+                                .id("notes-island")
+                                .test_support()
+                                .relative()
+                                .h_full()
+                                .w(notes_target)
+                                .overflow_hidden()
+                                .rounded(ISLAND_RADIUS)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().background)
+                                .flex_shrink_0()
+                                .child(
+                                    v_flex().h_full().w_full().child(
+                                        div()
+                                            .id("notes-island-scroll")
+                                            .test_support()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .overflow_y_scroll()
+                                            .p_3()
+                                            .child(self.notes.clone()),
+                                    ),
+                                )
+                                .child(island_corner_mask(stops, glow)),
                         )
                     }),
             )
@@ -8554,40 +8559,53 @@ mod panel_width_tests {
     #[test]
     fn default_widths_and_closed_panels() {
         assert_eq!(
-            sidebar_target_widths(px(1000.), Some(None), Some(None)),
-            (px(180.), px(320.))
+            sidebar_target_widths(px(1000.), Some(None), Some(None), false),
+            (px(180.), px(320.), px(0.))
         );
         assert_eq!(
-            sidebar_target_widths(px(1000.), None, None),
-            (px(0.), px(0.))
+            sidebar_target_widths(px(1000.), None, None, false),
+            (px(0.), px(0.), px(0.))
         );
     }
 
     #[test]
     fn restored_widths_are_bounded_and_invalid_values_use_defaults() {
         assert_eq!(
-            sidebar_target_widths(px(2000.), Some(Some(230.)), Some(Some(410.))),
-            (px(230.), px(410.))
+            sidebar_target_widths(px(2000.), Some(Some(230.)), Some(Some(410.)), false),
+            (px(230.), px(410.), px(0.))
         );
         assert_eq!(
-            sidebar_target_widths(px(2000.), Some(Some(-10.)), Some(Some(900.))),
-            (px(140.), px(640.))
+            sidebar_target_widths(px(2000.), Some(Some(-10.)), Some(Some(900.)), false),
+            (px(140.), px(640.), px(0.))
         );
         assert_eq!(
-            sidebar_target_widths(px(2000.), Some(Some(f64::NAN)), Some(Some(f64::INFINITY))),
-            (px(180.), px(320.))
+            sidebar_target_widths(
+                px(2000.),
+                Some(Some(f64::NAN)),
+                Some(Some(f64::INFINITY)),
+                false
+            ),
+            (px(180.), px(320.), px(0.))
         );
     }
 
     #[test]
     fn narrow_windows_keep_the_grid_usable() {
         assert_eq!(
-            sidebar_target_widths(px(522.), Some(None), Some(None)),
-            (px(90.), px(160.))
+            sidebar_target_widths(px(522.), Some(None), Some(None), false),
+            (px(90.), px(160.), px(0.))
         );
         assert_eq!(
-            sidebar_target_widths(px(240.), Some(None), Some(None)),
-            (px(0.), px(0.))
+            sidebar_target_widths(px(240.), Some(None), Some(None), false),
+            (px(0.), px(0.), px(0.))
+        );
+        assert_eq!(
+            sidebar_target_widths(px(1600.), Some(None), Some(None), true),
+            (px(180.), px(320.), px(300.))
+        );
+        assert_eq!(
+            sidebar_target_widths(px(1600.), Some(None), None, true),
+            (px(180.), px(0.), px(300.))
         );
     }
 }
@@ -11764,7 +11782,7 @@ mod notes_shortcut_tests {
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             window.scroll(
-                "detail-panel",
+                "notes-island-scroll",
                 gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
                     gpui_kit::px(0.),
                     gpui_kit::px(-4000.),
@@ -11774,7 +11792,8 @@ mod notes_shortcut_tests {
             window.render_frame(cx);
             window.click(format!("edit-note-{id}"), cx);
             window.render_frame(cx);
-            window.press("cmd-a", cx);
+            // `secondary-a` is select-all on both macOS (⌘A) and Linux (Ctrl+A).
+            window.press("secondary-a", cx);
             window.input("Edited **Markdown**", cx);
             window.click("remove-location-0", cx);
             window.render_frame(cx);
@@ -11789,7 +11808,7 @@ mod notes_shortcut_tests {
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
             window.scroll(
-                "detail-panel",
+                "notes-island-scroll",
                 gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
                     gpui_kit::px(0.),
                     gpui_kit::px(-4000.),
