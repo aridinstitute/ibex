@@ -257,7 +257,7 @@ fn field_value_element(label: &str, lines: &[String], cx: &App) -> AnyElement {
 /// grid gives way when the window is too narrow to hold both — and scrollable
 /// when the field list outgrows the window.
 /// The loaded resource's identity, actions and metadata share one scroll area.
-/// Notes are a sibling island, not a footer of this scroll.
+/// Notes are a card stacked under this one, not a footer of this scroll.
 /// `extra_rows` are caller-built trailing fields (tags, collections,
 /// suggestions) appended after the metadata, in order. Ignored unless the
 /// panel is showing a loaded resource.

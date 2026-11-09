@@ -5971,7 +5971,7 @@ impl LibraryApp {
 
     /// The right-side sidebar: the edit form while one is open, the detail
     /// fields otherwise. The form keeps the sidebar's anchor, width, and
-    /// surface. Notes stay in their own island beside this one. The detail
+    /// surface. Notes stay in their own card stacked under this one. The detail
     /// shows the edit pencil below the byline; no row selected means nothing
     /// to edit, and an open form means the sidebar already is the editor.
     fn render_side_panel(&self, cx: &mut Context<Self>) -> Div {
@@ -6566,14 +6566,15 @@ fn padded_input(state: &Entity<InputState>) -> Input {
 
 /// Keep a usable center region, shrinking both sidebars on small windows
 /// without overwriting the user's preferred widths.
-const NOTES_ISLAND_WIDTH: f32 = 300.;
+/// Cap for the notes card stacked under the metadata. Short notes hug their
+/// content; a long note or the editor scrolls inside the card.
+const NOTES_STACK_MAX_HEIGHT: f32 = 280.;
 
 fn sidebar_target_widths(
     viewport: Pixels,
     left: Option<Option<f64>>,
     right: Option<Option<f64>>,
-    notes: bool,
-) -> (Pixels, Pixels, Pixels) {
+) -> (Pixels, Pixels) {
     fn width(value: Option<Option<f64>>, default: f32, min: f32, max: f32) -> f32 {
         match value {
             None => 0.,
@@ -6586,18 +6587,14 @@ fn sidebar_target_widths(
     }
     let left = width(left, 180., 140., 420.);
     let right = width(right, f32::from(PANEL_WIDTH), 240., 640.);
-    let notes = if notes { NOTES_ISLAND_WIDTH } else { 0. };
-    // Padding is 16px. Each open side pane adds an 8px gutter. Reserve 240px
-    // for the grid, then scale the panes together if they would consume it.
-    let chrome = if notes > 0. { 40. } else { 32. };
-    let available = (f32::from(viewport) - chrome - 240.).max(0.);
-    let total = left + right + notes;
-    let scale = if total > available && total > 0. {
-        available / total
+    // Outer padding and two gutters occupy 32px; reserve 240px for the grid.
+    let available = (f32::from(viewport) - 272.).max(0.);
+    let scale = if left + right > available {
+        available / (left + right)
     } else {
         1.
     };
-    (px(left * scale), px(right * scale), px(notes * scale))
+    (px(left * scale), px(right * scale))
 }
 
 // Sidebar navigation is neutral; the table keeps its blue active-row tint.
@@ -6794,11 +6791,14 @@ impl Render for LibraryApp {
             ThemeColorTarget::Secondary,
         );
         let notes_open = self.selected.is_some() && delegate.selected_ids.len() <= 1;
-        let (left_target, right_target, notes_target) = sidebar_target_widths(
+        let note_editing = notes_open && self.notes.read(cx).is_editing();
+        // Notes stack in the right column, so a closed detail panel still
+        // keeps that column open while one resource is selected.
+        let right_open = self.detail_open || notes_open;
+        let (left_target, right_target) = sidebar_target_widths(
             window.viewport_size().width,
             self.left_panel_open.then_some(settings.left_sidebar_width),
-            self.detail_open.then_some(settings.right_sidebar_width),
-            notes_open,
+            right_open.then_some(settings.right_sidebar_width),
         );
         let motion = cx.theme().motion_tokens();
         // Dragging follows the pointer without easing; toggles still animate.
@@ -7293,8 +7293,10 @@ impl Render for LibraryApp {
                             }
                         },
                     )
-                    // Clip the panel during the width animation; keep it mounted
-                    // animates; keep it mounted until the close finishes.
+                    // The right rail is a stack of islands. Metadata keeps the
+                    // upper card; notes are their own card underneath, so a
+                    // long field list scrolls inside the metadata card instead
+                    // of pushing notes out of the column.
                     .when(sidebar_width > px(0.5), |el| {
                         el.child(
                             div()
@@ -7302,48 +7304,87 @@ impl Render for LibraryApp {
                                 .relative()
                                 .h_full()
                                 .w(sidebar_width)
-                                .overflow_hidden()
-                                .rounded(ISLAND_RADIUS)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().background)
-                                .flex_shrink_0()
-                                .child(self.render_side_panel(cx))
-                                .child(island_corner_mask(stops, glow))
-                                .when(self.detail_open, |el| {
-                                    el.child(self.sidebar_resize_handle(false, sidebar_width, cx))
-                                }),
-                        )
-                    })
-                    // Notes are their own island, to the right of the metadata,
-                    // so a long field list cannot push them below the fold.
-                    .when(notes_open && notes_target > px(0.5), |el| {
-                        el.child(
-                            div()
-                                .id("notes-island")
-                                .test_support()
-                                .relative()
-                                .h_full()
-                                .w(notes_target)
-                                .overflow_hidden()
-                                .rounded(ISLAND_RADIUS)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().background)
                                 .flex_shrink_0()
                                 .child(
-                                    v_flex().h_full().w_full().child(
-                                        div()
-                                            .id("notes-island-scroll")
-                                            .test_support()
-                                            .flex_1()
-                                            .min_h_0()
-                                            .overflow_y_scroll()
-                                            .p_3()
-                                            .child(self.notes.clone()),
-                                    ),
+                                    v_flex()
+                                        .h_full()
+                                        .w_full()
+                                        .gap_2()
+                                        .when(self.detail_open, |column| {
+                                            column.child(
+                                                div()
+                                                    .relative()
+                                                    .min_h_0()
+                                                    .w_full()
+                                                    .overflow_hidden()
+                                                    .rounded(ISLAND_RADIUS)
+                                                    .border_1()
+                                                    .border_color(cx.theme().border)
+                                                    .bg(cx.theme().background)
+                                                    // The editor needs the lower card tall
+                                                    // enough that Save stays on screen.
+                                                    .when(note_editing, |island| {
+                                                        island.h(px(220.)).flex_shrink_0()
+                                                    })
+                                                    .when(!note_editing, |island| island.flex_1())
+                                                    .child(self.render_side_panel(cx))
+                                                    .child(island_corner_mask(stops, glow)),
+                                            )
+                                        })
+                                        .when(notes_open, |column| {
+                                            column.child(
+                                                div()
+                                                    .id("notes-island")
+                                                    .test_support()
+                                                    .relative()
+                                                    .w_full()
+                                                    .overflow_hidden()
+                                                    .rounded(ISLAND_RADIUS)
+                                                    .border_1()
+                                                    .border_color(cx.theme().border)
+                                                    .bg(cx.theme().background)
+                                                    .when(
+                                                        note_editing || !self.detail_open,
+                                                        |island| island.flex_1().min_h_0(),
+                                                    )
+                                                    .when(
+                                                        !note_editing && self.detail_open,
+                                                        |island| {
+                                                            island
+                                                                .max_h(px(NOTES_STACK_MAX_HEIGHT))
+                                                                .flex_shrink_0()
+                                                        },
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id("notes-island-scroll")
+                                                            .test_support()
+                                                            .when(
+                                                                note_editing || !self.detail_open,
+                                                                |scroll| {
+                                                                    scroll
+                                                                        .flex_1()
+                                                                        .min_h_0()
+                                                                        .h_full()
+                                                                },
+                                                            )
+                                                            .when(
+                                                                !note_editing && self.detail_open,
+                                                                |scroll| {
+                                                                    scroll.max_h(px(
+                                                                        NOTES_STACK_MAX_HEIGHT,
+                                                                    ))
+                                                                },
+                                                            )
+                                                            .overflow_y_scroll()
+                                                            .p_3()
+                                                            .child(self.notes.clone()),
+                                                    )
+                                                    .child(island_corner_mask(stops, glow)),
+                                            )
+                                        }),
                                 )
-                                .child(island_corner_mask(stops, glow)),
+                                .child(self.sidebar_resize_handle(false, sidebar_width, cx)),
                         )
                     }),
             )
@@ -8559,53 +8600,40 @@ mod panel_width_tests {
     #[test]
     fn default_widths_and_closed_panels() {
         assert_eq!(
-            sidebar_target_widths(px(1000.), Some(None), Some(None), false),
-            (px(180.), px(320.), px(0.))
+            sidebar_target_widths(px(1000.), Some(None), Some(None)),
+            (px(180.), px(320.))
         );
         assert_eq!(
-            sidebar_target_widths(px(1000.), None, None, false),
-            (px(0.), px(0.), px(0.))
+            sidebar_target_widths(px(1000.), None, None),
+            (px(0.), px(0.))
         );
     }
 
     #[test]
     fn restored_widths_are_bounded_and_invalid_values_use_defaults() {
         assert_eq!(
-            sidebar_target_widths(px(2000.), Some(Some(230.)), Some(Some(410.)), false),
-            (px(230.), px(410.), px(0.))
+            sidebar_target_widths(px(2000.), Some(Some(230.)), Some(Some(410.))),
+            (px(230.), px(410.))
         );
         assert_eq!(
-            sidebar_target_widths(px(2000.), Some(Some(-10.)), Some(Some(900.)), false),
-            (px(140.), px(640.), px(0.))
+            sidebar_target_widths(px(2000.), Some(Some(-10.)), Some(Some(900.))),
+            (px(140.), px(640.))
         );
         assert_eq!(
-            sidebar_target_widths(
-                px(2000.),
-                Some(Some(f64::NAN)),
-                Some(Some(f64::INFINITY)),
-                false
-            ),
-            (px(180.), px(320.), px(0.))
+            sidebar_target_widths(px(2000.), Some(Some(f64::NAN)), Some(Some(f64::INFINITY))),
+            (px(180.), px(320.))
         );
     }
 
     #[test]
     fn narrow_windows_keep_the_grid_usable() {
         assert_eq!(
-            sidebar_target_widths(px(522.), Some(None), Some(None), false),
-            (px(90.), px(160.), px(0.))
+            sidebar_target_widths(px(522.), Some(None), Some(None)),
+            (px(90.), px(160.))
         );
         assert_eq!(
-            sidebar_target_widths(px(240.), Some(None), Some(None), false),
-            (px(0.), px(0.), px(0.))
-        );
-        assert_eq!(
-            sidebar_target_widths(px(1600.), Some(None), Some(None), true),
-            (px(180.), px(320.), px(300.))
-        );
-        assert_eq!(
-            sidebar_target_widths(px(1600.), Some(None), None, true),
-            (px(180.), px(0.), px(300.))
+            sidebar_target_widths(px(240.), Some(None), Some(None)),
+            (px(0.), px(0.))
         );
     }
 }

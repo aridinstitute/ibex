@@ -61,6 +61,9 @@ impl NotesPanel {
             return_focus: None,
         }
     }
+    pub fn is_editing(&self) -> bool {
+        self.editor.is_some()
+    }
     pub fn select(&mut self, resource: ResourceId, window: &mut Window, cx: &mut Context<Self>) {
         if self.resource == Some(resource) {
             return;
