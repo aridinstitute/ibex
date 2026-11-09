@@ -5974,14 +5974,22 @@ impl LibraryApp {
     /// surface. Notes stay in their own card stacked under this one. The detail
     /// shows the edit pencil below the byline; no row selected means nothing
     /// to edit, and an open form means the sidebar already is the editor.
-    fn render_side_panel(&self, cx: &mut Context<Self>) -> Div {
+    fn render_side_panel(&self, max_height: Option<Pixels>, cx: &mut Context<Self>) -> Div {
         let selected_count = self.table.read(cx).delegate().selected_ids.len();
         if selected_count > 1 {
-            return render_panel(DetailView::Multiple(selected_count), None, Vec::new(), cx);
+            return render_panel(
+                DetailView::Multiple(selected_count),
+                None,
+                Vec::new(),
+                max_height,
+                cx,
+            );
         }
         match &self.edit {
-            Some(EditFetch::Ready(form)) => self.render_edit_panel(form, cx),
-            Some(EditFetch::Loading(_)) => render_panel(DetailView::Loading, None, Vec::new(), cx),
+            Some(EditFetch::Ready(form)) => self.render_edit_panel(form, max_height, cx),
+            Some(EditFetch::Loading(_)) => {
+                render_panel(DetailView::Loading, None, Vec::new(), max_height, cx)
+            }
             None => {
                 let favorited = match self.detail_view() {
                     DetailView::Fields(detail) => Some(detail.favorite),
@@ -6184,7 +6192,7 @@ impl LibraryApp {
                         extra_rows.push(("Suggested".into(), row));
                     }
                 }
-                render_panel(self.detail_view(), actions, extra_rows, cx)
+                render_panel(self.detail_view(), actions, extra_rows, max_height, cx)
             }
         }
     }
@@ -6370,22 +6378,29 @@ impl LibraryApp {
     /// short window still reaches every row. Parent is a searchable
     /// dropdown of library titles, not an id to type: users pick the
     /// containing work by name.
-    fn render_edit_panel(&self, form: &EditForm, cx: &mut Context<Self>) -> Div {
+    fn render_edit_panel(
+        &self,
+        form: &EditForm,
+        max_height: Option<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let saving = form.saving || form.author_creating;
         let error = form.error.clone();
         let danger = cx.theme().danger;
 
         v_flex()
-            .h_full()
             .flex_shrink_0()
             .w_full()
             .bg(cx.theme().background)
             .text_size(FIELD_TEXT_SIZE)
+            .when_some(max_height, |column, max| column.max_h(max))
+            .when(max_height.is_none(), |column| column.h_full())
             .child(
                 v_flex()
                     .id("edit-panel")
-                    .size_full()
                     .p_3()
+                    .when_some(max_height, |body, max| body.max_h(max))
+                    .when(max_height.is_none(), |body| body.size_full())
                     .gap_2()
                     .overflow_y_scroll()
                     .child(
@@ -6566,9 +6581,8 @@ fn padded_input(state: &Entity<InputState>) -> Input {
 
 /// Keep a usable center region, shrinking both sidebars on small windows
 /// without overwriting the user's preferred widths.
-/// Cap for the notes card stacked under the metadata. Short notes hug their
-/// content; a long note or the editor scrolls inside the card.
-const NOTES_STACK_MAX_HEIGHT: f32 = 280.;
+/// Toolbar plus the row padding above the stacked right rail.
+const RAIL_CHROME: f32 = 88.;
 
 fn sidebar_target_widths(
     viewport: Pixels,
@@ -6792,6 +6806,16 @@ impl Render for LibraryApp {
         );
         let notes_open = self.selected.is_some() && delegate.selected_ids.len() <= 1;
         let note_editing = notes_open && self.notes.read(cx).is_editing();
+        // The metadata card ends at its fields. The notes card takes the
+        // rest of the rail, with a floor so a long field list cannot
+        // shrink it away. While editing, the floor grows so Save stays up.
+        let rail_height = (f32::from(window.viewport_size().height) - RAIL_CHROME).max(280.);
+        let notes_floor = if note_editing {
+            (rail_height * 0.55).clamp(240., 460.)
+        } else {
+            (rail_height * 0.34).clamp(160., 360.)
+        };
+        let detail_limit = notes_open.then(|| px((rail_height - notes_floor - 8.).max(140.)));
         // Notes stack in the right column, so a closed detail panel still
         // keeps that column open while one resource is selected.
         let right_open = self.detail_open || notes_open;
@@ -7293,10 +7317,8 @@ impl Render for LibraryApp {
                             }
                         },
                     )
-                    // The right rail is a stack of islands. Metadata keeps the
-                    // upper card; notes are their own card underneath, so a
-                    // long field list scrolls inside the metadata card instead
-                    // of pushing notes out of the column.
+                    // Metadata ends at its fields. Notes fill the height left
+                    // in the rail, and grow or shrink with the window.
                     .when(sidebar_width > px(0.5), |el| {
                         el.child(
                             div()
@@ -7314,20 +7336,19 @@ impl Render for LibraryApp {
                                             column.child(
                                                 div()
                                                     .relative()
-                                                    .min_h_0()
                                                     .w_full()
                                                     .overflow_hidden()
                                                     .rounded(ISLAND_RADIUS)
                                                     .border_1()
                                                     .border_color(cx.theme().border)
                                                     .bg(cx.theme().background)
-                                                    // The editor needs the lower card tall
-                                                    // enough that Save stays on screen.
-                                                    .when(note_editing, |island| {
-                                                        island.h(px(220.)).flex_shrink_0()
+                                                    .when(detail_limit.is_none(), |island| {
+                                                        island.flex_1().min_h_0()
                                                     })
-                                                    .when(!note_editing, |island| island.flex_1())
-                                                    .child(self.render_side_panel(cx))
+                                                    .when(detail_limit.is_some(), |island| {
+                                                        island.flex_shrink_0()
+                                                    })
+                                                    .child(self.render_side_panel(detail_limit, cx))
                                                     .child(island_corner_mask(stops, glow)),
                                             )
                                         })
@@ -7338,44 +7359,20 @@ impl Render for LibraryApp {
                                                     .test_support()
                                                     .relative()
                                                     .w_full()
+                                                    .flex_1()
+                                                    .min_h_0()
                                                     .overflow_hidden()
                                                     .rounded(ISLAND_RADIUS)
                                                     .border_1()
                                                     .border_color(cx.theme().border)
                                                     .bg(cx.theme().background)
-                                                    .when(
-                                                        note_editing || !self.detail_open,
-                                                        |island| island.flex_1().min_h_0(),
-                                                    )
-                                                    .when(
-                                                        !note_editing && self.detail_open,
-                                                        |island| {
-                                                            island
-                                                                .max_h(px(NOTES_STACK_MAX_HEIGHT))
-                                                                .flex_shrink_0()
-                                                        },
-                                                    )
                                                     .child(
                                                         div()
                                                             .id("notes-island-scroll")
                                                             .test_support()
-                                                            .when(
-                                                                note_editing || !self.detail_open,
-                                                                |scroll| {
-                                                                    scroll
-                                                                        .flex_1()
-                                                                        .min_h_0()
-                                                                        .h_full()
-                                                                },
-                                                            )
-                                                            .when(
-                                                                !note_editing && self.detail_open,
-                                                                |scroll| {
-                                                                    scroll.max_h(px(
-                                                                        NOTES_STACK_MAX_HEIGHT,
-                                                                    ))
-                                                                },
-                                                            )
+                                                            .flex_1()
+                                                            .min_h_0()
+                                                            .h_full()
                                                             .overflow_y_scroll()
                                                             .p_3()
                                                             .child(self.notes.clone()),
