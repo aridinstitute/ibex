@@ -7330,15 +7330,10 @@ impl Render for LibraryApp {
                                 .rounded(ISLAND_RADIUS)
                                 .border_1()
                                 .border_color(cx.theme().border)
-                                // Distinct wash under the feed so note cards
-                                // lift off as separate surfaces (theme muted
-                                // is too close to background in light mode).
+                                // Soft muted wash under the feed so note cards
+                                // read as separate surfaces without a beige tint.
                                 .bg(if feed_open {
-                                    if cx.theme().is_dark() {
-                                        cx.theme().muted
-                                    } else {
-                                        rgb(0xe4e1da).into()
-                                    }
+                                    cx.theme().muted
                                 } else {
                                     cx.theme().background
                                 })

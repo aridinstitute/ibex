@@ -31,6 +31,21 @@ pub(crate) fn note_kind_color(kind: NoteKind, dark: bool) -> Hsla {
     rgb(hex).into()
 }
 
+/// Soft pastel wash behind a note-kind pill (Voicenotes / Tana / Dovetail).
+pub(crate) fn note_kind_pill_bg(kind: NoteKind, dark: bool) -> Hsla {
+    let hex = match (kind, dark) {
+        (NoteKind::Note, false) => 0xe0f2fe,
+        (NoteKind::Note, true) => 0x0c4a6e,
+        (NoteKind::Summary, false) => 0xdcfce7,
+        (NoteKind::Summary, true) => 0x14532d,
+        (NoteKind::Paraphrase, false) => 0xffedd5,
+        (NoteKind::Paraphrase, true) => 0x7c2d12,
+        (NoteKind::Quote, false) => 0xf3e8ff,
+        (NoteKind::Quote, true) => 0x581c87,
+    };
+    rgb(hex).into()
+}
+
 struct NoteView {
     note: Note,
     markdown: Entity<TextViewState>,

@@ -1,6 +1,10 @@
 //! Cross-resource notes feed: every note, newest activity first.
+//!
+//! Layout cues from Mobbin feeds (Voicenotes, Fireflies bookmarks, Descript
+//! highlights): soft kind pills, typography-first cards, resource as a quiet
+//! filter affordance — not a beige stack of heavy bordered boxes.
 use crate::db::DbWorker;
-use crate::notes::note_kind_color;
+use crate::notes::{note_kind_color, note_kind_pill_bg};
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -8,7 +12,7 @@ use gpui_kit::component::text::{TextView, TextViewState, TextViewStyle};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use ibex_core::{NoteFeedItem, ResourceId, format_recorded_date};
+use ibex_core::{NoteFeedItem, NoteKind, ResourceId, format_recorded_date};
 
 struct FeedEntry {
     item: NoteFeedItem,
@@ -134,9 +138,22 @@ fn filter_options_from(items: &[NoteFeedItem]) -> Vec<FilterOption> {
     options
 }
 
+fn kind_pill(kind: NoteKind, dark: bool) -> impl IntoElement {
+    div()
+        .px_2()
+        .py_0p5()
+        .rounded(px(999.))
+        .bg(note_kind_pill_bg(kind, dark))
+        .text_color(note_kind_color(kind, dark))
+        .text_size(px(11.))
+        .font_weight(FontWeight::MEDIUM)
+        .child(kind.label())
+}
+
 impl Render for NotesFeed {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let owner = cx.weak_entity();
+        let dark = cx.theme().is_dark();
         let filter_label = self
             .filter_resource
             .and_then(|id| {
@@ -152,26 +169,35 @@ impl Render for NotesFeed {
             .test_support()
             .size_full()
             .gap_4()
-            .p_3()
+            .p_5()
             .child(
                 h_flex()
                     .justify_between()
-                    .gap_2()
+                    .items_start()
+                    .gap_3()
                     .child(
                         v_flex()
                             .gap_0p5()
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child("Notes"))
                             .child(
                                 div()
+                                    .text_size(px(20.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Notes"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
                                     .text_color(cx.theme().muted_foreground)
                                     .child("Sorted by date modified"),
                             ),
                     )
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap_1()
+                            .items_center()
                             .child(
                                 Button::new("notes-feed-resource-filter")
+                                    .ghost()
                                     .small()
                                     .label(filter_label)
                                     .dropdown_menu_with_anchor(
@@ -218,7 +244,7 @@ impl Render for NotesFeed {
                                 row.child(
                                     Button::new("notes-feed-clear-filter")
                                         .ghost()
-                                        .small()
+                                        .xsmall()
                                         .label("Clear")
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.set_resource_filter(None, window, cx);
@@ -229,13 +255,21 @@ impl Render for NotesFeed {
             );
 
         if self.loading && self.entries.is_empty() {
-            content = content.child("Loading notes…");
+            content = content.child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Loading notes…"),
+            );
         } else if self.entries.is_empty() && self.error.is_none() {
-            content = content.child(if self.filter_resource.is_some() {
-                "No notes for this resource."
-            } else {
-                "No notes yet."
-            });
+            content = content.child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if self.filter_resource.is_some() {
+                        "No notes for this resource."
+                    } else {
+                        "No notes yet."
+                    }),
+            );
         }
 
         for entry in &self.entries {
@@ -249,6 +283,7 @@ impl Render for NotesFeed {
                 .unwrap_or_else(|| "Untitled resource".into());
             let stamp = format_recorded_date(entry.item.note.updated_at);
             let kind = entry.item.note.content.kind;
+            let locations = entry.item.note.content.locations.clone();
             content = content.child(
                 v_flex()
                     .id(SharedString::from(format!("feed-note-{id}")))
@@ -256,57 +291,69 @@ impl Render for NotesFeed {
                     .gap_2()
                     .w_full()
                     .flex_shrink_0()
-                    .rounded(px(12.))
+                    .rounded(px(10.))
                     .border_1()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().background)
-                    .p_4()
+                    .px_4()
+                    .py_3()
                     .child(
                         h_flex()
                             .gap_2()
+                            .items_center()
                             .min_w_0()
+                            .child(kind_pill(kind, dark))
+                            .child(div().flex_1())
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .truncate()
-                                    .child(resource_title),
-                            )
-                            .child(
-                                div()
-                                    .text_color(note_kind_color(kind, cx.theme().is_dark()))
-                                    .child(kind.label()),
-                            )
-                            .child(div().text_color(cx.theme().muted_foreground).child(stamp)),
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(stamp),
+                            ),
                     )
+                    .when_some(resource_id, |card, resource_id| {
+                        let title = resource_title.clone();
+                        let hover = cx.theme().foreground;
+                        let muted = cx.theme().muted_foreground;
+                        card.child(
+                            div()
+                                .id(SharedString::from(format!("feed-resource-{id}")))
+                                .test_support()
+                                .w_full()
+                                .min_w_0()
+                                .text_size(px(12.))
+                                .text_color(muted)
+                                .cursor_pointer()
+                                .hover(move |style| style.text_color(hover))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.set_resource_filter(Some(resource_id), window, cx);
+                                }))
+                                .child(title),
+                        )
+                    })
+                    .when(resource_id.is_none(), |card| {
+                        card.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(resource_title),
+                        )
+                    })
                     .child(TextView::new(&entry.markdown).style(
                         TextViewStyle::default().heading_font_size(|level, base| {
                             base * match level {
-                                1 => 1.2,
-                                2 => 1.1,
+                                1 => 1.15,
+                                2 => 1.08,
                                 _ => 1.0,
                             }
                         }),
                     ))
-                    .children(entry.item.note.content.locations.iter().map(|location| {
-                        div().text_color(cx.theme().muted_foreground).child(format!(
-                            "{} {}",
-                            location.kind.label(),
-                            location.value
-                        ))
-                    }))
-                    .when_some(resource_id, |card, resource_id| {
-                        card.child(
-                            Button::new(SharedString::from(format!("feed-filter-{id}")))
-                                .ghost()
-                                .xsmall()
-                                .label("Only this resource")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.set_resource_filter(Some(resource_id), window, cx);
-                                })),
-                        )
-                    }),
+                    .children(locations.into_iter().map(|location| {
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{} {}", location.kind.label(), location.value))
+                    })),
             );
         }
 
