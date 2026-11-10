@@ -75,7 +75,6 @@ fn note_crud_on_a_resource() {
         "resource",
         "note",
         "update",
-        &resource_id,
         &note_id,
         "--kind",
         "summary",
@@ -147,6 +146,6 @@ fn note_update_requires_a_change_flag() {
         .next()
         .unwrap()
         .to_owned();
-    let no_flags = run(&["resource", "note", "update", &resource_id, &note_id]);
+    let no_flags = run(&["resource", "note", "update", &note_id]);
     assert!(!no_flags.status.success(), "update with no flags must fail");
 }

@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_resource_update_attach() {
+    fn parses_resource_update_attach_and_fetch() {
         let cli = Cli::try_parse_from([
             "ibex",
             "resource",
@@ -253,6 +253,8 @@ mod tests {
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "--attach",
             "/tmp/paper.pdf",
+            "--fetch",
+            "9780306406157",
         ])
         .expect("valid args");
         let Commands::Resource(ResourceCmd {
@@ -263,5 +265,6 @@ mod tests {
         };
         assert_eq!(args.id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
         assert_eq!(args.attachments, [PathBuf::from("/tmp/paper.pdf")]);
+        assert_eq!(args.fetch.as_deref(), Some("9780306406157"));
     }
 }

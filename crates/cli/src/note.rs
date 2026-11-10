@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 
-use ibex_app::command::{CreateNote, DeleteNote, ListNotes, UpdateNote};
+use ibex_app::command::{CreateNote, DeleteNote, GetNote, ListNotes, UpdateNote};
 use ibex_app::{AppState, Command, Outcome};
 use ibex_core::{CitationLocation, LocationKind, Note, NoteContent, NoteId, NoteKind, ResourceId};
 
@@ -67,8 +67,6 @@ pub struct AddNoteArgs {
 
 #[derive(Debug, Args)]
 pub struct UpdateNoteArgs {
-    /// Resource that owns the note (needed to load the current content).
-    pub resource: String,
     /// Note id.
     pub id: String,
     /// New note type.
@@ -109,7 +107,12 @@ pub async fn run(state: &AppState, cmd: NoteCmd) -> Result<()> {
 
 async fn list(state: &AppState, resource: &str) -> Result<()> {
     let resource_id = ResourceId::parse(resource).context("invalid resource id")?;
-    let notes = list_notes(state, resource_id).await?;
+    let Outcome::ListNotes(notes) = state
+        .execute(Command::ListNotes(ListNotes { resource_id }))
+        .await?
+    else {
+        bail!("unexpected outcome from list_notes");
+    };
     if notes.is_empty() {
         println!("(none)");
         return Ok(());
@@ -146,13 +149,13 @@ async fn update(state: &AppState, args: UpdateNoteArgs) -> Result<()> {
     if !args.has_changes() {
         bail!("pass at least one of --kind, --body, --body-file, --location, or --clear-locations");
     }
-    let resource_id = ResourceId::parse(&args.resource).context("invalid resource id")?;
     let note_id = NoteId::parse(&args.id).context("invalid note id")?;
-    let notes = list_notes(state, resource_id).await?;
-    let existing = notes
-        .into_iter()
-        .find(|note| note.id == note_id)
-        .ok_or_else(|| ibex_app::CommandError::NotFound(note_id.to_string()))?;
+    let Outcome::GetNote(existing) = state
+        .execute(Command::GetNote(GetNote { id: note_id }))
+        .await?
+    else {
+        bail!("unexpected outcome from get_note");
+    };
     let mut content = existing.content;
     if let Some(kind) = args.kind {
         content.kind = kind.into();
@@ -188,16 +191,6 @@ async fn delete(state: &AppState, id: &str) -> Result<()> {
     };
     println!("deleted {id}");
     Ok(())
-}
-
-async fn list_notes(state: &AppState, resource_id: ResourceId) -> Result<Vec<Note>> {
-    let Outcome::ListNotes(notes) = state
-        .execute(Command::ListNotes(ListNotes { resource_id }))
-        .await?
-    else {
-        bail!("unexpected outcome from list_notes");
-    };
-    Ok(notes)
 }
 
 fn read_body(body: Option<String>, body_file: Option<PathBuf>, required: bool) -> Result<String> {

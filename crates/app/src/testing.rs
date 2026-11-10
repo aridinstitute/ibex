@@ -644,6 +644,14 @@ impl Store for MemoryStore {
         self.notes.lock().unwrap().insert(note.id, note.clone());
         Ok(note)
     }
+    async fn get_note(&self, id: ibex_core::NoteId) -> Result<ibex_core::Note, StoreError> {
+        self.notes
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| StoreError::not_found(format!("note {id}")))
+    }
     async fn update_note(
         &self,
         id: ibex_core::NoteId,
@@ -1640,6 +1648,12 @@ impl Store for StubStore {
         &self,
         _: ibex_core::ResourceId,
         _: ibex_core::NoteContent,
+    ) -> Result<ibex_core::Note, ibex_core::StoreError> {
+        Err(ibex_core::StoreError::new("notes unsupported"))
+    }
+    async fn get_note(
+        &self,
+        _: ibex_core::NoteId,
     ) -> Result<ibex_core::Note, ibex_core::StoreError> {
         Err(ibex_core::StoreError::new("notes unsupported"))
     }

@@ -32,12 +32,9 @@ pub enum ResourceAction {
     Show { id: String },
     /// Create a resource with manually provided metadata.
     Add(AddArgs),
-    /// Fetch ISBN/DOI metadata and store a new resource, or fill gaps on an existing one.
-    Fetch {
-        identifier: String,
-        #[arg(long)]
-        update: Option<String>,
-    },
+    /// Fetch ISBN/DOI metadata and create a new resource.
+    /// To fill gaps on an existing resource, use `resource update --fetch`.
+    Fetch { identifier: String },
     /// Preview collection suggestions; --apply attaches them.
     Classify {
         id: String,
@@ -250,6 +247,9 @@ pub struct UpdateArgs {
     /// Attach a local file; repeatable.
     #[arg(long = "attach")]
     pub attachments: Vec<PathBuf>,
+    /// Fill metadata gaps from an ISBN or DOI.
+    #[arg(long = "fetch")]
+    pub fetch: Option<String>,
 }
 
 impl UpdateArgs {
@@ -290,9 +290,7 @@ pub async fn run(
         ResourceAction::List(args) => list(state, args).await,
         ResourceAction::Show { id } => show(state, &id).await,
         ResourceAction::Add(args) => add(state, args).await,
-        ResourceAction::Fetch { identifier, update } => {
-            fetch(state, &identifier, update.as_deref()).await
-        }
+        ResourceAction::Fetch { identifier } => fetch(state, &identifier).await,
         ResourceAction::Update(args) => update(state, args).await,
         ResourceAction::Classify { id, engine, apply } => {
             classify(state, config, &id, engine, apply).await
@@ -399,11 +397,8 @@ fn validate_jev_endpoint(endpoint: &str) -> Result<()> {
     Ok(())
 }
 
-async fn fetch(state: &AppState, identifier: &str, update: Option<&str>) -> Result<()> {
-    let target = update
-        .map(|id| ResourceId::parse(id).context("invalid --update resource id"))
-        .transpose()?;
-    let resource = ibex_app::metadata::fetch(state, identifier, target)
+async fn fetch(state: &AppState, identifier: &str) -> Result<()> {
+    let resource = ibex_app::metadata::fetch(state, identifier, None)
         .await
         .map_err(|message| anyhow!(message))?;
     println!(
@@ -810,10 +805,20 @@ async fn update(state: &AppState, args: UpdateArgs) -> Result<()> {
         bail!("unexpected outcome from get_resource");
     };
 
-    if !args.has_changes() && !args.favorite && !args.unfavorite && args.attachments.is_empty() {
+    if !args.has_changes()
+        && !args.favorite
+        && !args.unfavorite
+        && args.attachments.is_empty()
+        && args.fetch.is_none()
+    {
         bail!("nothing to update; pass a field flag");
     }
     let mut updated = existing;
+    if let Some(identifier) = &args.fetch {
+        updated = ibex_app::metadata::fetch(state, identifier, Some(id))
+            .await
+            .map_err(|message| anyhow!(message))?;
+    }
     if args.has_changes() {
         let new = merge_update(&updated, &args)?;
         let Outcome::UpdateResource(resource) = state
@@ -1243,6 +1248,7 @@ mod tests {
             collections: vec![],
             remove_collections: vec![],
             attachments: vec![],
+            fetch: None,
             favorite: false,
             unfavorite: false,
         }
