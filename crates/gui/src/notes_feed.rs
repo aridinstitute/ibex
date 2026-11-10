@@ -134,7 +134,7 @@ fn filter_options_from(items: &[NoteFeedItem]) -> Vec<FilterOption> {
             title: SharedString::from(title.to_owned()),
         });
     }
-    options.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    options.sort_by_key(|a| a.title.to_lowercase());
     options
 }
 
@@ -261,15 +261,13 @@ impl Render for NotesFeed {
                     .child("Loading notes…"),
             );
         } else if self.entries.is_empty() && self.error.is_none() {
-            content = content.child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(if self.filter_resource.is_some() {
-                        "No notes for this resource."
-                    } else {
-                        "No notes yet."
-                    }),
-            );
+            content = content.child(div().text_color(cx.theme().muted_foreground).child(
+                if self.filter_resource.is_some() {
+                    "No notes for this resource."
+                } else {
+                    "No notes yet."
+                },
+            ));
         }
 
         for entry in &self.entries {
