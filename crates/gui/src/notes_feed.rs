@@ -157,7 +157,16 @@ impl Render for NotesFeed {
                 h_flex()
                     .justify_between()
                     .gap_2()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Notes"))
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child("Notes"))
+                            .child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Sorted by date modified"),
+                            ),
+                    )
                     .child(
                         h_flex()
                             .gap_2()
@@ -217,11 +226,6 @@ impl Render for NotesFeed {
                                 )
                             }),
                     ),
-            )
-            .child(
-                div()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Sorted by date modified"),
             );
 
         if self.loading && self.entries.is_empty() {
@@ -250,9 +254,12 @@ impl Render for NotesFeed {
                     .id(SharedString::from(format!("feed-note-{id}")))
                     .test_support()
                     .gap_2()
-                    .border_t_1()
+                    .w_full()
+                    .rounded(px(12.))
+                    .border_1()
                     .border_color(cx.theme().border)
-                    .pt_3()
+                    .bg(cx.theme().background)
+                    .p_3()
                     .child(
                         h_flex()
                             .gap_2()
