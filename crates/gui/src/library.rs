@@ -7316,34 +7316,39 @@ impl Render for LibraryApp {
                         // header-only strip floats mid-window with no
                         // rows and no empty state.
                         {
-                            let wrap = div()
-                                .id(if feed_open {
-                                    "notes-feed-viewport"
-                                } else {
-                                    "library-grid-viewport"
-                                })
-                                .test_support()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .relative()
-                                .rounded(ISLAND_RADIUS)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().background)
-                                .overflow_hidden();
                             if feed_open {
-                                wrap.child(
-                                    div()
-                                        .id("notes-feed-scroll")
-                                        .test_support()
-                                        .size_full()
-                                        .overflow_y_scroll()
-                                        .child(self.notes_feed.clone()),
-                                )
-                                .child(island_corner_mask(stops, glow))
-                                .into_any_element()
+                                // Notes feed: no island well — cards sit on the
+                                // workspace canvas with only a thin inline filter.
+                                div()
+                                    .id("notes-feed-viewport")
+                                    .test_support()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .relative()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .id("notes-feed-scroll")
+                                            .test_support()
+                                            .size_full()
+                                            .overflow_y_scroll()
+                                            .child(self.notes_feed.clone()),
+                                    )
+                                    .into_any_element()
                             } else {
+                                let wrap = div()
+                                    .id("library-grid-viewport")
+                                    .test_support()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .relative()
+                                    .rounded(ISLAND_RADIUS)
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().background)
+                                    .overflow_hidden();
                                 let table = DataTable::new(&self.table)
                                     .with_size(Size::XSmall)
                                     .bordered(false)

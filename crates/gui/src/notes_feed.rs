@@ -1,7 +1,7 @@
 //! Cross-resource notes feed: every note, newest activity first.
 //!
-//! Typography-first cards: colored kind label, resource title beside it with a
-//! middle dot, and the resource as a quiet click-to-filter affordance.
+//! Cards sit on the workspace canvas with only a thin inline resource filter —
+//! no section title block.
 use crate::db::DbWorker;
 use crate::notes::note_kind_color;
 use gpui_kit::base::TestSupportExt as _;
@@ -155,90 +155,64 @@ impl Render for NotesFeed {
             .id("notes-feed")
             .test_support()
             .size_full()
-            .gap_4()
-            .p_5()
+            .gap_3()
+            .px_3()
+            .pt_1()
+            .pb_3()
             .child(
                 h_flex()
-                    .justify_between()
-                    .items_start()
-                    .gap_3()
+                    .w_full()
+                    .justify_end()
+                    .items_center()
+                    .gap_1()
                     .child(
-                        v_flex()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .text_size(px(20.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Notes"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Sorted by date modified"),
+                        Button::new("notes-feed-resource-filter")
+                            .ghost()
+                            .xsmall()
+                            .label(filter_label)
+                            .dropdown_menu_with_anchor(
+                                Anchor::TopRight,
+                                move |mut menu, window, cx| {
+                                    let Some(owner) = owner.upgrade() else {
+                                        return menu;
+                                    };
+                                    menu = menu.item(PopupMenuItem::new("All resources").on_click(
+                                        window.listener_for(&owner, |this, _, window, cx| {
+                                            this.set_resource_filter(None, window, cx);
+                                        }),
+                                    ));
+                                    let options = owner.read(cx).filter_options.clone();
+                                    for option in options {
+                                        let id = option.id;
+                                        menu =
+                                            menu.item(PopupMenuItem::new(option.title).on_click(
+                                                window.listener_for(
+                                                    &owner,
+                                                    move |this, _, window, cx| {
+                                                        this.set_resource_filter(
+                                                            Some(id),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                ),
+                                            ));
+                                    }
+                                    menu
+                                },
                             ),
                     )
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .items_center()
-                            .child(
-                                Button::new("notes-feed-resource-filter")
-                                    .ghost()
-                                    .small()
-                                    .label(filter_label)
-                                    .dropdown_menu_with_anchor(
-                                        Anchor::TopRight,
-                                        move |mut menu, window, cx| {
-                                            let Some(owner) = owner.upgrade() else {
-                                                return menu;
-                                            };
-                                            menu = menu.item(
-                                                PopupMenuItem::new("All resources").on_click(
-                                                    window.listener_for(
-                                                        &owner,
-                                                        |this, _, window, cx| {
-                                                            this.set_resource_filter(
-                                                                None, window, cx,
-                                                            );
-                                                        },
-                                                    ),
-                                                ),
-                                            );
-                                            let options = owner.read(cx).filter_options.clone();
-                                            for option in options {
-                                                let id = option.id;
-                                                menu = menu.item(
-                                                    PopupMenuItem::new(option.title).on_click(
-                                                        window.listener_for(
-                                                            &owner,
-                                                            move |this, _, window, cx| {
-                                                                this.set_resource_filter(
-                                                                    Some(id),
-                                                                    window,
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        ),
-                                                    ),
-                                                );
-                                            }
-                                            menu
-                                        },
-                                    ),
-                            )
-                            .when(self.filter_resource.is_some(), |row| {
-                                row.child(
-                                    Button::new("notes-feed-clear-filter")
-                                        .ghost()
-                                        .xsmall()
-                                        .label("Clear")
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.set_resource_filter(None, window, cx);
-                                        })),
-                                )
-                            }),
-                    ),
+                    .when(self.filter_resource.is_some(), |row| {
+                        row.child(
+                            Button::new("notes-feed-clear-filter")
+                                .ghost()
+                                .xsmall()
+                                .label("Clear")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.set_resource_filter(None, window, cx);
+                                })),
+                        )
+                    }),
             );
 
         if self.loading && self.entries.is_empty() {
