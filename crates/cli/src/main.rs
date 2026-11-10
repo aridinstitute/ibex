@@ -2,6 +2,7 @@ mod collection;
 mod config;
 mod import;
 mod name;
+mod note;
 mod person;
 mod resource;
 mod tag;
@@ -210,5 +211,56 @@ mod tests {
         assert_eq!(args.collection_ids.len(), 1);
         assert_eq!(args.tags, vec!["review", "2026"]);
         assert_eq!(args.tag_ids.len(), 1);
+    }
+
+    #[test]
+    fn parses_resource_note_add() {
+        let cli = Cli::try_parse_from([
+            "ibex",
+            "resource",
+            "note",
+            "add",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--kind",
+            "quote",
+            "--body",
+            "A line",
+            "--location",
+            "page=12",
+        ])
+        .expect("valid args");
+        let Commands::Resource(ResourceCmd {
+            action: ResourceAction::Note(note),
+        }) = cli.command
+        else {
+            panic!("expected resource note");
+        };
+        assert!(matches!(
+            note.action,
+            crate::note::NoteAction::Add(args) if args.resource == "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+                && matches!(args.kind, crate::note::NoteKindArg::Quote)
+                && args.body.as_deref() == Some("A line")
+                && args.locations == ["page=12"]
+        ));
+    }
+
+    #[test]
+    fn parses_resource_attach() {
+        let cli = Cli::try_parse_from([
+            "ibex",
+            "resource",
+            "attach",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "/tmp/paper.pdf",
+        ])
+        .expect("valid args");
+        let Commands::Resource(ResourceCmd {
+            action: ResourceAction::Attach { id, path },
+        }) = cli.command
+        else {
+            panic!("expected resource attach");
+        };
+        assert_eq!(id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(path, PathBuf::from("/tmp/paper.pdf"));
     }
 }

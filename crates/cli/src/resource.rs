@@ -1,10 +1,11 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use std::io::Write;
+use std::path::PathBuf;
 
 use ibex_app::command::{
-    CreateResource, GetResource, GetResourceDetail, ListResourceGridPage, ListResourcesPage,
-    ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
+    AddAttachment, CreateResource, GetResource, GetResourceDetail, ListNotes, ListResourceGridPage,
+    ListResourcesPage, ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
 };
 use ibex_app::{AppState, Command, Outcome};
 use ibex_core::{
@@ -13,6 +14,8 @@ use ibex_core::{
     ResourceGridRow, ResourceId, ResourceKind, ResourceQuery, ResourceSort, ResourceSummary,
     SeriesId, SortDirection, TagId, UtcMillis, format_published_label, format_recorded_date,
 };
+
+use crate::note::NoteCmd;
 
 #[derive(Debug, Args)]
 pub struct ResourceCmd {
@@ -46,6 +49,15 @@ pub enum ResourceAction {
     /// Update a resource by id. Only the fields whose flags are set change;
     /// the rest keep their stored values.
     Update(UpdateArgs),
+    /// Manage Markdown notes linked to a resource.
+    Note(NoteCmd),
+    /// Attach a local file to a resource.
+    Attach {
+        /// Resource id.
+        id: String,
+        /// Path to the file to attach.
+        path: PathBuf,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
@@ -289,7 +301,29 @@ pub async fn run(
         ResourceAction::Classify { id, engine, apply } => {
             classify(state, config, &id, engine, apply).await
         }
+        ResourceAction::Note(cmd) => crate::note::run(state, cmd).await,
+        ResourceAction::Attach { id, path } => attach(state, &id, path).await,
     }
+}
+
+async fn attach(state: &AppState, id: &str, path: PathBuf) -> Result<()> {
+    let resource_id = ResourceId::parse(id).context("invalid resource id")?;
+    let Outcome::AddAttachment(attachment) = state
+        .execute(Command::AddAttachment(AddAttachment {
+            resource_id,
+            file_path: path,
+        }))
+        .await?
+    else {
+        bail!("unexpected outcome from add_attachment");
+    };
+    println!(
+        "{}  {}  {}",
+        attachment.id,
+        attachment.attachment_type,
+        attachment.file_path.display()
+    );
+    Ok(())
 }
 
 async fn classify(
@@ -533,6 +567,19 @@ async fn show(state: &AppState, id: &str) -> Result<()> {
                     .map(str::to_owned)
                     .unwrap_or_else(|| value.to_string())
             );
+        }
+    }
+    let Outcome::ListNotes(notes) = state
+        .execute(Command::ListNotes(ListNotes { resource_id: id }))
+        .await?
+    else {
+        bail!("unexpected outcome from list_notes");
+    };
+    if !notes.is_empty() {
+        println!("notes:");
+        for note in notes {
+            print!("  ");
+            crate::note::print_note_summary(&note);
         }
     }
     Ok(())
