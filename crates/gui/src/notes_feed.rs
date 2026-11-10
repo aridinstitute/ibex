@@ -151,7 +151,7 @@ impl Render for NotesFeed {
             .id("notes-feed")
             .test_support()
             .size_full()
-            .gap_3()
+            .gap_4()
             .p_3()
             .child(
                 h_flex()
@@ -255,11 +255,12 @@ impl Render for NotesFeed {
                     .test_support()
                     .gap_2()
                     .w_full()
+                    .flex_shrink_0()
                     .rounded(px(12.))
                     .border_1()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().background)
-                    .p_3()
+                    .p_4()
                     .child(
                         h_flex()
                             .gap_2()
