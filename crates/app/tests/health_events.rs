@@ -82,6 +82,12 @@ impl Store for HangStore {
     ) -> Result<Vec<ibex_core::Note>, ibex_core::StoreError> {
         Err(ibex_core::StoreError::new("notes unsupported"))
     }
+    async fn list_note_feed(
+        &self,
+        _: Option<ibex_core::ResourceId>,
+    ) -> Result<Vec<ibex_core::NoteFeedItem>, ibex_core::StoreError> {
+        Err(ibex_core::StoreError::new("notes unsupported"))
+    }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         std::future::pending().await
     }

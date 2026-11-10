@@ -10288,7 +10288,8 @@ mod sidebar_navigation_tests {
             ];
             let mut previous_y = px(0.);
             for (index, kind) in expected.into_iter().enumerate() {
-                let id = ("sidebar-entry", index + 2);
+                // 0 All, 1 Favorites, 2 Notes, then kinds.
+                let id = ("sidebar-entry", index + 3);
                 let y = window.find(id).bounds().top();
                 assert!(y > previous_y);
                 previous_y = y;
@@ -10426,29 +10427,30 @@ mod sidebar_navigation_tests {
         });
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
-            assert!(window.try_find(("sidebar-entry", 2_usize)).is_some()); // Book
-            assert!(window.try_find(("sidebar-entry", 6_usize)).is_some()); // Article
-            assert!(window.try_find(("sidebar-entry", 19_usize)).is_some()); // Selected empty Podcast
-            assert!(window.try_find(("sidebar-entry", 4_usize)).is_none()); // Empty Journal
-            assert!(window.try_find(("sidebar-entry", 20_usize)).is_none()); // Empty Episode
+            // 0 All, 1 Favorites, 2 Notes, then SIDEBAR_KIND_ORDER indices + 3.
+            assert!(window.try_find(("sidebar-entry", 3_usize)).is_some()); // Book
+            assert!(window.try_find(("sidebar-entry", 7_usize)).is_some()); // Article
+            assert!(window.try_find(("sidebar-entry", 20_usize)).is_some()); // Selected empty Podcast
+            assert!(window.try_find(("sidebar-entry", 5_usize)).is_none()); // Empty Journal
+            assert!(window.try_find(("sidebar-entry", 21_usize)).is_none()); // Empty Episode
             assert!(
-                window.find(("sidebar-entry", 2_usize)).bounds().top()
-                    < window.find(("sidebar-entry", 6_usize)).bounds().top()
+                window.find(("sidebar-entry", 3_usize)).bounds().top()
+                    < window.find(("sidebar-entry", 7_usize)).bounds().top()
             );
-            window.click(("sidebar-entry", 6_usize), cx);
+            window.click(("sidebar-entry", 7_usize), cx);
             assert_eq!(
                 app.read(cx).table.read(cx).delegate().filter.kind,
                 Some(ResourceKind::JournalArticle)
             );
-            assert!(window.try_find(("sidebar-entry", 19_usize)).is_none());
+            assert!(window.try_find(("sidebar-entry", 20_usize)).is_none());
             window.click("toggle-section-kinds", cx);
-            assert!(window.try_find(("sidebar-entry", 6_usize)).is_none());
+            assert!(window.try_find(("sidebar-entry", 7_usize)).is_none());
             assert_eq!(
                 app.read(cx).table.read(cx).delegate().filter.kind,
                 Some(ResourceKind::JournalArticle)
             );
             window.click("toggle-section-kinds", cx);
-            assert!(window.try_find(("sidebar-entry", 6_usize)).is_some());
+            assert!(window.try_find(("sidebar-entry", 7_usize)).is_some());
             assert_eq!(
                 app.read(cx).counts.as_ref().unwrap().by_kind[&ResourceKind::Book],
                 3
