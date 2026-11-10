@@ -245,22 +245,23 @@ mod tests {
     }
 
     #[test]
-    fn parses_resource_attach() {
+    fn parses_resource_update_attach() {
         let cli = Cli::try_parse_from([
             "ibex",
             "resource",
-            "attach",
+            "update",
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--attach",
             "/tmp/paper.pdf",
         ])
         .expect("valid args");
         let Commands::Resource(ResourceCmd {
-            action: ResourceAction::Attach { id, path },
+            action: ResourceAction::Update(args),
         }) = cli.command
         else {
-            panic!("expected resource attach");
+            panic!("expected resource update");
         };
-        assert_eq!(id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
-        assert_eq!(path, PathBuf::from("/tmp/paper.pdf"));
+        assert_eq!(args.id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(args.attachments, [PathBuf::from("/tmp/paper.pdf")]);
     }
 }

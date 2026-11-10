@@ -51,13 +51,6 @@ pub enum ResourceAction {
     Update(UpdateArgs),
     /// Manage Markdown notes linked to a resource.
     Note(NoteCmd),
-    /// Attach a local file to a resource.
-    Attach {
-        /// Resource id.
-        id: String,
-        /// Path to the file to attach.
-        path: PathBuf,
-    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
@@ -254,6 +247,9 @@ pub struct UpdateArgs {
     /// Remove a collection membership by id; repeatable.
     #[arg(long = "remove-collection")]
     pub remove_collections: Vec<String>,
+    /// Attach a local file; repeatable.
+    #[arg(long = "attach")]
+    pub attachments: Vec<PathBuf>,
 }
 
 impl UpdateArgs {
@@ -302,28 +298,7 @@ pub async fn run(
             classify(state, config, &id, engine, apply).await
         }
         ResourceAction::Note(cmd) => crate::note::run(state, cmd).await,
-        ResourceAction::Attach { id, path } => attach(state, &id, path).await,
     }
-}
-
-async fn attach(state: &AppState, id: &str, path: PathBuf) -> Result<()> {
-    let resource_id = ResourceId::parse(id).context("invalid resource id")?;
-    let Outcome::AddAttachment(attachment) = state
-        .execute(Command::AddAttachment(AddAttachment {
-            resource_id,
-            file_path: path,
-        }))
-        .await?
-    else {
-        bail!("unexpected outcome from add_attachment");
-    };
-    println!(
-        "{}  {}  {}",
-        attachment.id,
-        attachment.attachment_type,
-        attachment.file_path.display()
-    );
-    Ok(())
 }
 
 async fn classify(
@@ -835,7 +810,7 @@ async fn update(state: &AppState, args: UpdateArgs) -> Result<()> {
         bail!("unexpected outcome from get_resource");
     };
 
-    if !args.has_changes() && !args.favorite && !args.unfavorite {
+    if !args.has_changes() && !args.favorite && !args.unfavorite && args.attachments.is_empty() {
         bail!("nothing to update; pass a field flag");
     }
     let mut updated = existing;
@@ -860,6 +835,23 @@ async fn update(state: &AppState, args: UpdateArgs) -> Result<()> {
             bail!("unexpected outcome from set_resource_favorite");
         };
         updated = resource;
+    }
+    for path in &args.attachments {
+        let Outcome::AddAttachment(attachment) = state
+            .execute(Command::AddAttachment(AddAttachment {
+                resource_id: id,
+                file_path: path.clone(),
+            }))
+            .await?
+        else {
+            bail!("unexpected outcome from add_attachment");
+        };
+        println!(
+            "attachment  {}  {}  {}",
+            attachment.id,
+            attachment.attachment_type,
+            attachment.file_path.display()
+        );
     }
     println!(
         "{}  {}  {}",
@@ -1250,6 +1242,7 @@ mod tests {
             remove_tags: vec![],
             collections: vec![],
             remove_collections: vec![],
+            attachments: vec![],
             favorite: false,
             unfavorite: false,
         }

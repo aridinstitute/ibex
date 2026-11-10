@@ -1,7 +1,7 @@
 mod common;
 
 #[test]
-fn attach_file_shows_on_resource_detail() {
+fn update_attach_file_shows_on_resource_detail() {
     let dir = tempfile::tempdir().expect("temporary library");
     let pdf = dir.path().join("paper.pdf");
     std::fs::write(&pdf, b"%PDF-1.4 demo").expect("attachment file");
@@ -29,8 +29,9 @@ fn attach_file_shows_on_resource_detail() {
 
     let attached = run(&[
         "resource",
-        "attach",
+        "update",
         &resource_id,
+        "--attach",
         pdf.to_str().expect("utf-8 path"),
     ]);
     assert!(
@@ -39,11 +40,13 @@ fn attach_file_shows_on_resource_detail() {
         String::from_utf8_lossy(&attached.stderr)
     );
     let attached_out = String::from_utf8(attached.stdout).unwrap();
+    assert!(attached_out.contains("attachment"), "{attached_out}");
     assert!(attached_out.contains("pdf"), "{attached_out}");
     assert!(
         attached_out.contains("paper.pdf") || attached_out.contains(&*pdf.to_string_lossy()),
         "{attached_out}"
     );
+    assert!(attached_out.contains(&resource_id), "{attached_out}");
 
     let shown = run(&["resource", "show", &resource_id]);
     assert!(
@@ -57,8 +60,9 @@ fn attach_file_shows_on_resource_detail() {
 
     let missing = run(&[
         "resource",
-        "attach",
+        "update",
         &resource_id,
+        "--attach",
         dir.path().join("missing.pdf").to_str().unwrap(),
     ]);
     assert!(!missing.status.success(), "missing file must fail");
