@@ -6009,6 +6009,93 @@ impl LibraryApp {
                             }),
                     ),
             )
+            // Sidebar toggle + theme live at the rail foot (not in the
+            // content TitleBar).
+            .child(self.render_left_panel_footer(cx))
+    }
+
+    fn render_left_panel_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let hairline = pane_hairline(cx.theme().is_dark());
+        h_flex()
+            .id("left-panel-footer")
+            .test_support()
+            .flex_shrink_0()
+            .w_full()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_2()
+            .child(
+                Button::new("toggle-left-panel")
+                    .ghost()
+                    .icon(if self.left_panel_open {
+                        Icon::new(AssetIconName::PanelLeftClose).with_size(px(12.))
+                    } else {
+                        Icon::new(AssetIconName::PanelLeftOpen).with_size(px(12.))
+                    })
+                    .tooltip(if self.left_panel_open {
+                        "Hide left panel ([)"
+                    } else {
+                        "Show left panel ([)"
+                    })
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.toggle_left_panel(cx)
+                    })),
+            )
+            .child(div().flex_1())
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .pl_2()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(hairline)
+                    .id("toolbar-theme")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        Popover::new("theme-colors-popover")
+                            .anchor(Anchor::TopRight)
+                            .open(self.theme_editor_open)
+                            .track_focus(&self.theme_editor.focus_handle(cx))
+                            .on_open_change(cx.listener(|this, open: &bool, window, cx| {
+                                this.set_theme_editor_open(*open, window, cx);
+                            }))
+                            .trigger(
+                                Button::new("set-accent-color")
+                                    .ghost()
+                                    .label("●")
+                                    .text_color(cx.theme().primary)
+                                    .tooltip("Theme colors")
+                                    .disabled(
+                                        self.import_state != ImportState::Idle
+                                            || self.edit.is_some()
+                                            || self.has_inline(cx),
+                                    ),
+                            )
+                            .child(self.theme_editor.clone()),
+                    )
+                    .child(
+                        Button::new("toggle-theme")
+                            .ghost()
+                            .icon(if cx.theme().is_dark() {
+                                symbol("sun.max", IconName::Sun).with_size(px(12.))
+                            } else {
+                                symbol("moon", IconName::Moon).with_size(px(12.))
+                            })
+                            .tooltip(if cx.theme().is_dark() {
+                                "Switch to light theme"
+                            } else {
+                                "Switch to dark theme"
+                            })
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                cx.stop_propagation();
+                                let settings =
+                                    this.table.read(cx).delegate().settings.theme.clone();
+                                toggle_theme(&settings, cx);
+                            })),
+                    ),
+            )
     }
 
     /// The right-side sidebar: the edit form while one is open, the detail
@@ -7078,9 +7165,10 @@ impl Render for LibraryApp {
                             .flex_1()
                             .min_w_0()
                             .h_full()
+                            // Slim search chrome only — panel/theme/+ live elsewhere.
                             .child(
                                 TitleBar::new()
-                                    .h(px(48.))
+                                    .h(px(28.))
                                     .pl_0()
                                     .border_0()
                                     .bg(transparent_black())
@@ -7090,67 +7178,14 @@ impl Render for LibraryApp {
                                             .h_full()
                                             .items_center()
                                             .gap_2()
-                                            .px_2()
-                                            .child(
-                                                h_flex()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .child(
-                                                        Button::new("toggle-left-panel")
-                                                            .ghost()
-                                                            .icon(if self.left_panel_open {
-                                                                Icon::new(
-                                                                    AssetIconName::PanelLeftClose,
-                                                                )
-                                                                .with_size(px(12.))
-                                                            } else {
-                                                                Icon::new(
-                                                                    AssetIconName::PanelLeftOpen,
-                                                                )
-                                                                .with_size(px(12.))
-                                                            })
-                                                            .tooltip(if self.left_panel_open {
-                                                                "Hide left panel ([)"
-                                                            } else {
-                                                                "Show left panel ([)"
-                                                            })
-                                                            .on_click(cx.listener(
-                                                                |this, _, _window, cx| {
-                                                                    this.toggle_left_panel(cx)
-                                                                },
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        Button::new("toggle-filters")
-                                                            .ghost()
-                                                            .icon(
-                                                                symbol(
-                                                                    "line.3.horizontal.decrease",
-                                                                    IconName::Settings2,
-                                                                )
-                                                                .with_size(px(12.)),
-                                                            )
-                                                            .tooltip("Toggle filters")
-                                                            .selected(filters_visible)
-                                                            .when(filter_active, |button| {
-                                                                button
-                                                                    .text_color(cx.theme().primary)
-                                                            })
-                                                            .on_click(cx.listener(
-                                                                |this, _, _window, cx| {
-                                                                    this.toggle_filters(cx)
-                                                                },
-                                                            )),
-                                                    ),
-                                            )
+                                            .px_3()
+                                            .child(div().flex_1().min_w_0())
                                             .when_some(search_input.as_ref(), |bar, input| {
                                                 bar.child(
                                                     div()
                                                         .id("toolbar-search")
-                                                        .w(px(440.))
-                                                        .max_w(relative(0.5))
+                                                        .w(px(360.))
+                                                        .max_w(relative(0.55))
                                                         .on_mouse_down(
                                                             MouseButton::Left,
                                                             |_, _, cx| cx.stop_propagation(),
@@ -7158,16 +7193,16 @@ impl Render for LibraryApp {
                                                         .on_click(|_, _, cx| cx.stop_propagation())
                                                         .child(
                                                             Input::new(input)
-                                                                .min_h(px(32.))
-                                                                .rounded(px(10.))
+                                                                .min_h(px(16.))
+                                                                .rounded(px(8.))
                                                                 .bg(search_fill)
                                                                 .border_color(hairline)
-                                                                .px(px(12.))
-                                                                .py(px(6.))
-                                                                .text_size(px(12.))
+                                                                .px(px(10.))
+                                                                .py(px(2.))
+                                                                .text_size(px(11.))
                                                                 .prefix(
                                                                     Icon::new(IconName::Search)
-                                                                        .with_size(px(13.))
+                                                                        .with_size(px(11.))
                                                                         .text_color(
                                                                             cx.theme()
                                                                                 .muted_foreground,
@@ -7193,87 +7228,6 @@ impl Render for LibraryApp {
                                                     .min_w_0()
                                                     .items_center()
                                                     .justify_end()
-                                                    .child(
-                                                        Button::new("add-resource")
-                                                            .ghost()
-                                                            .icon(
-                                                                Icon::new(IconName::Plus)
-                                                                    .with_size(px(12.)),
-                                                            )
-                                                            .loading(
-                                                                self.import_state
-                                                                    != ImportState::Idle,
-                                                            )
-                                                            .disabled(
-                                                                self.import_state
-                                                                    != ImportState::Idle,
-                                                            )
-                                                            .tooltip(match self.import_state {
-                                                                ImportState::Idle => {
-                                                                    "Add resource"
-                                                                }
-                                                                ImportState::Choosing => {
-                                                                    "Choosing file…"
-                                                                }
-                                                                ImportState::Importing => {
-                                                                    "Importing…"
-                                                                }
-                                                            })
-                                                            .dropdown_menu_with_anchor(
-                                                                Anchor::TopRight,
-                                                                {
-                                                                    let app =
-                                                                        cx.entity().downgrade();
-                                                                    move |menu, window, _cx| {
-                                                                        let Some(app) =
-                                                                            app.upgrade()
-                                                                        else {
-                                                                            return menu;
-                                                                        };
-                                                                        menu.item(
-                                                                            PopupMenuItem::new(
-                                                                                "Add by ISBN or DOI…",
-                                                                            )
-                                                                            .on_click(
-                                                                                window
-                                                                                    .listener_for(
-                                                                                        &app,
-                                                                                        |this,
-                                                                                         _,
-                                                                                         window,
-                                                                                         cx| {
-                                                                                            if let Some(palette) = this.open_palette(window, cx) {
-                                                                                                palette.update(cx, |palette, cx| {
-                                                                                                    palette.open_identifier(window, cx)
-                                                                                                });
-                                                                                            }
-                                                                                        },
-                                                                                    ),
-                                                                            ),
-                                                                        )
-                                                                        .item(
-                                                                            PopupMenuItem::new(
-                                                                                "Import file…",
-                                                                            )
-                                                                            .on_click(
-                                                                                window
-                                                                                    .listener_for(
-                                                                                        &app,
-                                                                                        |this,
-                                                                                         _,
-                                                                                         window,
-                                                                                         cx| {
-                                                                                            this.import_biblatex(
-                                                                                                window, cx,
-                                                                                            )
-                                                                                        },
-                                                                                    ),
-                                                                            ),
-                                                                        )
-                                                                    }
-                                                                },
-                                                            ),
-                                                    )
                                                     .child(
                                                         Button::new("open-documentation")
                                                             .ghost()
@@ -7303,132 +7257,154 @@ impl Render for LibraryApp {
                                                                     }
                                                                 },
                                                             )),
-                                                    )
-                                                    .child(
-                                                        h_flex()
-                                                            .items_center()
-                                                            .mr(px(4.))
-                                                            .gap_1()
-                                                            .pl_2()
-                                                            .rounded(px(8.))
-                                                            .border_1()
-                                                            .border_color(hairline)
-                                                            .bg(fill)
-                                                            .id("toolbar-theme")
-                                                            .on_mouse_down(
-                                                                MouseButton::Left,
-                                                                |_, _, cx| cx.stop_propagation(),
-                                                            )
-                                                            .child(
-                                                                Popover::new(
-                                                                    "theme-colors-popover",
-                                                                )
-                                                                .anchor(Anchor::TopRight)
-                                                                .open(self.theme_editor_open)
-                                                                .track_focus(
-                                                                    &self
-                                                                        .theme_editor
-                                                                        .focus_handle(cx),
-                                                                )
-                                                                .on_open_change(cx.listener(
-                                                                    |this,
-                                                                     open: &bool,
-                                                                     window,
-                                                                     cx| {
-                                                                        this.set_theme_editor_open(
-                                                                            *open, window, cx,
-                                                                        );
-                                                                    },
-                                                                ))
-                                                                .trigger(
-                                                                    Button::new(
-                                                                        "set-accent-color",
-                                                                    )
-                                                                    .ghost()
-                                                                    .label("●")
-                                                                    .text_color(cx.theme().primary)
-                                                                    .tooltip("Theme colors")
-                                                                    .disabled(
-                                                                        self.import_state
-                                                                            != ImportState::Idle
-                                                                            || self.edit.is_some()
-                                                                            || self.has_inline(cx),
-                                                                    ),
-                                                                )
-                                                                .child(self.theme_editor.clone()),
-                                                            )
-                                                            .child(
-                                                                Button::new("toggle-theme")
-                                                                    .ghost()
-                                                                    .icon(
-                                                                        if cx.theme().is_dark() {
-                                                                            symbol(
-                                                                                "sun.max",
-                                                                                IconName::Sun,
-                                                                            )
-                                                                            .with_size(px(12.))
-                                                                        } else {
-                                                                            symbol(
-                                                                                "moon",
-                                                                                IconName::Moon,
-                                                                            )
-                                                                            .with_size(px(12.))
-                                                                        },
-                                                                    )
-                                                                    .tooltip(
-                                                                        if cx.theme().is_dark() {
-                                                                            "Switch to light theme"
-                                                                        } else {
-                                                                            "Switch to dark theme"
-                                                                        },
-                                                                    )
-                                                                    .on_click(cx.listener(
-                                                                        |this, _, _window, cx| {
-                                                                            cx.stop_propagation();
-                                                                            let settings = this
-                                                                                .table
-                                                                                .read(cx)
-                                                                                .delegate()
-                                                                                .settings
-                                                                                .theme
-                                                                                .clone();
-                                                                            toggle_theme(
-                                                                                &settings, cx,
-                                                                            );
-                                                                        },
-                                                                    )),
-                                                            ),
                                                     ),
                                             ),
                                     ),
                             )
-                            .child({
-                                let table = DataTable::new(&self.table)
-                                    .with_size(Size::XSmall)
-                                    .bordered(false)
-                                    .stripe(false)
-                                    .focus_ring(false)
-                                    .when_some(
-                                        header_row_height(filters_visible),
-                                        |table, height| table.header_row_height(height),
-                                    );
-                                let wrap = div()
-                                    .id("library-grid-viewport")
-                                    .test_support()
+                            .child(
+                                v_flex()
                                     .flex_1()
-                                    .min_w_0()
                                     .min_h_0()
-                                    .relative()
-                                    .bg(fill)
-                                    .overflow_hidden();
-                                if editing {
-                                    wrap.track_focus(&self.inline_trap)
-                                        .focus_trap("inline-edit-trap", &self.inline_trap)
-                                        .child(table)
-                                        .into_any_element()
-                                } else {
-                                    wrap.child(table).into_any_element()
-                                }
+                                    .min_w_0()
+                                    .px_3()
+                                    .pb_3()
+                                    .pt_1()
+                                    .gap_2()
+                                    // + and filters sit on the table card, not the TitleBar.
+                                    .child(
+                                        h_flex()
+                                            .id("library-table-chrome")
+                                            .test_support()
+                                            .w_full()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                Button::new("add-resource")
+                                                    .ghost()
+                                                    .icon(
+                                                        Icon::new(IconName::Plus).with_size(px(12.)),
+                                                    )
+                                                    .loading(
+                                                        self.import_state != ImportState::Idle,
+                                                    )
+                                                    .disabled(
+                                                        self.import_state != ImportState::Idle,
+                                                    )
+                                                    .tooltip(match self.import_state {
+                                                        ImportState::Idle => "Add resource",
+                                                        ImportState::Choosing => "Choosing file…",
+                                                        ImportState::Importing => "Importing…",
+                                                    })
+                                                    .dropdown_menu_with_anchor(Anchor::TopLeft, {
+                                                        let app = cx.entity().downgrade();
+                                                        move |menu, window, _cx| {
+                                                            let Some(app) = app.upgrade() else {
+                                                                return menu;
+                                                            };
+                                                            menu.item(
+                                                                PopupMenuItem::new(
+                                                                    "Add by ISBN or DOI…",
+                                                                )
+                                                                .on_click(window.listener_for(
+                                                                    &app,
+                                                                    |this, _, window, cx| {
+                                                                        if let Some(palette) = this
+                                                                            .open_palette(
+                                                                                window, cx,
+                                                                            )
+                                                                        {
+                                                                            palette.update(
+                                                                                cx,
+                                                                                |palette, cx| {
+                                                                                    palette
+                                                                                        .open_identifier(
+                                                                                            window,
+                                                                                            cx,
+                                                                                        )
+                                                                                },
+                                                                            );
+                                                                        }
+                                                                    },
+                                                                )),
+                                                            )
+                                                            .item(
+                                                                PopupMenuItem::new("Import file…")
+                                                                    .on_click(window.listener_for(
+                                                                        &app,
+                                                                        |this, _, window, cx| {
+                                                                            this.import_biblatex(
+                                                                                window, cx,
+                                                                            )
+                                                                        },
+                                                                    )),
+                                                            )
+                                                        }
+                                                    }),
+                                            )
+                                            .child(
+                                                Button::new("toggle-filters")
+                                                    .ghost()
+                                                    .icon(
+                                                        symbol(
+                                                            "line.3.horizontal.decrease",
+                                                            IconName::Settings2,
+                                                        )
+                                                        .with_size(px(12.)),
+                                                    )
+                                                    .tooltip("Toggle filters")
+                                                    .selected(filters_visible)
+                                                    .when(filter_active, |button| {
+                                                        button.text_color(cx.theme().primary)
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        |this, _, _window, cx| {
+                                                            this.toggle_filters(cx)
+                                                        },
+                                                    )),
+                                            )
+                                            .child(div().flex_1()),
+                                    )
+                                    .child({
+                                        let table = DataTable::new(&self.table)
+                                            .with_size(Size::XSmall)
+                                            .bordered(false)
+                                            .stripe(false)
+                                            .focus_ring(false)
+                                            .when_some(
+                                                header_row_height(filters_visible),
+                                                |table, height| table.header_row_height(height),
+                                            );
+                                        // Rounded inset card: fills remaining space and
+                                        // scrolls when rows overflow the viewport.
+                                        let table_shell: Hsla = if dark {
+                                            rgba(0xffffff0e).into()
+                                        } else {
+                                            rgba(0xffffff8c).into()
+                                        };
+                                        let wrap = div()
+                                            .id("library-grid-viewport")
+                                            .test_support()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .min_h_0()
+                                            .relative()
+                                            .rounded(px(12.))
+                                            .bg(table_shell)
+                                            .overflow_hidden();
+                                        if editing {
+                                            wrap.track_focus(&self.inline_trap)
+                                                .focus_trap("inline-edit-trap", &self.inline_trap)
+                                                .child(table)
+                                                .into_any_element()
+                                        } else {
+                                            wrap.child(table).into_any_element()
+                                        }
+                                    }),
+                            )
+                            // When the left rail is closed, keep reopen + theme
+                            // at the bottom-left of the content column.
+                            .when(!self.left_panel_open, |col| {
+                                col.child(self.render_left_panel_footer(cx))
                             }),
                     )
                     // Metadata ends at its fields. Notes fill the height left
