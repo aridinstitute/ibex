@@ -1,6 +1,8 @@
 mod biblatex_import;
 mod collection;
 mod health;
+mod note;
+pub use note::{CreateNote, DeleteNote, ListNotes, UpdateNote};
 mod person;
 pub(crate) mod resource;
 mod series;
@@ -41,6 +43,10 @@ use crate::event::Event;
 /// Variants carry already-validated domain inputs — parsing happens in the shell.
 #[derive(Debug, Clone)]
 pub enum Command {
+    CreateNote(CreateNote),
+    UpdateNote(UpdateNote),
+    DeleteNote(DeleteNote),
+    ListNotes(ListNotes),
     Health(Health),
     CreatePerson(CreatePerson),
     GetPerson(GetPerson),
@@ -83,6 +89,10 @@ pub enum Command {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "command", content = "result", rename_all = "snake_case")]
 pub enum Outcome {
+    CreateNote(ibex_core::Note),
+    UpdateNote(ibex_core::Note),
+    DeleteNote(()),
+    ListNotes(Vec<ibex_core::Note>),
     Health(HealthReport),
     CreatePerson(Person),
     GetPerson(Person),
@@ -153,6 +163,10 @@ impl Command {
     pub fn name(&self) -> &'static str {
         match self {
             Command::Health(_) => Health::NAME,
+            Command::CreateNote(_) => CreateNote::NAME,
+            Command::UpdateNote(_) => UpdateNote::NAME,
+            Command::DeleteNote(_) => DeleteNote::NAME,
+            Command::ListNotes(_) => ListNotes::NAME,
             Command::CreatePerson(_) => CreatePerson::NAME,
             Command::GetPerson(_) => GetPerson::NAME,
             Command::UpdatePerson(_) => UpdatePerson::NAME,
@@ -212,6 +226,10 @@ pub(crate) async fn dispatch(
 ) -> Result<Outcome, CommandError> {
     match cmd {
         Command::Health(c) => drive(c, state, ev).await,
+        Command::CreateNote(c) => drive(c, state, ev).await,
+        Command::UpdateNote(c) => drive(c, state, ev).await,
+        Command::DeleteNote(c) => drive(c, state, ev).await,
+        Command::ListNotes(c) => drive(c, state, ev).await,
         Command::CreatePerson(c) => drive(c, state, ev).await,
         Command::GetPerson(c) => drive(c, state, ev).await,
         Command::UpdatePerson(c) => drive(c, state, ev).await,

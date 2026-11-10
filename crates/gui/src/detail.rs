@@ -257,13 +257,17 @@ fn field_value_element(label: &str, lines: &[String], cx: &App) -> AnyElement {
 /// grid gives way when the window is too narrow to hold both — and scrollable
 /// when the field list outgrows the window.
 /// The loaded resource's identity, actions and metadata share one scroll area.
+/// Notes are a card stacked under this one, not a footer of this scroll.
 /// `extra_rows` are caller-built trailing fields (tags, collections,
 /// suggestions) appended after the metadata, in order. Ignored unless the
 /// panel is showing a loaded resource.
+/// `max_height` caps the card so a long field list scrolls. `None` fills the
+/// parent; the card still ends at its content when the list is shorter.
 pub fn render_panel(
     view: DetailView<'_>,
     actions: Option<AnyElement>,
     extra_rows: Vec<(SharedString, AnyElement)>,
+    max_height: Option<Pixels>,
     cx: &App,
 ) -> Div {
     let muted = cx.theme().muted_foreground;
@@ -355,18 +359,20 @@ pub fn render_panel(
     };
 
     v_flex()
-        .h_full()
         .flex_shrink_0()
         .w_full()
         .bg(cx.theme().background)
         .text_size(FIELD_TEXT_SIZE)
+        .when_some(max_height, |panel, max| panel.max_h(max))
+        .when(max_height.is_none(), |panel| panel.h_full())
         .child(
             div()
                 .id("detail-panel")
-                .flex_1()
-                .min_h_0()
+                .test_support()
                 .p_3()
                 .overflow_y_scroll()
+                .when_some(max_height, |scroll, max| scroll.max_h(max))
+                .when(max_height.is_none(), |scroll| scroll.flex_1().min_h_0())
                 .child(content),
         )
 }
@@ -500,6 +506,7 @@ mod tests {
                     super::DetailView::Fields(&self.0),
                     None,
                     Vec::new(),
+                    None,
                     cx,
                 ))
         }

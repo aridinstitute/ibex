@@ -83,6 +83,24 @@ pub fn collection_update_edges(
 /// Storage backend. Grows one method per capability a command needs.
 #[async_trait::async_trait]
 pub trait Store: Send + Sync + 'static {
+    /// Create a note linked to an existing resource. Blank content is invalid.
+    async fn create_note(
+        &self,
+        resource_id: crate::ResourceId,
+        content: crate::NoteContent,
+    ) -> Result<crate::Note, StoreError>;
+    /// Replace content without changing the note's resource or creation time.
+    async fn update_note(
+        &self,
+        id: crate::NoteId,
+        content: crate::NoteContent,
+    ) -> Result<crate::Note, StoreError>;
+    async fn delete_note(&self, id: crate::NoteId) -> Result<(), StoreError>;
+    /// Notes for one existing resource, oldest first with id as a stable tie-breaker.
+    async fn list_notes(
+        &self,
+        resource_id: crate::ResourceId,
+    ) -> Result<Vec<crate::Note>, StoreError>;
     /// Cheap liveness probe. Must not mutate state.
     async fn ping(&self) -> Result<StoreHealth, StoreError>;
 

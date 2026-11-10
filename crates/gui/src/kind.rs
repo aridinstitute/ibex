@@ -8,7 +8,9 @@ use gpui_kit::{AssetSource, Hsla, Result, SharedString, rgb};
 use ibex_core::ResourceKind;
 
 // Every icon `kind_icon` returns must be listed here, or it renders blank:
-// only the component defaults are embedded otherwise.
+// only the component defaults are embedded otherwise. Trash is not a kind
+// icon, but it is also missing from those defaults, so the notes delete
+// button embeds it here.
 icon_assets!(
     KindIcons,
     [
@@ -31,7 +33,8 @@ icon_assets!(
         Presentation,
         Radio,
         Rss,
-        ScrollText
+        ScrollText,
+        Trash
     ]
 );
 

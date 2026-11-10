@@ -12,6 +12,7 @@ mod jev;
 mod kind;
 mod library;
 mod metadata;
+mod notes;
 mod settings;
 mod tags;
 mod theme;
@@ -121,6 +122,7 @@ fn run() -> Result<()> {
         .with_assets(AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            #[cfg(target_os = "macos")]
             apply_app_icon();
             crate::theme::apply(cx.window_appearance().into(), &settings.theme, cx);
             bind_library_keys(cx);
@@ -206,6 +208,7 @@ fn show_startup_error(message: String) {
         .with_assets(AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            #[cfg(target_os = "macos")]
             apply_app_icon();
             cx.on_window_closed(|_, _| std::process::exit(1)).detach();
             let opened = gpui_kit::open_window(

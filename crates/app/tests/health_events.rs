@@ -59,6 +59,29 @@ struct HangStore;
 
 #[async_trait::async_trait]
 impl Store for HangStore {
+    async fn create_note(
+        &self,
+        _: ibex_core::ResourceId,
+        _: ibex_core::NoteContent,
+    ) -> Result<ibex_core::Note, ibex_core::StoreError> {
+        Err(ibex_core::StoreError::new("notes unsupported"))
+    }
+    async fn update_note(
+        &self,
+        _: ibex_core::NoteId,
+        _: ibex_core::NoteContent,
+    ) -> Result<ibex_core::Note, ibex_core::StoreError> {
+        Err(ibex_core::StoreError::new("notes unsupported"))
+    }
+    async fn delete_note(&self, _: ibex_core::NoteId) -> Result<(), ibex_core::StoreError> {
+        Err(ibex_core::StoreError::new("notes unsupported"))
+    }
+    async fn list_notes(
+        &self,
+        _: ibex_core::ResourceId,
+    ) -> Result<Vec<ibex_core::Note>, ibex_core::StoreError> {
+        Err(ibex_core::StoreError::new("notes unsupported"))
+    }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         std::future::pending().await
     }

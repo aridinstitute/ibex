@@ -226,6 +226,7 @@ pub struct MemoryStore {
     collection_child_of: Arc<Mutex<Vec<(CollectionId, CollectionId)>>>,
     resources: Arc<Mutex<HashMap<ResourceId, ResourceRow>>>,
     attachments: Arc<Mutex<HashMap<ibex_core::AttachmentId, ibex_core::Attachment>>>,
+    notes: Arc<Mutex<HashMap<ibex_core::NoteId, ibex_core::Note>>>,
     created: Arc<Mutex<Vec<CreatedEdge>>>,
     /// When set, the Nth subsequent `create_imported_resource` fails (0-based).
     import_fail_at: Arc<Mutex<Option<usize>>>,
@@ -249,6 +250,7 @@ impl MemoryStore {
             collection_child_of: Arc::new(Mutex::new(Vec::new())),
             resources: Arc::new(Mutex::new(HashMap::new())),
             attachments: Arc::new(Mutex::new(HashMap::new())),
+            notes: Arc::new(Mutex::new(HashMap::new())),
             created: Arc::new(Mutex::new(Vec::new())),
             import_fail_at: Arc::new(Mutex::new(None)),
             import_create_count: Arc::new(Mutex::new(0)),
@@ -624,6 +626,62 @@ impl Default for MemoryStore {
 
 #[async_trait::async_trait]
 impl Store for MemoryStore {
+    async fn create_note(
+        &self,
+        resource_id: ResourceId,
+        content: ibex_core::NoteContent,
+    ) -> Result<ibex_core::Note, StoreError> {
+        content.validate()?;
+        self.get_resource(resource_id).await?;
+        let now = UtcMillis::now();
+        let note = ibex_core::Note {
+            id: ibex_core::NoteId::generate(),
+            resource_id: Some(resource_id),
+            content,
+            created_at: now,
+            updated_at: now,
+        };
+        self.notes.lock().unwrap().insert(note.id, note.clone());
+        Ok(note)
+    }
+    async fn update_note(
+        &self,
+        id: ibex_core::NoteId,
+        content: ibex_core::NoteContent,
+    ) -> Result<ibex_core::Note, StoreError> {
+        content.validate()?;
+        let mut notes = self.notes.lock().unwrap();
+        let note = notes
+            .get_mut(&id)
+            .ok_or_else(|| StoreError::not_found(format!("note {id}")))?;
+        note.content = content;
+        note.updated_at = UtcMillis::now();
+        Ok(note.clone())
+    }
+    async fn delete_note(&self, id: ibex_core::NoteId) -> Result<(), StoreError> {
+        self.notes
+            .lock()
+            .unwrap()
+            .remove(&id)
+            .ok_or_else(|| StoreError::not_found(format!("note {id}")))?;
+        Ok(())
+    }
+    async fn list_notes(
+        &self,
+        resource_id: ResourceId,
+    ) -> Result<Vec<ibex_core::Note>, StoreError> {
+        self.get_resource(resource_id).await?;
+        let mut notes: Vec<_> = self
+            .notes
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|n| n.resource_id == Some(resource_id))
+            .cloned()
+            .collect();
+        notes.sort_by_key(|n| (n.created_at.as_unix_ms(), n.id.to_string()));
+        Ok(notes)
+    }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         Ok(StoreHealth {
             backend: "memory",
@@ -1578,6 +1636,29 @@ fn unsupported(op: &str) -> StoreError {
 
 #[async_trait::async_trait]
 impl Store for StubStore {
+    async fn create_note(
+        &self,
+        _: ibex_core::ResourceId,
+        _: ibex_core::NoteContent,
+    ) -> Result<ibex_core::Note, ibex_core::StoreError> {
+        Err(ibex_core::StoreError::new("notes unsupported"))
+    }
+    async fn update_note(
+        &self,
+        _: ibex_core::NoteId,
+        _: ibex_core::NoteContent,
+    ) -> Result<ibex_core::Note, ibex_core::StoreError> {
+        Err(ibex_core::StoreError::new("notes unsupported"))
+    }
+    async fn delete_note(&self, _: ibex_core::NoteId) -> Result<(), ibex_core::StoreError> {
+        Err(ibex_core::StoreError::new("notes unsupported"))
+    }
+    async fn list_notes(
+        &self,
+        _: ibex_core::ResourceId,
+    ) -> Result<Vec<ibex_core::Note>, ibex_core::StoreError> {
+        Err(ibex_core::StoreError::new("notes unsupported"))
+    }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         match &self.health {
             Ok(h) => Ok(h.clone()),

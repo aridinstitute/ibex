@@ -27,6 +27,10 @@ pub(crate) const STORE_LATENCY_US: Key = Key::new("store.latency_us");
 pub(crate) const PERSON_ID: Key = Key::new("person.id");
 pub(crate) const PERSON_DISPLAY: Key = Key::new("person.display");
 pub(crate) const RESOURCE_ID: Key = Key::new("resource.id");
+pub(crate) const NOTE_ID: Key = Key::new("note.id");
+pub(crate) const NOTE_KIND: Key = Key::new("note.kind");
+pub(crate) const NOTE_LOCATION_COUNT: Key = Key::new("note.location_count");
+pub(crate) const NOTE_COUNT: Key = Key::new("note.count");
 pub(crate) const RESOURCE_KIND: Key = Key::new("resource.kind");
 pub(crate) const RESOURCE_TITLE: Key = Key::new("resource.title");
 pub(crate) const RESOURCE_CHANGED_FIELDS: Key = Key::new("resource.changed_fields");
@@ -85,6 +89,10 @@ mod tests {
         PERSON_ID,
         PERSON_DISPLAY,
         RESOURCE_ID,
+        NOTE_ID,
+        NOTE_KIND,
+        NOTE_LOCATION_COUNT,
+        NOTE_COUNT,
         RESOURCE_KIND,
         RESOURCE_TITLE,
         RESOURCE_CHANGED_FIELDS,
