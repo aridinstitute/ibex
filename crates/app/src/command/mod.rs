@@ -2,7 +2,7 @@ mod biblatex_import;
 mod collection;
 mod health;
 mod note;
-pub use note::{CreateNote, DeleteNote, ListNotes, UpdateNote};
+pub use note::{CreateNote, DeleteNote, GetNote, ListNotes, UpdateNote};
 mod person;
 pub(crate) mod resource;
 mod series;
@@ -44,6 +44,7 @@ use crate::event::Event;
 #[derive(Debug, Clone)]
 pub enum Command {
     CreateNote(CreateNote),
+    GetNote(GetNote),
     UpdateNote(UpdateNote),
     DeleteNote(DeleteNote),
     ListNotes(ListNotes),
@@ -90,6 +91,7 @@ pub enum Command {
 #[serde(tag = "command", content = "result", rename_all = "snake_case")]
 pub enum Outcome {
     CreateNote(ibex_core::Note),
+    GetNote(ibex_core::Note),
     UpdateNote(ibex_core::Note),
     DeleteNote(()),
     ListNotes(Vec<ibex_core::Note>),
@@ -164,6 +166,7 @@ impl Command {
         match self {
             Command::Health(_) => Health::NAME,
             Command::CreateNote(_) => CreateNote::NAME,
+            Command::GetNote(_) => GetNote::NAME,
             Command::UpdateNote(_) => UpdateNote::NAME,
             Command::DeleteNote(_) => DeleteNote::NAME,
             Command::ListNotes(_) => ListNotes::NAME,
@@ -227,6 +230,7 @@ pub(crate) async fn dispatch(
     match cmd {
         Command::Health(c) => drive(c, state, ev).await,
         Command::CreateNote(c) => drive(c, state, ev).await,
+        Command::GetNote(c) => drive(c, state, ev).await,
         Command::UpdateNote(c) => drive(c, state, ev).await,
         Command::DeleteNote(c) => drive(c, state, ev).await,
         Command::ListNotes(c) => drive(c, state, ev).await,

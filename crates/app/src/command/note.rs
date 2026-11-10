@@ -8,6 +8,10 @@ pub struct CreateNote {
     pub content: NoteContent,
 }
 #[derive(Debug, Clone)]
+pub struct GetNote {
+    pub id: NoteId,
+}
+#[derive(Debug, Clone)]
 pub struct UpdateNote {
     pub id: NoteId,
     pub content: NoteContent,
@@ -48,6 +52,19 @@ impl Handler for CreateNote {
             .map_err(map_error)?;
         ev.set(event::NOTE_ID, note.id.to_string());
         Ok(Outcome::CreateNote(note))
+    }
+}
+#[async_trait::async_trait]
+impl Handler for GetNote {
+    const NAME: &'static str = "get_note";
+    type Output = Outcome;
+    fn annotate(&self, ev: &mut Event) {
+        ev.set(event::NOTE_ID, self.id.to_string());
+    }
+    async fn run(self, state: &AppState, _: &mut Event) -> Result<Outcome, CommandError> {
+        Ok(Outcome::GetNote(
+            state.store().get_note(self.id).await.map_err(map_error)?,
+        ))
     }
 }
 #[async_trait::async_trait]

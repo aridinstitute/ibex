@@ -1,10 +1,11 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use std::io::Write;
+use std::path::PathBuf;
 
 use ibex_app::command::{
-    CreateResource, GetResource, GetResourceDetail, ListResourceGridPage, ListResourcesPage,
-    ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
+    AddAttachment, CreateResource, GetResource, GetResourceDetail, ListNotes, ListResourceGridPage,
+    ListResourcesPage, ListResourcesQueryPage, SetResourceFavorite, UpdateResource,
 };
 use ibex_app::{AppState, Command, Outcome};
 use ibex_core::{
@@ -13,6 +14,8 @@ use ibex_core::{
     ResourceGridRow, ResourceId, ResourceKind, ResourceQuery, ResourceSort, ResourceSummary,
     SeriesId, SortDirection, TagId, UtcMillis, format_published_label, format_recorded_date,
 };
+
+use crate::note::NoteCmd;
 
 #[derive(Debug, Args)]
 pub struct ResourceCmd {
@@ -29,12 +32,9 @@ pub enum ResourceAction {
     Show { id: String },
     /// Create a resource with manually provided metadata.
     Add(AddArgs),
-    /// Fetch ISBN/DOI metadata and store a new resource, or fill gaps on an existing one.
-    Fetch {
-        identifier: String,
-        #[arg(long)]
-        update: Option<String>,
-    },
+    /// Fetch ISBN/DOI metadata and create a new resource.
+    /// To fill gaps on an existing resource, use `resource update --fetch`.
+    Fetch { identifier: String },
     /// Preview collection suggestions; --apply attaches them.
     Classify {
         id: String,
@@ -46,6 +46,8 @@ pub enum ResourceAction {
     /// Update a resource by id. Only the fields whose flags are set change;
     /// the rest keep their stored values.
     Update(UpdateArgs),
+    /// Manage Markdown notes linked to a resource.
+    Note(NoteCmd),
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
@@ -242,6 +244,12 @@ pub struct UpdateArgs {
     /// Remove a collection membership by id; repeatable.
     #[arg(long = "remove-collection")]
     pub remove_collections: Vec<String>,
+    /// Attach a local file; repeatable.
+    #[arg(long = "attach")]
+    pub attachments: Vec<PathBuf>,
+    /// Fill metadata gaps from an ISBN or DOI.
+    #[arg(long = "fetch")]
+    pub fetch: Option<String>,
 }
 
 impl UpdateArgs {
@@ -282,13 +290,12 @@ pub async fn run(
         ResourceAction::List(args) => list(state, args).await,
         ResourceAction::Show { id } => show(state, &id).await,
         ResourceAction::Add(args) => add(state, args).await,
-        ResourceAction::Fetch { identifier, update } => {
-            fetch(state, &identifier, update.as_deref()).await
-        }
+        ResourceAction::Fetch { identifier } => fetch(state, &identifier).await,
         ResourceAction::Update(args) => update(state, args).await,
         ResourceAction::Classify { id, engine, apply } => {
             classify(state, config, &id, engine, apply).await
         }
+        ResourceAction::Note(cmd) => crate::note::run(state, cmd).await,
     }
 }
 
@@ -390,11 +397,8 @@ fn validate_jev_endpoint(endpoint: &str) -> Result<()> {
     Ok(())
 }
 
-async fn fetch(state: &AppState, identifier: &str, update: Option<&str>) -> Result<()> {
-    let target = update
-        .map(|id| ResourceId::parse(id).context("invalid --update resource id"))
-        .transpose()?;
-    let resource = ibex_app::metadata::fetch(state, identifier, target)
+async fn fetch(state: &AppState, identifier: &str) -> Result<()> {
+    let resource = ibex_app::metadata::fetch(state, identifier, None)
         .await
         .map_err(|message| anyhow!(message))?;
     println!(
@@ -533,6 +537,19 @@ async fn show(state: &AppState, id: &str) -> Result<()> {
                     .map(str::to_owned)
                     .unwrap_or_else(|| value.to_string())
             );
+        }
+    }
+    let Outcome::ListNotes(notes) = state
+        .execute(Command::ListNotes(ListNotes { resource_id: id }))
+        .await?
+    else {
+        bail!("unexpected outcome from list_notes");
+    };
+    if !notes.is_empty() {
+        println!("notes:");
+        for note in notes {
+            print!("  ");
+            crate::note::print_note_summary(&note);
         }
     }
     Ok(())
@@ -788,10 +805,20 @@ async fn update(state: &AppState, args: UpdateArgs) -> Result<()> {
         bail!("unexpected outcome from get_resource");
     };
 
-    if !args.has_changes() && !args.favorite && !args.unfavorite {
+    if !args.has_changes()
+        && !args.favorite
+        && !args.unfavorite
+        && args.attachments.is_empty()
+        && args.fetch.is_none()
+    {
         bail!("nothing to update; pass a field flag");
     }
     let mut updated = existing;
+    if let Some(identifier) = &args.fetch {
+        updated = ibex_app::metadata::fetch(state, identifier, Some(id))
+            .await
+            .map_err(|message| anyhow!(message))?;
+    }
     if args.has_changes() {
         let new = merge_update(&updated, &args)?;
         let Outcome::UpdateResource(resource) = state
@@ -813,6 +840,23 @@ async fn update(state: &AppState, args: UpdateArgs) -> Result<()> {
             bail!("unexpected outcome from set_resource_favorite");
         };
         updated = resource;
+    }
+    for path in &args.attachments {
+        let Outcome::AddAttachment(attachment) = state
+            .execute(Command::AddAttachment(AddAttachment {
+                resource_id: id,
+                file_path: path.clone(),
+            }))
+            .await?
+        else {
+            bail!("unexpected outcome from add_attachment");
+        };
+        println!(
+            "attachment  {}  {}  {}",
+            attachment.id,
+            attachment.attachment_type,
+            attachment.file_path.display()
+        );
     }
     println!(
         "{}  {}  {}",
@@ -1203,6 +1247,8 @@ mod tests {
             remove_tags: vec![],
             collections: vec![],
             remove_collections: vec![],
+            attachments: vec![],
+            fetch: None,
             favorite: false,
             unfavorite: false,
         }
