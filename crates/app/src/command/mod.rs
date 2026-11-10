@@ -2,7 +2,7 @@ mod biblatex_import;
 mod collection;
 mod health;
 mod note;
-pub use note::{CreateNote, DeleteNote, ListNotes, UpdateNote};
+pub use note::{CreateNote, DeleteNote, ListNoteFeed, ListNotes, UpdateNote};
 mod person;
 pub(crate) mod resource;
 mod series;
@@ -47,6 +47,7 @@ pub enum Command {
     UpdateNote(UpdateNote),
     DeleteNote(DeleteNote),
     ListNotes(ListNotes),
+    ListNoteFeed(ListNoteFeed),
     Health(Health),
     CreatePerson(CreatePerson),
     GetPerson(GetPerson),
@@ -93,6 +94,7 @@ pub enum Outcome {
     UpdateNote(ibex_core::Note),
     DeleteNote(()),
     ListNotes(Vec<ibex_core::Note>),
+    ListNoteFeed(Vec<ibex_core::NoteFeedItem>),
     Health(HealthReport),
     CreatePerson(Person),
     GetPerson(Person),
@@ -167,6 +169,7 @@ impl Command {
             Command::UpdateNote(_) => UpdateNote::NAME,
             Command::DeleteNote(_) => DeleteNote::NAME,
             Command::ListNotes(_) => ListNotes::NAME,
+            Command::ListNoteFeed(_) => ListNoteFeed::NAME,
             Command::CreatePerson(_) => CreatePerson::NAME,
             Command::GetPerson(_) => GetPerson::NAME,
             Command::UpdatePerson(_) => UpdatePerson::NAME,
@@ -230,6 +233,7 @@ pub(crate) async fn dispatch(
         Command::UpdateNote(c) => drive(c, state, ev).await,
         Command::DeleteNote(c) => drive(c, state, ev).await,
         Command::ListNotes(c) => drive(c, state, ev).await,
+        Command::ListNoteFeed(c) => drive(c, state, ev).await,
         Command::CreatePerson(c) => drive(c, state, ev).await,
         Command::GetPerson(c) => drive(c, state, ev).await,
         Command::UpdatePerson(c) => drive(c, state, ev).await,

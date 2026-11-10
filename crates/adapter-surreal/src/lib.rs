@@ -1,4 +1,4 @@
-use ibex_core::{Note, NoteContent, NoteId};
+use ibex_core::{Note, NoteContent, NoteFeedItem, NoteId};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
@@ -351,6 +351,13 @@ struct GridLinkRow {
     id: RecordId,
     #[surreal(default)]
     parent: Option<RecordId>,
+}
+
+#[derive(Debug, SurrealValue)]
+struct ResourceTitleRow {
+    id: RecordId,
+    #[surreal(wrap)]
+    title: NonEmptyStr,
 }
 
 #[derive(Debug, SurrealValue)]
@@ -1693,6 +1700,28 @@ impl SurrealStore {
         .map_err(|e| StoreError::invalid(e.to_string()))
     }
 
+    async fn resource_titles(
+        &self,
+        ids: &[ResourceId],
+    ) -> Result<HashMap<ResourceId, NonEmptyStr>, StoreError> {
+        let mut titles = HashMap::new();
+        if ids.is_empty() {
+            return Ok(titles);
+        }
+        let things: Vec<RecordId> = ids.iter().copied().map(Self::resource_key).collect();
+        let mut response = self
+            .db
+            .query("SELECT id, title FROM resource WHERE id IN $ids")
+            .bind(("ids", things))
+            .await
+            .map_err(map_err)?;
+        let rows: Vec<ResourceTitleRow> = response.take(0).map_err(map_err)?;
+        for row in rows {
+            titles.insert(Self::thing_to_resource_id(&row.id)?, row.title);
+        }
+        Ok(titles)
+    }
+
     async fn fetch_inheritance_ancestors(
         &self,
         by_id: &mut HashMap<ResourceId, Resource>,
@@ -1838,6 +1867,58 @@ impl Store for SurrealStore {
         let rows: Vec<NoteDoc> = response.take(0).map_err(map_err)?;
         rows.into_iter().map(NoteDoc::into_note).collect()
     }
+
+    async fn list_note_feed(
+        &self,
+        resource_id: Option<ResourceId>,
+    ) -> Result<Vec<NoteFeedItem>, StoreError> {
+        if let Some(resource_id) = resource_id {
+            self.get_resource(resource_id).await?;
+        }
+        let mut response = match resource_id {
+            Some(resource_id) => self
+                .db
+                .query(
+                    "SELECT * FROM note WHERE resource = $resource \
+                     ORDER BY updated_at DESC, id DESC",
+                )
+                .bind(("resource", Self::resource_key(resource_id)))
+                .await
+                .map_err(map_err)?
+                .check()
+                .map_err(map_err)?,
+            None => self
+                .db
+                .query("SELECT * FROM note ORDER BY updated_at DESC, id DESC")
+                .await
+                .map_err(map_err)?
+                .check()
+                .map_err(map_err)?,
+        };
+        let rows: Vec<NoteDoc> = response.take(0).map_err(map_err)?;
+        let notes: Vec<Note> = rows
+            .into_iter()
+            .map(NoteDoc::into_note)
+            .collect::<Result<_, _>>()?;
+        let resource_ids: Vec<ResourceId> = notes
+            .iter()
+            .filter_map(|note| note.resource_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let titles = self.resource_titles(&resource_ids).await?;
+        Ok(notes
+            .into_iter()
+            .map(|note| {
+                let resource_title = note.resource_id.and_then(|id| titles.get(&id).cloned());
+                NoteFeedItem {
+                    note,
+                    resource_title,
+                }
+            })
+            .collect())
+    }
+
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         self.db.query("RETURN true").await.map_err(map_err)?;
         Ok(StoreHealth {

@@ -13,6 +13,7 @@ mod kind;
 mod library;
 mod metadata;
 mod notes;
+mod notes_feed;
 mod settings;
 mod tags;
 mod theme;

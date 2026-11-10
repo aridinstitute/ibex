@@ -114,6 +114,14 @@ pub struct Note {
     pub updated_at: UtcMillis,
 }
 
+/// One row in the cross-resource notes feed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NoteFeedItem {
+    pub note: Note,
+    /// Title of the linked resource when the note still has one.
+    pub resource_title: Option<crate::NonEmptyStr>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::NoteId;

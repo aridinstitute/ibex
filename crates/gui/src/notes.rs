@@ -17,7 +17,7 @@ gpui_kit::actions!([AddNote]);
 /// Text color for a note type. Light variants stay deep enough to read on
 /// the white card; dark variants lift the same hue. The four hues sit well
 /// apart so Summary, Quote, Paraphrase, and Note stay distinct.
-fn note_kind_color(kind: NoteKind, dark: bool) -> Hsla {
+pub(crate) fn note_kind_color(kind: NoteKind, dark: bool) -> Hsla {
     let hex = match (kind, dark) {
         (NoteKind::Note, false) => 0x0369a1,
         (NoteKind::Note, true) => 0x38bdf8,

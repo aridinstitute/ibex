@@ -40,7 +40,7 @@ pub use inheritance::{
     ValueOrigin, fields_inherited_from, gather_ancestors, is_never_inherited, never_inherited,
     resolve_effective,
 };
-pub use note::{CitationLocation, LocationKind, Note, NoteContent, NoteId, NoteKind};
+pub use note::{CitationLocation, LocationKind, Note, NoteContent, NoteFeedItem, NoteId, NoteKind};
 pub use pages::{PageBound, PageSpan, Pages, deserialize_pages_opt};
 pub use person::{Name, NameError, NameKey, NonEmptyStr, Person, PersonError, PersonId};
 pub use resource::{
