@@ -53,7 +53,7 @@ enum Commands {
     /// Manage people in the library.
     Person(PersonCmd),
     /// Manage resources in the library.
-    Resource(ResourceCmd),
+    Resource(Box<ResourceCmd>),
     /// Manage tags in the library.
     Tag(TagCmd),
 }
@@ -104,7 +104,7 @@ async fn run() -> Result<()> {
         Commands::Collection(cmd) => collection::run(&state, cmd).await?,
         Commands::Import(args) => import::run(&state, args).await?,
         Commands::Person(cmd) => person::run(&state, cmd).await?,
-        Commands::Resource(cmd) => resource::run(&state, cmd, &config).await?,
+        Commands::Resource(cmd) => resource::run(&state, *cmd, &config).await?,
         Commands::Tag(cmd) => tag::run(&state, cmd).await?,
     }
     Ok(())
@@ -148,9 +148,12 @@ mod tests {
         let cli = Cli::try_parse_from(["ibex", "resource", "list"]).expect("valid args");
         assert!(matches!(
             cli.command,
-            Commands::Resource(ResourceCmd {
-                action: ResourceAction::List(_)
-            })
+            Commands::Resource(cmd) if matches!(
+                *cmd,
+                ResourceCmd {
+                    action: ResourceAction::List(_)
+                }
+            )
         ));
     }
 
@@ -172,9 +175,12 @@ mod tests {
             "Retitled",
         ])
         .expect("valid args");
-        let Commands::Resource(ResourceCmd {
+        let Commands::Resource(cmd) = cli.command else {
+            panic!("expected update action");
+        };
+        let ResourceCmd {
             action: ResourceAction::Update(args),
-        }) = cli.command
+        } = *cmd
         else {
             panic!("expected update action");
         };
@@ -229,9 +235,12 @@ mod tests {
             "page=12",
         ])
         .expect("valid args");
-        let Commands::Resource(ResourceCmd {
+        let Commands::Resource(cmd) = cli.command else {
+            panic!("expected resource note");
+        };
+        let ResourceCmd {
             action: ResourceAction::Note(note),
-        }) = cli.command
+        } = *cmd
         else {
             panic!("expected resource note");
         };
@@ -257,9 +266,12 @@ mod tests {
             "9780306406157",
         ])
         .expect("valid args");
-        let Commands::Resource(ResourceCmd {
+        let Commands::Resource(cmd) = cli.command else {
+            panic!("expected resource update");
+        };
+        let ResourceCmd {
             action: ResourceAction::Update(args),
-        }) = cli.command
+        } = *cmd
         else {
             panic!("expected resource update");
         };
