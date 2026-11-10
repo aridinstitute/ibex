@@ -39,21 +39,21 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     // Keep head/row surfaces the SAME alpha — a raised head band reads as the
     // "weird line" under Title/Authors and breaks header→content seamlessness.
     let glass = if dark {
-        rgba(0x14182055) // ~33% ink
+        rgba(0x14182055) // ~33% ink — keep dark vivid/glassy
     } else {
-        rgba(0xffffff4d) // ~30% white
+        rgba(0xffffff80) // denser frost; light wash stays restrained
     }
     .into();
     let glass_raised = if dark {
         rgba(0x1c223070)
     } else {
-        rgba(0xffffff66)
+        rgba(0xffffff8c)
     }
     .into();
     let glass_hover = if dark {
         rgba(0xffffff14)
     } else {
-        rgba(0x0000000f)
+        rgba(0x0000000a)
     }
     .into();
     // Invisible by default: DataTable paints `border_b` with table_row_border
@@ -226,12 +226,14 @@ mod tests {
             assert!(colors.list_active.a < 1., "dropdown highlights tint");
             assert!(colors.selection.a < 1., "text selection tints");
             // Surfaces go glass: translucent so the workspace wash reads through.
+            // Dark stays translucent; light may be denser frost (restrained wash).
+            let max_a = if mode.is_dark() { 0.45 } else { 0.55 };
             assert!(
-                colors.background.a < 0.45,
+                colors.background.a < max_a,
                 "background should be a glass sheet, got a={}",
                 colors.background.a
             );
-            assert!(colors.table.a < 0.45, "table should be glass");
+            assert!(colors.table.a < max_a, "table should be glass");
             assert_eq!(
                 colors.table_head.a, 0.,
                 "table head must be clear (no raised header band over the wash)"
