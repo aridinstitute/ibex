@@ -2,6 +2,10 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
+use ibex_app::cluster::{
+    DEFAULT_KEYWORD_TERMS, DEFAULT_LABEL_TERMS, DEFAULT_MIN_TOPIC_SIZE, SuggestClusters,
+    TextSource, apply_clusters, suggest_clusters,
+};
 use ibex_app::command::{
     CreateCollection, DeleteCollection, ListCollectionForest, UpdateCollection,
 };
@@ -48,11 +52,36 @@ pub enum CollectionAction {
         #[arg(long)]
         no_jev: bool,
     },
+    /// Cluster resources into topic collections (BerTopic-style).
+    ///
+    /// Prefers extractable attachment text; otherwise uses title, subtitle,
+    /// abstract, and keywords. Preview by default; pass --apply to create
+    /// collections and attach members.
+    Cluster {
+        /// Create collections and attach resources.
+        #[arg(long)]
+        apply: bool,
+        /// Minimum resources required to keep a topic.
+        #[arg(long, default_value_t = DEFAULT_MIN_TOPIC_SIZE)]
+        min_size: usize,
+        /// Optional parent collection for newly created topics.
+        #[arg(long)]
+        parent: Option<String>,
+    },
     /// Delete a collection using the library's cascade rules.
     Delete { id: String },
 }
 
 pub async fn run(state: &AppState, cmd: CollectionCmd) -> Result<()> {
+    if let CollectionAction::Cluster {
+        apply,
+        min_size,
+        parent,
+    } = &cmd.action
+    {
+        return cluster(state, *apply, *min_size, parent.as_deref()).await;
+    }
+
     let Outcome::ListCollectionForest(forest) = state
         .execute(Command::ListCollectionForest(ListCollectionForest))
         .await?
@@ -60,6 +89,7 @@ pub async fn run(state: &AppState, cmd: CollectionCmd) -> Result<()> {
         bail!("unexpected outcome from list_collection_forest");
     };
     match cmd.action {
+        CollectionAction::Cluster { .. } => unreachable!("handled above"),
         CollectionAction::Delete { id } => {
             let id = CollectionId::parse(&id).context("invalid collection id")?;
             let Outcome::DeleteCollection(_) = state
@@ -167,6 +197,93 @@ pub async fn run(state: &AppState, cmd: CollectionCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn cluster(
+    state: &AppState,
+    apply: bool,
+    min_size: usize,
+    parent: Option<&str>,
+) -> Result<()> {
+    let parent_id = parent
+        .map(CollectionId::parse)
+        .transpose()
+        .context("invalid parent collection id")?;
+    let suggestion = suggest_clusters(
+        state,
+        SuggestClusters {
+            min_topic_size: min_size,
+            label_terms: DEFAULT_LABEL_TERMS,
+            keyword_terms: DEFAULT_KEYWORD_TERMS,
+        },
+    )
+    .await?;
+
+    if suggestion.report.topics.is_empty() && suggestion.report.outliers.is_empty() {
+        println!("(none)");
+        return Ok(());
+    }
+
+    if apply {
+        let applied = apply_clusters(state, &suggestion, parent_id).await?;
+        for (topic, created) in suggestion.report.topics.iter().zip(applied.iter()) {
+            println!(
+                "{}  {}  ({} resources)",
+                created.collection.id,
+                created.collection.name.as_str(),
+                created.resource_ids.len()
+            );
+            for member in &topic.members {
+                println!(
+                    "  {}  {}  [{}]",
+                    member.resource_id,
+                    member.title,
+                    source_label(&member.source)
+                );
+            }
+        }
+    } else {
+        for (i, topic) in suggestion.report.topics.iter().enumerate() {
+            println!(
+                "topic {}  {}  ({} resources)",
+                i + 1,
+                topic.label,
+                topic.members.len()
+            );
+            for member in &topic.members {
+                println!(
+                    "  {}  {}  [{}]",
+                    member.resource_id,
+                    member.title,
+                    source_label(&member.source)
+                );
+            }
+        }
+    }
+
+    if !suggestion.report.outliers.is_empty() {
+        println!("outliers  ({} resources)", suggestion.report.outliers.len());
+        for member in &suggestion.report.outliers {
+            println!(
+                "  {}  {}  [{}]",
+                member.resource_id,
+                member.title,
+                source_label(&member.source)
+            );
+        }
+    }
+
+    if !apply && !suggestion.report.topics.is_empty() {
+        eprintln!("preview only; pass --apply to create collections");
+    }
+    Ok(())
+}
+
+fn source_label(source: &TextSource) -> &'static str {
+    match source {
+        TextSource::Attachment => "attachment",
+        TextSource::Metadata => "metadata",
+    }
 }
 
 fn print_node(

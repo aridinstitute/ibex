@@ -4,6 +4,7 @@
 
 mod app;
 pub mod classification;
+pub mod cluster;
 pub mod command;
 pub mod config;
 mod event;
