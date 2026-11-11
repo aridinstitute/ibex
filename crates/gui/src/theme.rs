@@ -12,6 +12,8 @@ pub fn apply(mode: ThemeMode, settings: &ThemeSettings, cx: &mut App) {
         // Root sets the window rem size from this, so every rem-based size
         // in the kit shrinks with it.
         theme.font_size = px(11.);
+        // Match the library table card radius so kit-rounded chrome agrees.
+        theme.radius = px(12.);
         // No outer halo on focused controls: the input border itself picks up
         // the accent ring color (see palette), which reads cleaner in dense
         // filter rows and the detail pane.
@@ -86,8 +88,11 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     // alpha here reads as a raised strip and a seam under the labels.
     colors.list_head = invisible;
     colors.list_hover = glass_hover;
-    colors.table = glass;
-    colors.table_even = glass;
+    // DataTable paints a full-rect `tokens.table` fill. Keep it clear so the
+    // rounded card shell owns the visible fill — otherwise square table paint
+    // bleeds past the card's corner radius.
+    colors.table = invisible;
+    colors.table_even = invisible;
     colors.table_head = invisible;
     colors.table_hover = glass_hover;
     colors.table_row_border = invisible; // row separators stay off too
@@ -233,7 +238,10 @@ mod tests {
                 "background should be a glass sheet, got a={}",
                 colors.background.a
             );
-            assert!(colors.table.a < max_a, "table should be glass");
+            assert_eq!(
+                colors.table.a, 0.,
+                "table fill must be clear so the rounded card shell can clip"
+            );
             assert_eq!(
                 colors.table_head.a, 0.,
                 "table head must be clear (no raised header band over the wash)"

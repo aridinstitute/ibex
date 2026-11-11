@@ -29,8 +29,8 @@ use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, T
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, FocusTrapElement as _, FocusableExt as _, Icon, IconName, IndexPath,
-    Selectable as _, Sizable as _, Size, ThemeColor, ThemeMode, TitleBar, WindowExt as _, h_flex,
-    v_flex,
+    Selectable as _, Sizable as _, Size, TITLE_BAR_HEIGHT, ThemeColor, ThemeMode, TitleBar,
+    WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Focusable as _, *};
@@ -5641,34 +5641,57 @@ impl LibraryApp {
             .size_full()
             .overflow_hidden()
             .text_size(px(12.))
-            // Brand lives in the full-height rail so the sidebar meets the
-            // window top (traffic-light inset on macOS).
+            // Same vertical stack as the content column above the table card.
             .child(
-                h_flex()
-                    .id("toolbar-brand")
+                v_flex()
+                    .id("library-navigation-align")
                     .test_support()
-                    .h(px(48.))
+                    .w_full()
                     .flex_shrink_0()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .ml(if cfg!(target_os = "macos") {
-                        px(68.)
-                    } else {
-                        px(0.)
-                    })
                     .child(
-                        img("images/ibex-mark.png")
-                            .w(px(18.))
-                            .h(px(18.))
-                            .flex_shrink_0(),
+                        h_flex()
+                            .id("toolbar-brand")
+                            .test_support()
+                            .h(TITLE_BAR_HEIGHT)
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .ml(if cfg!(target_os = "macos") {
+                                px(68.)
+                            } else {
+                                px(0.)
+                            })
+                            .child(
+                                img("images/ibex-mark.png")
+                                    .w(px(18.))
+                                    .h(px(18.))
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(cx.theme().foreground)
+                                    .child("Ibex"),
+                            ),
                     )
                     .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().foreground)
-                            .child("Ibex"),
+                        v_flex()
+                            .w_full()
+                            .pt(px(CONTENT_TOP_PAD))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(TABLE_CHROME_H))
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(CONTENT_GAP))
+                                    .flex_shrink_0(),
+                            ),
                     ),
             )
             .child(
@@ -5679,8 +5702,8 @@ impl LibraryApp {
                     .overflow_y_scroll()
                     .child(
                         v_flex()
-                            .p_2()
-                            .pt_1()
+                            .px_2()
+                            .pb_2()
             .child(self.sidebar_row(
                 0,
                 SidebarNav::All,
@@ -6712,6 +6735,32 @@ fn padded_input(state: &Entity<InputState>) -> Input {
 /// without overwriting the user's preferred widths.
 /// Toolbar plus the row padding above the stacked right rail.
 const RAIL_CHROME: f32 = 88.;
+/// `pt` above the +/filter chrome in the content column.
+const CONTENT_TOP_PAD: f32 = 4.;
+/// Height of the +/filter row above the table card (small icon buttons).
+const TABLE_CHROME_H: f32 = 24.;
+/// Gap between +/filter chrome and the table card.
+const CONTENT_GAP: f32 = 8.;
+/// Shared corner radius for the library table card shell.
+const TABLE_CARD_RADIUS: f32 = 12.;
+
+/// Phantom band matching the content column above the table card, so sidebar
+/// content shares the card's top line. Mirrors: TitleBar + pt + chrome + gap.
+/// Gap is an explicit trailing spacer (not `.gap`) so it still applies when
+/// this stack has no second content child.
+fn table_card_top_spacer() -> Div {
+    v_flex()
+        .w_full()
+        .flex_shrink_0()
+        .child(div().w_full().h(TITLE_BAR_HEIGHT).flex_shrink_0())
+        .child(
+            v_flex()
+                .w_full()
+                .pt(px(CONTENT_TOP_PAD))
+                .child(div().w_full().h(px(TABLE_CHROME_H)).flex_shrink_0())
+                .child(div().w_full().h(px(CONTENT_GAP)).flex_shrink_0()),
+        )
+}
 
 fn sidebar_target_widths(
     viewport: Pixels,
@@ -7168,7 +7217,8 @@ impl Render for LibraryApp {
                             // Slim search chrome only — panel/theme/+ live elsewhere.
                             .child(
                                 TitleBar::new()
-                                    .h(px(28.))
+                                    // Height comes from kit TITLE_BAR_HEIGHT (34);
+                                    // CONTENT_TITLE_BAR must stay in sync for align.
                                     .pl_0()
                                     .border_0()
                                     .bg(transparent_black())
@@ -7268,19 +7318,21 @@ impl Render for LibraryApp {
                                     .min_w_0()
                                     .px_3()
                                     .pb_3()
-                                    .pt_1()
-                                    .gap_2()
-                                    // + and filters sit on the table card, not the TitleBar.
+                                    .pt(px(CONTENT_TOP_PAD))
+                                    // + and filters sit above the table card, not the TitleBar.
                                     .child(
                                         h_flex()
                                             .id("library-table-chrome")
                                             .test_support()
                                             .w_full()
+                                            .h(px(TABLE_CHROME_H))
+                                            .flex_shrink_0()
                                             .items_center()
                                             .gap_1()
                                             .child(
                                                 Button::new("add-resource")
                                                     .ghost()
+                                                    .small()
                                                     .icon(
                                                         Icon::new(IconName::Plus).with_size(px(12.)),
                                                     )
@@ -7344,6 +7396,7 @@ impl Render for LibraryApp {
                                             .child(
                                                 Button::new("toggle-filters")
                                                     .ghost()
+                                                    .small()
                                                     .icon(
                                                         symbol(
                                                             "line.3.horizontal.decrease",
@@ -7364,6 +7417,12 @@ impl Render for LibraryApp {
                                             )
                                             .child(div().flex_1()),
                                     )
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .h(px(CONTENT_GAP))
+                                            .flex_shrink_0(),
+                                    )
                                     .child({
                                         let table = DataTable::new(&self.table)
                                             .with_size(Size::XSmall)
@@ -7374,13 +7433,18 @@ impl Render for LibraryApp {
                                                 header_row_height(filters_visible),
                                                 |table, height| table.header_row_height(height),
                                             );
-                                        // Rounded inset card: fills remaining space and
-                                        // scrolls when rows overflow the viewport.
+                                        // Rounded inset card: shell owns the fill; table
+                                        // tokens stay clear so content can't square the
+                                        // corners. overflow_hidden clips scroll children.
                                         let table_shell: Hsla = if dark {
                                             rgba(0xffffff0e).into()
                                         } else {
                                             rgba(0xffffff8c).into()
                                         };
+                                        // Shell owns the fill + radius. Inner clip
+                                        // repeats radius/overflow so row paint cannot
+                                        // square the corners (GPUI masks are axis-aligned,
+                                        // so keep table tokens clear and inset slightly).
                                         let wrap = div()
                                             .id("library-grid-viewport")
                                             .test_support()
@@ -7388,16 +7452,24 @@ impl Render for LibraryApp {
                                             .min_w_0()
                                             .min_h_0()
                                             .relative()
-                                            .rounded(px(12.))
+                                            .rounded(px(TABLE_CARD_RADIUS))
                                             .bg(table_shell)
-                                            .overflow_hidden();
+                                            .overflow_hidden()
+                                            .p(px(1.))
+                                            .child(
+                                                div()
+                                                    .size_full()
+                                                    .min_h_0()
+                                                    .rounded(px(TABLE_CARD_RADIUS - 1.))
+                                                    .overflow_hidden()
+                                                    .child(table),
+                                            );
                                         if editing {
                                             wrap.track_focus(&self.inline_trap)
                                                 .focus_trap("inline-edit-trap", &self.inline_trap)
-                                                .child(table)
                                                 .into_any_element()
                                         } else {
-                                            wrap.child(table).into_any_element()
+                                            wrap.into_any_element()
                                         }
                                     }),
                             )
@@ -7424,6 +7496,11 @@ impl Render for LibraryApp {
                                         .h_full()
                                         .w_full()
                                         .gap_0()
+                                        .child(
+                                            table_card_top_spacer()
+                                                .id("detail-align-spacer")
+                                                .test_support(),
+                                        )
                                         .when(self.detail_open, |column| {
                                             column.child(
                                                 div()

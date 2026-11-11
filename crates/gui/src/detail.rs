@@ -370,7 +370,11 @@ pub fn render_panel(
             div()
                 .id("detail-panel")
                 .test_support()
-                .p_3()
+                // Top padding lives on the rail (aligned to the table card);
+                // keep side/bottom inset only here.
+                .px_3()
+                .pb_3()
+                .pt_1()
                 .overflow_y_scroll()
                 .when_some(max_height, |scroll, max| scroll.max_h(max))
                 .when(max_height.is_none(), |scroll| scroll.flex_1().min_h_0())
