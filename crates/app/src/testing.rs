@@ -690,6 +690,41 @@ impl Store for MemoryStore {
         notes.sort_by_key(|n| (n.created_at.as_unix_ms(), n.id.to_string()));
         Ok(notes)
     }
+    async fn list_note_feed(
+        &self,
+        resource_id: Option<ResourceId>,
+    ) -> Result<Vec<ibex_core::NoteFeedItem>, StoreError> {
+        if let Some(resource_id) = resource_id {
+            self.get_resource(resource_id).await?;
+        }
+        let mut notes: Vec<_> = self
+            .notes
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|n| resource_id.is_none_or(|id| n.resource_id == Some(id)))
+            .cloned()
+            .collect();
+        notes.sort_by(|a, b| {
+            b.updated_at
+                .as_unix_ms()
+                .cmp(&a.updated_at.as_unix_ms())
+                .then_with(|| b.id.to_string().cmp(&a.id.to_string()))
+        });
+        let resources = self.resources.lock().expect("MemoryStore lock");
+        Ok(notes
+            .into_iter()
+            .map(|note| {
+                let resource_title = note
+                    .resource_id
+                    .and_then(|id| resources.get(&id).map(|row| row.title.clone()));
+                ibex_core::NoteFeedItem {
+                    note,
+                    resource_title,
+                }
+            })
+            .collect())
+    }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {
         Ok(StoreHealth {
             backend: "memory",
@@ -1671,6 +1706,12 @@ impl Store for StubStore {
         &self,
         _: ibex_core::ResourceId,
     ) -> Result<Vec<ibex_core::Note>, ibex_core::StoreError> {
+        Err(ibex_core::StoreError::new("notes unsupported"))
+    }
+    async fn list_note_feed(
+        &self,
+        _: Option<ResourceId>,
+    ) -> Result<Vec<ibex_core::NoteFeedItem>, ibex_core::StoreError> {
         Err(ibex_core::StoreError::new("notes unsupported"))
     }
     async fn ping(&self) -> Result<StoreHealth, StoreError> {

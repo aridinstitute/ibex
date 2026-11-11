@@ -1,6 +1,6 @@
 use crate::event::{self, Event};
 use crate::{AppState, CommandError, Handler, Outcome};
-use ibex_core::{NoteContent, NoteId, ResourceId, StoreError};
+use ibex_core::{NoteContent, NoteFeedItem, NoteId, ResourceId, StoreError};
 
 #[derive(Debug, Clone)]
 pub struct CreateNote {
@@ -23,6 +23,10 @@ pub struct DeleteNote {
 #[derive(Debug, Clone)]
 pub struct ListNotes {
     pub resource_id: ResourceId,
+}
+#[derive(Debug, Clone)]
+pub struct ListNoteFeed {
+    pub resource_id: Option<ResourceId>,
 }
 
 fn map_error(e: StoreError) -> CommandError {
@@ -117,5 +121,24 @@ impl Handler for ListNotes {
             .map_err(map_error)?;
         ev.set(event::NOTE_COUNT, notes.len());
         Ok(Outcome::ListNotes(notes))
+    }
+}
+#[async_trait::async_trait]
+impl Handler for ListNoteFeed {
+    const NAME: &'static str = "list_note_feed";
+    type Output = Outcome;
+    fn annotate(&self, ev: &mut Event) {
+        if let Some(resource_id) = self.resource_id {
+            ev.set(event::RESOURCE_ID, resource_id.to_string());
+        }
+    }
+    async fn run(self, state: &AppState, ev: &mut Event) -> Result<Outcome, CommandError> {
+        let items: Vec<NoteFeedItem> = state
+            .store()
+            .list_note_feed(self.resource_id)
+            .await
+            .map_err(map_error)?;
+        ev.set(event::NOTE_COUNT, items.len());
+        Ok(Outcome::ListNoteFeed(items))
     }
 }

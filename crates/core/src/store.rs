@@ -103,6 +103,14 @@ pub trait Store: Send + Sync + 'static {
         &self,
         resource_id: crate::ResourceId,
     ) -> Result<Vec<crate::Note>, StoreError>;
+    /// Cross-resource notes feed: newest `updated_at` first (covers both
+    /// freshly added and recently edited notes), with id as a stable
+    /// tie-breaker. `resource_id` limits the feed to one resource when set;
+    /// missing resources are not an error for the unfiltered feed.
+    async fn list_note_feed(
+        &self,
+        resource_id: Option<crate::ResourceId>,
+    ) -> Result<Vec<crate::NoteFeedItem>, StoreError>;
     /// Cheap liveness probe. Must not mutate state.
     async fn ping(&self) -> Result<StoreHealth, StoreError>;
 

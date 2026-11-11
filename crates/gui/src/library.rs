@@ -68,6 +68,7 @@ use crate::inline_edit::{
 };
 use crate::kind::{kind_color, kind_label, kind_symbol};
 use crate::notes::{AddNote, NotesPanel};
+use crate::notes_feed::NotesFeed;
 use crate::settings::{Settings, ThemeColorTarget};
 use crate::tags::{TagChoice, TagDelegate};
 use crate::theme_editor::{ThemeEditor, ThemeEditorEvent};
@@ -1835,14 +1836,21 @@ fn prefetch_window(row_ix: usize, rows_count: usize) -> Range<usize> {
     start..end
 }
 
-/// Left-nav selection: All items, Favorites, one kind, tag, or collection.
+/// Left-nav selection: All items, Favorites, Notes feed, one kind, tag, or collection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SidebarNav {
     All,
     Favorites,
+    Notes,
     Kind(ResourceKind),
     Tag(TagId),
     Collection(CollectionId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainView {
+    Library,
+    NotesFeed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -1870,6 +1878,8 @@ enum ImportState {
 }
 pub struct LibraryApp {
     notes: Entity<NotesPanel>,
+    notes_feed: Entity<NotesFeed>,
+    main_view: MainView,
     import_state: ImportState,
     import_gen: u64,
     import_task: Option<Task<()>>,
@@ -2724,6 +2734,13 @@ impl LibraryApp {
                 cx.observe(&notes, |_, _, cx| cx.notify()).detach();
                 notes
             },
+            notes_feed: {
+                let worker = table.read(cx).delegate().worker().clone();
+                let feed = cx.new(|_| NotesFeed::new(worker));
+                cx.observe(&feed, |_, _, cx| cx.notify()).detach();
+                feed
+            },
+            main_view: MainView::Library,
             import_gen: 0,
             import_task: None,
             table,
@@ -3999,6 +4016,13 @@ impl LibraryApp {
     }
 
     fn select_sidebar_nav(&mut self, nav: SidebarNav, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(nav, SidebarNav::Notes) {
+            self.main_view = MainView::NotesFeed;
+            self.notes_feed.update(cx, |feed, cx| feed.open(window, cx));
+            cx.notify();
+            return;
+        }
+        self.main_view = MainView::Library;
         let (selected_id, input) = {
             let table = self.table.read(cx);
             let delegate = table.delegate();
@@ -4014,12 +4038,14 @@ impl LibraryApp {
             SidebarNav::Kind(kind) => Some(kind),
             SidebarNav::All
             | SidebarNav::Favorites
+            | SidebarNav::Notes
             | SidebarNav::Tag(_)
             | SidebarNav::Collection(_) => None,
         };
         let favorite = match nav {
             SidebarNav::Favorites => Some(true),
             SidebarNav::All
+            | SidebarNav::Notes
             | SidebarNav::Kind(_)
             | SidebarNav::Tag(_)
             | SidebarNav::Collection(_) => None,
@@ -4028,14 +4054,17 @@ impl LibraryApp {
             SidebarNav::Tag(id) => Some(id),
             SidebarNav::All
             | SidebarNav::Favorites
+            | SidebarNav::Notes
             | SidebarNav::Kind(_)
             | SidebarNav::Collection(_) => None,
         };
         let collection = match nav {
             SidebarNav::Collection(id) => Some(id),
-            SidebarNav::All | SidebarNav::Favorites | SidebarNav::Kind(_) | SidebarNav::Tag(_) => {
-                None
-            }
+            SidebarNav::All
+            | SidebarNav::Favorites
+            | SidebarNav::Notes
+            | SidebarNav::Kind(_)
+            | SidebarNav::Tag(_) => None,
         };
         if let Some(input) = input {
             input.update(cx, |state, cx| {
@@ -5609,11 +5638,13 @@ impl LibraryApp {
         let selected_kind = filter.kind;
         let selected_tag = filter.tag;
         let selected_collection = filter.collection;
-        let all_selected = filter.kind.is_none()
+        let notes_selected = self.main_view == MainView::NotesFeed;
+        let all_selected = !notes_selected
+            && filter.kind.is_none()
             && filter.favorite.is_none()
             && filter.tag.is_none()
             && filter.collection.is_none();
-        let favorites_selected = filter.favorite == Some(true);
+        let favorites_selected = !notes_selected && filter.favorite == Some(true);
         let collection_rows = if self
             .collapsed_sections
             .contains(&SidebarSection::Collections)
@@ -5662,6 +5693,15 @@ impl LibraryApp {
                     cx,
                 ),
             )
+            .child(self.sidebar_row(
+                2,
+                SidebarNav::Notes,
+                "Notes".into(),
+                symbol("note.text", AssetIconName::NotebookText).with_size(px(16.)),
+                None,
+                notes_selected,
+                cx,
+            ))
             .child(
                 h_flex()
                     .pt_4()
@@ -5678,14 +5718,14 @@ impl LibraryApp {
             )
             .children(kinds.into_iter().map(|(index, kind)| {
                 self.sidebar_row(
-                    index + 2,
+                    index + 3,
                     SidebarNav::Kind(kind),
                     sidebar_kind_label(kind),
                     kind_symbol(kind).text_color(kind_color(kind, cx.theme().is_dark())),
                     self.counts
                         .as_ref()
                         .map(|counts| counts.by_kind.get(&kind).copied().unwrap_or(0)),
-                    selected_kind == Some(kind),
+                    !notes_selected && selected_kind == Some(kind),
                     cx,
                 )
             }))
@@ -5720,7 +5760,7 @@ impl LibraryApp {
                     tag.text.as_str().to_owned(),
                     symbol("tag", AssetIconName::Library).with_size(px(16.)),
                     Some(count),
-                    selected_tag == Some(tag.id),
+                    !notes_selected && selected_tag == Some(tag.id),
                     cx,
                 ))
             }))
@@ -5772,7 +5812,7 @@ impl LibraryApp {
                     let name = collection.name.as_str().to_owned();
                     let drag_name = SharedString::from(name.as_str());
                     let expanded = self.expanded_collections.contains(&id);
-                    let selected = selected_collection == Some(id);
+                    let selected = !notes_selected && selected_collection == Some(id);
                     let renaming = self.renaming_collection == Some(id);
                     let hover = cx.theme().accent;
                     let nest_targets = nest_parent_candidates(&self.collection_forest, id);
@@ -6804,7 +6844,8 @@ impl Render for LibraryApp {
             },
             ThemeColorTarget::Secondary,
         );
-        let notes_open = self.selected.is_some() && delegate.selected_ids.len() <= 1;
+        let feed_open = self.main_view == MainView::NotesFeed;
+        let notes_open = !feed_open && self.selected.is_some() && delegate.selected_ids.len() <= 1;
         let note_editing = notes_open && self.notes.read(cx).is_editing();
         // The metadata card ends at its fields. The notes card takes the
         // rest of the rail, with a floor so a long field list cannot
@@ -6817,8 +6858,9 @@ impl Render for LibraryApp {
         };
         let detail_limit = notes_open.then(|| px((rail_height - notes_floor - 8.).max(140.)));
         // Notes stack in the right column, so a closed detail panel still
-        // keeps that column open while one resource is selected.
-        let right_open = self.detail_open || notes_open;
+        // keeps that column open while one resource is selected. The
+        // notes feed replaces the center grid and hides that rail.
+        let right_open = !feed_open && (self.detail_open || notes_open);
         let (left_target, right_target) = sidebar_target_widths(
             window.viewport_size().width,
             self.left_panel_open.then_some(settings.left_sidebar_width),
@@ -7274,46 +7316,69 @@ impl Render for LibraryApp {
                         // header-only strip floats mid-window with no
                         // rows and no empty state.
                         {
-                            let table = DataTable::new(&self.table)
-                                .with_size(Size::XSmall)
-                                .bordered(false)
-                                .stripe(false)
-                                // The table holds focus from the first frame (so
-                                // the detail-panel key works), which makes the
-                                // kit's keyboard focus ring draw on every arrow
-                                // key. The table fills this container edge to
-                                // edge, so only the ring's top edge is inside
-                                // the window, and it reads as a stray bar under
-                                // the toolbar. The row highlight already shows
-                                // where focus is; the ring adds nothing.
-                                .focus_ring(false)
-                                .when_some(header_row_height(filters_visible), |table, height| {
-                                    table.header_row_height(height)
-                                });
-                            let wrap = div()
-                                .id("library-grid-viewport")
-                                .test_support()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .relative()
-                                .rounded(ISLAND_RADIUS)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().background)
-                                .overflow_hidden();
-                            // While inline editing, keep Root Tab/TabPrev inside
-                            // the grid so focus cannot walk to toolbar/sidebar.
-                            if editing {
-                                wrap.track_focus(&self.inline_trap)
-                                    .focus_trap("inline-edit-trap", &self.inline_trap)
-                                    .child(table)
-                                    .child(island_corner_mask(stops, glow))
+                            if feed_open {
+                                // Notes feed: no island well — cards sit on the
+                                // workspace canvas with only a thin inline filter.
+                                div()
+                                    .id("notes-feed-viewport")
+                                    .test_support()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .relative()
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .id("notes-feed-scroll")
+                                            .test_support()
+                                            .size_full()
+                                            .overflow_y_scroll()
+                                            .child(self.notes_feed.clone()),
+                                    )
                                     .into_any_element()
                             } else {
-                                wrap.child(table)
-                                    .child(island_corner_mask(stops, glow))
-                                    .into_any_element()
+                                let wrap = div()
+                                    .id("library-grid-viewport")
+                                    .test_support()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .relative()
+                                    .rounded(ISLAND_RADIUS)
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .bg(cx.theme().background)
+                                    .overflow_hidden();
+                                let table = DataTable::new(&self.table)
+                                    .with_size(Size::XSmall)
+                                    .bordered(false)
+                                    .stripe(false)
+                                    // The table holds focus from the first frame (so
+                                    // the detail-panel key works), which makes the
+                                    // kit's keyboard focus ring draw on every arrow
+                                    // key. The table fills this container edge to
+                                    // edge, so only the ring's top edge is inside
+                                    // the window, and it reads as a stray bar under
+                                    // the toolbar. The row highlight already shows
+                                    // where focus is; the ring adds nothing.
+                                    .focus_ring(false)
+                                    .when_some(
+                                        header_row_height(filters_visible),
+                                        |table, height| table.header_row_height(height),
+                                    );
+                                // While inline editing, keep Root Tab/TabPrev inside
+                                // the grid so focus cannot walk to toolbar/sidebar.
+                                if editing {
+                                    wrap.track_focus(&self.inline_trap)
+                                        .focus_trap("inline-edit-trap", &self.inline_trap)
+                                        .child(table)
+                                        .child(island_corner_mask(stops, glow))
+                                        .into_any_element()
+                                } else {
+                                    wrap.child(table)
+                                        .child(island_corner_mask(stops, glow))
+                                        .into_any_element()
+                                }
                             }
                         },
                     )
@@ -10228,7 +10293,8 @@ mod sidebar_navigation_tests {
             ];
             let mut previous_y = px(0.);
             for (index, kind) in expected.into_iter().enumerate() {
-                let id = ("sidebar-entry", index + 2);
+                // 0 All, 1 Favorites, 2 Notes, then kinds.
+                let id = ("sidebar-entry", index + 3);
                 let y = window.find(id).bounds().top();
                 assert!(y > previous_y);
                 previous_y = y;
@@ -10366,29 +10432,30 @@ mod sidebar_navigation_tests {
         });
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
-            assert!(window.try_find(("sidebar-entry", 2_usize)).is_some()); // Book
-            assert!(window.try_find(("sidebar-entry", 6_usize)).is_some()); // Article
-            assert!(window.try_find(("sidebar-entry", 19_usize)).is_some()); // Selected empty Podcast
-            assert!(window.try_find(("sidebar-entry", 4_usize)).is_none()); // Empty Journal
-            assert!(window.try_find(("sidebar-entry", 20_usize)).is_none()); // Empty Episode
+            // 0 All, 1 Favorites, 2 Notes, then SIDEBAR_KIND_ORDER indices + 3.
+            assert!(window.try_find(("sidebar-entry", 3_usize)).is_some()); // Book
+            assert!(window.try_find(("sidebar-entry", 7_usize)).is_some()); // Article
+            assert!(window.try_find(("sidebar-entry", 20_usize)).is_some()); // Selected empty Podcast
+            assert!(window.try_find(("sidebar-entry", 5_usize)).is_none()); // Empty Journal
+            assert!(window.try_find(("sidebar-entry", 21_usize)).is_none()); // Empty Episode
             assert!(
-                window.find(("sidebar-entry", 2_usize)).bounds().top()
-                    < window.find(("sidebar-entry", 6_usize)).bounds().top()
+                window.find(("sidebar-entry", 3_usize)).bounds().top()
+                    < window.find(("sidebar-entry", 7_usize)).bounds().top()
             );
-            window.click(("sidebar-entry", 6_usize), cx);
+            window.click(("sidebar-entry", 7_usize), cx);
             assert_eq!(
                 app.read(cx).table.read(cx).delegate().filter.kind,
                 Some(ResourceKind::JournalArticle)
             );
-            assert!(window.try_find(("sidebar-entry", 19_usize)).is_none());
+            assert!(window.try_find(("sidebar-entry", 20_usize)).is_none());
             window.click("toggle-section-kinds", cx);
-            assert!(window.try_find(("sidebar-entry", 6_usize)).is_none());
+            assert!(window.try_find(("sidebar-entry", 7_usize)).is_none());
             assert_eq!(
                 app.read(cx).table.read(cx).delegate().filter.kind,
                 Some(ResourceKind::JournalArticle)
             );
             window.click("toggle-section-kinds", cx);
-            assert!(window.try_find(("sidebar-entry", 6_usize)).is_some());
+            assert!(window.try_find(("sidebar-entry", 7_usize)).is_some());
             assert_eq!(
                 app.read(cx).counts.as_ref().unwrap().by_kind[&ResourceKind::Book],
                 3

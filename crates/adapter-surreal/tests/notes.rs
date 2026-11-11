@@ -1,5 +1,5 @@
 use ibex_adapter_surreal::SurrealStore;
-use ibex_app::command::{CreateNote, DeleteNote, ListNotes, UpdateNote};
+use ibex_app::command::{CreateNote, DeleteNote, ListNoteFeed, ListNotes, UpdateNote};
 use ibex_app::testing::MemorySink;
 use ibex_app::{AppState, Command, Outcome, Surface};
 use ibex_core::{
@@ -294,6 +294,134 @@ async fn validate_notes(store: impl Store) {
 async fn surreal_and_memory_store_enforce_the_same_note_contract() {
     validate_notes(SurrealStore::open_memory().await.unwrap()).await;
     validate_notes(ibex_app::testing::MemoryStore::new()).await;
+}
+
+#[tokio::test]
+async fn note_feed_lists_across_resources_newest_first_and_filters() {
+    let store = SurrealStore::open_memory().await.unwrap();
+    let alpha = store.create_resource(book("Alpha")).await.unwrap();
+    let beta = store.create_resource(book("Beta")).await.unwrap();
+    let older = store
+        .create_note(
+            alpha.id,
+            NoteContent {
+                body_markdown: "Older on Alpha".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let newer = store
+        .create_note(
+            beta.id,
+            NoteContent {
+                kind: NoteKind::Quote,
+                body_markdown: "Newer on Beta".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let bumped = store
+        .update_note(
+            older.id,
+            NoteContent {
+                body_markdown: "Edited Alpha note".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(bumped.updated_at.as_unix_ms() >= newer.updated_at.as_unix_ms());
+
+    let state = AppState::builder(store).surface(Surface::Test).build();
+    let Outcome::ListNoteFeed(feed) = state
+        .execute(Command::ListNoteFeed(ListNoteFeed { resource_id: None }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected note feed")
+    };
+    assert_eq!(feed.len(), 2);
+    assert_eq!(feed[0].note.id, bumped.id);
+    assert_eq!(
+        feed[0].resource_title.as_ref().map(|t| t.as_str()),
+        Some("Alpha")
+    );
+    assert_eq!(feed[1].note.id, newer.id);
+    assert_eq!(
+        feed[1].resource_title.as_ref().map(|t| t.as_str()),
+        Some("Beta")
+    );
+
+    let Outcome::ListNoteFeed(filtered) = state
+        .execute(Command::ListNoteFeed(ListNoteFeed {
+            resource_id: Some(beta.id),
+        }))
+        .await
+        .unwrap()
+    else {
+        panic!("expected filtered feed")
+    };
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].note.id, newer.id);
+    assert_eq!(
+        filtered[0].resource_title.as_ref().map(|t| t.as_str()),
+        Some("Beta")
+    );
+
+    let memory = ibex_app::testing::MemoryStore::new();
+    let alpha = memory.create_resource(book("Alpha")).await.unwrap();
+    let beta = memory.create_resource(book("Beta")).await.unwrap();
+    let first = memory
+        .create_note(
+            alpha.id,
+            NoteContent {
+                body_markdown: "A".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let second = memory
+        .create_note(
+            beta.id,
+            NoteContent {
+                body_markdown: "B".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    memory
+        .update_note(
+            first.id,
+            NoteContent {
+                body_markdown: "A2".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let feed = memory.list_note_feed(None).await.unwrap();
+    assert_eq!(
+        feed.iter().map(|item| item.note.id).collect::<Vec<_>>(),
+        vec![first.id, second.id]
+    );
+    assert_eq!(
+        memory
+            .list_note_feed(Some(beta.id))
+            .await
+            .unwrap()
+            .iter()
+            .map(|item| item.note.id)
+            .collect::<Vec<_>>(),
+        vec![second.id]
+    );
 }
 
 #[tokio::test]
