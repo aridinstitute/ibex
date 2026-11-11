@@ -91,12 +91,6 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     colors.table_head = invisible;
     colors.table_hover = glass_hover;
     colors.table_row_border = invisible; // row separators stay off too
-    // Column labels stay rule-free but must remain readable (~0.55–0.6).
-    {
-        let mut head = colors.foreground;
-        head.a = if dark { 0.58 } else { 0.55 };
-        colors.table_head_foreground = head;
-    }
     colors.popover = glass_raised;
     colors.tab = glass;
     colors.tab_active = glass_raised;
