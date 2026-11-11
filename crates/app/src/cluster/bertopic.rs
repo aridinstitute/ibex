@@ -235,10 +235,15 @@ fn cosine_distance(a: &[f64], b: &[f64]) -> f64 {
     (1.0 - dot).clamp(0.0, 2.0)
 }
 
+/// Cosine-distance ceiling: once clusters are this far apart and we are at or
+/// below the max topic budget, stop merging so well-separated topics survive.
+const MERGE_DISTANCE_CEILING: f64 = 0.55;
+
 /// Average-linkage agglomerative clustering on cosine distance.
 ///
-/// Starts with one cluster per document and merges until
-/// `⌊n / min_topic_size⌋` clusters remain. Clusters smaller than
+/// Starts with one cluster per document and merges nearest pairs while either
+/// more than `⌊n / min_topic_size⌋` clusters remain, or the nearest pair is
+/// still closer than [`MERGE_DISTANCE_CEILING`]. Clusters smaller than
 /// `min_topic_size` are labeled `-1` (outliers).
 fn agglomerative_cluster(vectors: &[Vec<f64>], min_topic_size: usize) -> Vec<i32> {
     let n = vectors.len();
@@ -246,14 +251,14 @@ fn agglomerative_cluster(vectors: &[Vec<f64>], min_topic_size: usize) -> Vec<i32
         return Vec::new();
     }
 
-    let target_topics = (n / min_topic_size).clamp(1, n);
+    let max_topics = (n / min_topic_size).clamp(1, n);
     let dim = vectors.first().map(|v| v.len()).unwrap_or(0);
 
     // Each entry is the member document indices for an active cluster.
     let mut clusters: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
     let mut centroids: Vec<Vec<f64>> = vectors.to_vec();
 
-    while clusters.len() > target_topics {
+    while clusters.len() > 1 {
         let mut best = f64::INFINITY;
         let mut best_pair = None;
         for i in 0..clusters.len() {
@@ -268,6 +273,11 @@ fn agglomerative_cluster(vectors: &[Vec<f64>], min_topic_size: usize) -> Vec<i32
         let Some((i, j)) = best_pair else {
             break;
         };
+        // Past the budget, only keep merging tight pairs so distinct topics
+        // are not forced together.
+        if clusters.len() <= max_topics && best > MERGE_DISTANCE_CEILING {
+            break;
+        }
 
         let mut merged_members = clusters[i].clone();
         merged_members.extend(clusters[j].iter().copied());
@@ -377,6 +387,137 @@ mod tests {
         }
     }
 
+    fn doc_with_id(id: ResourceId, title: &str, body: &str) -> ClusterDocument {
+        ClusterDocument {
+            resource_id: id,
+            title: title.into(),
+            text: DocumentText {
+                body: body.into(),
+                source: TextSource::Metadata,
+            },
+        }
+    }
+
+    /// Planted topic vocabularies used for purity / recovery checks.
+    const PLANTED: &[&[&str]] = &[
+        &[
+            "neural",
+            "network",
+            "deep",
+            "learning",
+            "backpropagation",
+            "transformer",
+            "attention",
+            "layers",
+        ],
+        &[
+            "climate",
+            "carbon",
+            "emissions",
+            "greenhouse",
+            "warming",
+            "ocean",
+            "sequestration",
+            "temperature",
+        ],
+        &[
+            "quantum",
+            "qubit",
+            "entanglement",
+            "superposition",
+            "hamiltonian",
+            "coherence",
+            "circuit",
+            "gates",
+        ],
+    ];
+
+    fn planted_corpus(per_topic: usize) -> (Vec<ClusterDocument>, HashMap<ResourceId, usize>) {
+        let mut docs = Vec::with_capacity(per_topic * PLANTED.len());
+        let mut labels = HashMap::new();
+        for (topic_i, vocab) in PLANTED.iter().enumerate() {
+            for doc_i in 0..per_topic {
+                let id = ResourceId::generate();
+                // Rotate terms so docs share topic vocabulary without being identical.
+                let body = (0..6)
+                    .map(|k| vocab[(doc_i + k) % vocab.len()])
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                docs.push(doc_with_id(
+                    id,
+                    &format!("topic{topic_i}-doc{doc_i}"),
+                    &body,
+                ));
+                labels.insert(id, topic_i);
+            }
+        }
+        (docs, labels)
+    }
+
+    fn partition_ids(report: &TopicReport) -> (HashSet<ResourceId>, HashSet<ResourceId>) {
+        let mut topic_ids = HashSet::new();
+        for topic in &report.topics {
+            for member in &topic.members {
+                assert!(
+                    topic_ids.insert(member.resource_id),
+                    "resource appears in multiple topics"
+                );
+            }
+        }
+        let mut outlier_ids = HashSet::new();
+        for member in &report.outliers {
+            assert!(
+                !topic_ids.contains(&member.resource_id),
+                "resource is both topic member and outlier"
+            );
+            assert!(outlier_ids.insert(member.resource_id), "duplicate outlier");
+        }
+        (topic_ids, outlier_ids)
+    }
+
+    /// Weighted purity: majority planted label share inside each discovered topic.
+    fn purity(report: &TopicReport, planted: &HashMap<ResourceId, usize>) -> f64 {
+        let mut weighted = 0.0;
+        let mut total = 0.0;
+        for topic in &report.topics {
+            let mut counts: HashMap<usize, usize> = HashMap::new();
+            for member in &topic.members {
+                if let Some(&label) = planted.get(&member.resource_id) {
+                    *counts.entry(label).or_default() += 1;
+                }
+            }
+            let majority = counts.values().copied().max().unwrap_or(0);
+            weighted += majority as f64;
+            total += topic.members.len() as f64;
+        }
+        if total == 0.0 { 0.0 } else { weighted / total }
+    }
+
+    /// Average, over planted labels, of the largest fraction recovered in one topic.
+    fn recovery(report: &TopicReport, planted: &HashMap<ResourceId, usize>) -> f64 {
+        let mut by_planted: HashMap<usize, Vec<ResourceId>> = HashMap::new();
+        for (id, label) in planted {
+            by_planted.entry(*label).or_default().push(*id);
+        }
+        if by_planted.is_empty() {
+            return 0.0;
+        }
+        let mut scores = Vec::new();
+        for ids in by_planted.values() {
+            let mut best = 0usize;
+            for topic in &report.topics {
+                let hit = topic
+                    .members
+                    .iter()
+                    .filter(|m| ids.contains(&m.resource_id))
+                    .count();
+                best = best.max(hit);
+            }
+            scores.push(best as f64 / ids.len() as f64);
+        }
+        scores.iter().sum::<f64>() / scores.len() as f64
+    }
+
     #[test]
     fn separates_two_distinct_topics() {
         let docs = vec![
@@ -436,10 +577,132 @@ mod tests {
     }
 
     #[test]
+    fn planted_topics_have_high_purity_and_recovery() {
+        let (docs, planted) = planted_corpus(8);
+        let report = cluster_documents(
+            &docs,
+            ClusterOptions {
+                min_topic_size: 4,
+                label_terms: 3,
+                keyword_terms: 6,
+            },
+        )
+        .unwrap();
+        let (topic_ids, outlier_ids) = partition_ids(&report);
+        assert_eq!(
+            topic_ids.len() + outlier_ids.len(),
+            docs.len(),
+            "every document must be assigned exactly once"
+        );
+        assert!(
+            report.topics.len() >= 2,
+            "expected multiple topics, got {}",
+            report.topics.len()
+        );
+        for topic in &report.topics {
+            assert!(
+                topic.members.len() >= 4,
+                "min_topic_size violated: {}",
+                topic.members.len()
+            );
+            assert!(
+                !topic.keywords.is_empty(),
+                "topic {} missing keywords",
+                topic.label
+            );
+        }
+        let p = purity(&report, &planted);
+        let r = recovery(&report, &planted);
+        assert!(
+            p >= 0.85,
+            "purity {p:.3} below threshold; topics={:?}",
+            report
+                .topics
+                .iter()
+                .map(|t| (&t.label, t.members.len()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            r >= 0.70,
+            "recovery {r:.3} below threshold; topics={:?}",
+            report
+                .topics
+                .iter()
+                .map(|t| (&t.label, t.members.len()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn clustering_is_deterministic_for_fixed_ids() {
+        let (docs, _) = planted_corpus(5);
+        let opts = ClusterOptions {
+            min_topic_size: 3,
+            label_terms: 3,
+            keyword_terms: 5,
+        };
+        let a = cluster_documents(&docs, opts.clone()).unwrap();
+        let b = cluster_documents(&docs, opts).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn respects_min_topic_size_and_marks_noise_outliers() {
+        let mut docs = planted_corpus(3).0;
+        // Unique singleton noise should not form its own topic at min_size=3.
+        docs.push(doc(
+            "Noise",
+            "xylophone zebra quokka wallaby platypus wombat",
+        ));
+        let report = cluster_documents(
+            &docs,
+            ClusterOptions {
+                min_topic_size: 3,
+                label_terms: 3,
+                keyword_terms: 5,
+            },
+        )
+        .unwrap();
+        let (topic_ids, outlier_ids) = partition_ids(&report);
+        assert_eq!(topic_ids.len() + outlier_ids.len(), docs.len());
+        for topic in &report.topics {
+            assert!(topic.members.len() >= 3, "undersized topic {}", topic.label);
+        }
+        let noise = docs.last().unwrap().resource_id;
+        assert!(
+            outlier_ids.contains(&noise),
+            "singleton noise should be an outlier, topics={:?}",
+            report
+                .topics
+                .iter()
+                .map(|t| (&t.label, t.members.len()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn rejects_too_few_documents() {
         let docs = vec![doc("Only", "lonely document about nothing much here")];
         let err = cluster_documents(&docs, ClusterOptions::default()).unwrap_err();
         assert!(err.contains("need at least"));
+    }
+
+    #[test]
+    fn rejects_documents_with_no_tokens() {
+        let docs = vec![
+            doc("A", "!!! !!!"),
+            doc("B", "??? ???"),
+            doc("C", "... ..."),
+        ];
+        let err = cluster_documents(
+            &docs,
+            ClusterOptions {
+                min_topic_size: 2,
+                ..ClusterOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("no usable tokens"));
     }
 
     #[test]

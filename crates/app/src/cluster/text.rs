@@ -222,4 +222,22 @@ mod tests {
         assert_eq!(text.source, TextSource::Metadata);
         assert!(text.body.contains("Still useful"));
     }
+
+    #[test]
+    fn truncates_oversized_attachment_bodies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.txt");
+        let huge = "word ".repeat(MAX_DOCUMENT_CHARS);
+        std::fs::write(&path, &huge).unwrap();
+        let mut detail = detail_with("Huge");
+        detail.attachments = vec![Attachment {
+            id: AttachmentId::generate(),
+            attachment_type: "txt".into(),
+            title: "huge".into(),
+            file_path: path,
+        }];
+        let text = extract_document_text(&detail);
+        assert_eq!(text.source, TextSource::Attachment);
+        assert!(text.body.chars().count() <= MAX_DOCUMENT_CHARS);
+    }
 }
