@@ -2,6 +2,7 @@ mod collection;
 mod config;
 mod import;
 mod name;
+mod note;
 mod person;
 mod resource;
 mod tag;
@@ -52,7 +53,7 @@ enum Commands {
     /// Manage people in the library.
     Person(PersonCmd),
     /// Manage resources in the library.
-    Resource(ResourceCmd),
+    Resource(Box<ResourceCmd>),
     /// Manage tags in the library.
     Tag(TagCmd),
 }
@@ -103,7 +104,7 @@ async fn run() -> Result<()> {
         Commands::Collection(cmd) => collection::run(&state, cmd).await?,
         Commands::Import(args) => import::run(&state, args).await?,
         Commands::Person(cmd) => person::run(&state, cmd).await?,
-        Commands::Resource(cmd) => resource::run(&state, cmd, &config).await?,
+        Commands::Resource(cmd) => resource::run(&state, *cmd, &config).await?,
         Commands::Tag(cmd) => tag::run(&state, cmd).await?,
     }
     Ok(())
@@ -147,9 +148,12 @@ mod tests {
         let cli = Cli::try_parse_from(["ibex", "resource", "list"]).expect("valid args");
         assert!(matches!(
             cli.command,
-            Commands::Resource(ResourceCmd {
-                action: ResourceAction::List(_)
-            })
+            Commands::Resource(cmd) if matches!(
+                *cmd,
+                ResourceCmd {
+                    action: ResourceAction::List(_)
+                }
+            )
         ));
     }
 
@@ -171,9 +175,12 @@ mod tests {
             "Retitled",
         ])
         .expect("valid args");
-        let Commands::Resource(ResourceCmd {
+        let Commands::Resource(cmd) = cli.command else {
+            panic!("expected update action");
+        };
+        let ResourceCmd {
             action: ResourceAction::Update(args),
-        }) = cli.command
+        } = *cmd
         else {
             panic!("expected update action");
         };
@@ -210,5 +217,66 @@ mod tests {
         assert_eq!(args.collection_ids.len(), 1);
         assert_eq!(args.tags, vec!["review", "2026"]);
         assert_eq!(args.tag_ids.len(), 1);
+    }
+
+    #[test]
+    fn parses_resource_note_add() {
+        let cli = Cli::try_parse_from([
+            "ibex",
+            "resource",
+            "note",
+            "add",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--kind",
+            "quote",
+            "--body",
+            "A line",
+            "--location",
+            "page=12",
+        ])
+        .expect("valid args");
+        let Commands::Resource(cmd) = cli.command else {
+            panic!("expected resource note");
+        };
+        let ResourceCmd {
+            action: ResourceAction::Note(note),
+        } = *cmd
+        else {
+            panic!("expected resource note");
+        };
+        assert!(matches!(
+            note.action,
+            crate::note::NoteAction::Add(args) if args.resource == "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+                && matches!(args.kind, crate::note::NoteKindArg::Quote)
+                && args.body.as_deref() == Some("A line")
+                && args.locations == ["page=12"]
+        ));
+    }
+
+    #[test]
+    fn parses_resource_update_attach_and_fetch() {
+        let cli = Cli::try_parse_from([
+            "ibex",
+            "resource",
+            "update",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "--attach",
+            "/tmp/paper.pdf",
+            "--fetch",
+            "9780306406157",
+        ])
+        .expect("valid args");
+        let Commands::Resource(cmd) = cli.command else {
+            panic!("expected resource update");
+        };
+        let ResourceCmd {
+            action: ResourceAction::Update(args),
+        } = *cmd
+        else {
+            panic!("expected resource update");
+        };
+        assert_eq!(args.id, "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(args.attachments, [PathBuf::from("/tmp/paper.pdf")]);
+        assert_eq!(args.fetch.as_deref(), Some("9780306406157"));
     }
 }

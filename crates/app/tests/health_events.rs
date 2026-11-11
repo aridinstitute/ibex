@@ -66,6 +66,12 @@ impl Store for HangStore {
     ) -> Result<ibex_core::Note, ibex_core::StoreError> {
         Err(ibex_core::StoreError::new("notes unsupported"))
     }
+    async fn get_note(
+        &self,
+        _: ibex_core::NoteId,
+    ) -> Result<ibex_core::Note, ibex_core::StoreError> {
+        Err(ibex_core::StoreError::new("notes unsupported"))
+    }
     async fn update_note(
         &self,
         _: ibex_core::NoteId,

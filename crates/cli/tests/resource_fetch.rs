@@ -20,10 +20,10 @@ fn fetch_validates_identifier_and_update_target_before_network() {
     );
     let missing = run(&[
         "resource",
-        "fetch",
-        "9780306406157",
-        "--update",
+        "update",
         "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "--fetch",
+        "9780306406157",
     ]);
     assert!(!missing.status.success());
     let message = String::from_utf8(missing.stderr).unwrap();

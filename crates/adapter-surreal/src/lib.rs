@@ -1827,6 +1827,16 @@ impl Store for SurrealStore {
             .into_note()
     }
 
+    async fn get_note(&self, id: NoteId) -> Result<Note, StoreError> {
+        let row: Option<NoteDoc> = self
+            .db
+            .select((NOTE_TABLE, id.to_string()))
+            .await
+            .map_err(map_err)?;
+        row.ok_or_else(|| StoreError::not_found(format!("note {id}")))?
+            .into_note()
+    }
+
     async fn update_note(&self, id: NoteId, content: NoteContent) -> Result<Note, StoreError> {
         content.validate()?;
         let mut response = self

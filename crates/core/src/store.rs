@@ -89,6 +89,8 @@ pub trait Store: Send + Sync + 'static {
         resource_id: crate::ResourceId,
         content: crate::NoteContent,
     ) -> Result<crate::Note, StoreError>;
+    /// Fetch one note by id. Missing → [`StoreError::not_found`].
+    async fn get_note(&self, id: crate::NoteId) -> Result<crate::Note, StoreError>;
     /// Replace content without changing the note's resource or creation time.
     async fn update_note(
         &self,
