@@ -1047,6 +1047,10 @@ impl TableDelegate for LibraryDelegate {
             .text_size(HEADER_TEXT_SIZE);
         let label = if col_ix == COL_KIND {
             label.justify_center()
+        } else if col_ix == COL_TITLE {
+            // Row titles sit after the 1rem expand-slot + gap_1; match it so
+            // "Title" starts above the first letter of each title.
+            label.pl(rems(1.25))
         } else {
             label
         };
@@ -1340,9 +1344,15 @@ impl TableDelegate for LibraryDelegate {
                 }
                 cell
             }
-            COL_CREATORS => cell
-                .text_color(muted)
-                .child(div().min_w_0().truncate().child(row.creators_label.clone())),
+            COL_CREATORS => {
+                let label = if row.creators_label.is_empty() {
+                    "—".to_owned()
+                } else {
+                    row.creators_label.clone()
+                };
+                cell.text_color(muted)
+                    .child(div().min_w_0().truncate().child(label))
+            }
             COL_PUBLISHED => cell
                 .text_color(muted)
                 .children(row.published_label.as_ref().map(|p| p.as_str().to_owned())),
@@ -6038,47 +6048,52 @@ impl LibraryApp {
     }
 
     fn render_left_panel_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let hairline = pane_hairline(cx.theme().is_dark());
+        let dark = cx.theme().is_dark();
+        let hairline = pane_hairline(dark);
+        let swatch_ring: Hsla = if dark {
+            rgba(0xffffff55).into()
+        } else {
+            rgba(0x00000033).into()
+        };
         h_flex()
             .id("left-panel-footer")
             .test_support()
             .flex_shrink_0()
             .w_full()
             .items_center()
-            .gap_1()
             .px_2()
             .py_2()
-            .child(
-                Button::new("toggle-left-panel")
-                    .ghost()
-                    .icon(if self.left_panel_open {
-                        Icon::new(AssetIconName::PanelLeftClose).with_size(px(12.))
-                    } else {
-                        Icon::new(AssetIconName::PanelLeftOpen).with_size(px(12.))
-                    })
-                    .tooltip(if self.left_panel_open {
-                        "Hide left panel ([)"
-                    } else {
-                        "Show left panel ([)"
-                    })
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.toggle_left_panel(cx)
-                    })),
-            )
-            .child(div().flex_1())
+            // One group: panel toggle, accent swatch, theme toggle.
             .child(
                 h_flex()
                     .items_center()
                     .gap_1()
-                    .pl_2()
+                    .px_1()
                     .rounded(px(8.))
                     .border_1()
                     .border_color(hairline)
                     .id("toolbar-theme")
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
+                        Button::new("toggle-left-panel")
+                            .ghost()
+                            .icon(if self.left_panel_open {
+                                Icon::new(AssetIconName::PanelLeftClose).with_size(px(12.))
+                            } else {
+                                Icon::new(AssetIconName::PanelLeftOpen).with_size(px(12.))
+                            })
+                            .tooltip(if self.left_panel_open {
+                                "Hide left panel ([)"
+                            } else {
+                                "Show left panel ([)"
+                            })
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.toggle_left_panel(cx)
+                            })),
+                    )
+                    .child(
                         Popover::new("theme-colors-popover")
-                            .anchor(Anchor::TopRight)
+                            .anchor(Anchor::BottomRight)
                             .open(self.theme_editor_open)
                             .track_focus(&self.theme_editor.focus_handle(cx))
                             .on_open_change(cx.listener(|this, open: &bool, window, cx| {
@@ -6087,13 +6102,19 @@ impl LibraryApp {
                             .trigger(
                                 Button::new("set-accent-color")
                                     .ghost()
-                                    .label("●")
-                                    .text_color(cx.theme().primary)
                                     .tooltip("Theme colors")
                                     .disabled(
                                         self.import_state != ImportState::Idle
                                             || self.edit.is_some()
                                             || self.has_inline(cx),
+                                    )
+                                    .child(
+                                        div()
+                                            .size(px(10.))
+                                            .rounded_full()
+                                            .bg(cx.theme().primary)
+                                            .border_1()
+                                            .border_color(swatch_ring),
                                     ),
                             )
                             .child(self.theme_editor.clone()),
@@ -6101,12 +6122,12 @@ impl LibraryApp {
                     .child(
                         Button::new("toggle-theme")
                             .ghost()
-                            .icon(if cx.theme().is_dark() {
+                            .icon(if dark {
                                 symbol("sun.max", IconName::Sun).with_size(px(12.))
                             } else {
                                 symbol("moon", IconName::Moon).with_size(px(12.))
                             })
-                            .tooltip(if cx.theme().is_dark() {
+                            .tooltip(if dark {
                                 "Switch to light theme"
                             } else {
                                 "Switch to dark theme"
@@ -6164,26 +6185,13 @@ impl LibraryApp {
                     let jev_pending = self.jev.as_ref().is_some_and(|jev| {
                         Some(jev.resource_id) == self.selected && jev.status == JevStatus::Pending
                     });
+                    // Negative lead cancels the ghost button's inner padding so
+                    // the first glyph shares the title's left edge. The faint
+                    // auto-classify action trails, so a disabled one doesn't
+                    // push the visible actions in from the title.
                     h_flex()
                         .gap_1()
-                        .child(
-                            Button::new("classify-jev")
-                                .ghost()
-                                .icon(
-                                    symbol("sparkles", AssetIconName::Sparkles)
-                                        .with_size(px(16.)),
-                                )
-                                .loading(jev_pending)
-                                .disabled(jev_pending || !has_key || favorited.is_none())
-                                .tooltip(if has_key {
-                                    "Auto-classify (⌘J)"
-                                } else {
-                                    "Set an OpenRouter API key in the command palette (⌘K) to auto-classify"
-                                })
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.classify_with_jev(window, cx)
-                                })),
-                        )
+                        .ml(rems(-0.625))
                         .child(
                             Button::new("toggle-favorite")
                                 .ghost()
@@ -6220,6 +6228,24 @@ impl LibraryApp {
                                 .accessibility_label("Add attachment")
                                 .disabled(self.selected.is_some_and(|id| self.attachment_pending.contains(&id)))
                                 .on_click(cx.listener(|this, _, window, cx| this.add_attachment(window, cx))),
+                        )
+                        .child(
+                            Button::new("classify-jev")
+                                .ghost()
+                                .icon(
+                                    symbol("sparkles", AssetIconName::Sparkles)
+                                        .with_size(px(16.)),
+                                )
+                                .loading(jev_pending)
+                                .disabled(jev_pending || !has_key || favorited.is_none())
+                                .tooltip(if has_key {
+                                    "Auto-classify (⌘J)"
+                                } else {
+                                    "Set an OpenRouter API key in the command palette (⌘K) to auto-classify"
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.classify_with_jev(window, cx)
+                                })),
                         )
                         .into_any_element()
                 });
@@ -6743,6 +6769,8 @@ const TABLE_CHROME_H: f32 = 24.;
 const CONTENT_GAP: f32 = 8.;
 /// Shared corner radius for the library table card shell.
 const TABLE_CARD_RADIUS: f32 = 12.;
+/// Horizontal inset of rows inside the card shell.
+const TABLE_ROW_INSET: f32 = 5.;
 
 /// Phantom band matching the content column above the table card, so sidebar
 /// content shares the card's top line. Mirrors: TitleBar + pt + chrome + gap.
@@ -7336,6 +7364,7 @@ impl Render for LibraryApp {
                                                     .icon(
                                                         Icon::new(IconName::Plus).with_size(px(12.)),
                                                     )
+                                                    .label("Add")
                                                     .loading(
                                                         self.import_state != ImportState::Idle,
                                                     )
@@ -7439,7 +7468,8 @@ impl Render for LibraryApp {
                                         let table_shell: Hsla = if dark {
                                             rgba(0xffffff0e).into()
                                         } else {
-                                            rgba(0xffffff8c).into()
+                                            // ~0.47 so the wash tints the card; not opaque.
+                                            rgba(0xffffff78).into()
                                         };
                                         // Shell owns the fill + radius. Inner clip
                                         // repeats radius/overflow so row paint cannot
@@ -7455,7 +7485,10 @@ impl Render for LibraryApp {
                                             .rounded(px(TABLE_CARD_RADIUS))
                                             .bg(table_shell)
                                             .overflow_hidden()
-                                            .p(px(1.))
+                                            // Side inset floats the selection pill off the
+                                            // card edge instead of merging with it.
+                                            .px(px(TABLE_ROW_INSET))
+                                            .py(px(1.))
                                             .child(
                                                 div()
                                                     .size_full()
@@ -7463,7 +7496,20 @@ impl Render for LibraryApp {
                                                     .rounded(px(TABLE_CARD_RADIUS - 1.))
                                                     .overflow_hidden()
                                                     .child(table),
-                                            );
+                                            )
+                                            .when(dark, |card| {
+                                                // Faint top highlight so the dark card
+                                                // catches the glow; inset past the corners.
+                                                card.child(
+                                                    div()
+                                                        .absolute()
+                                                        .top_0()
+                                                        .left(px(TABLE_CARD_RADIUS))
+                                                        .right(px(TABLE_CARD_RADIUS))
+                                                        .h(px(1.))
+                                                        .bg(rgba(0xffffff12)),
+                                                )
+                                            });
                                         if editing {
                                             wrap.track_focus(&self.inline_trap)
                                                 .focus_trap("inline-edit-trap", &self.inline_trap)

@@ -96,6 +96,13 @@ fn palette(mode: ThemeMode, mut colors: ThemeColor) -> ThemeColor {
     colors.table_head = invisible;
     colors.table_hover = glass_hover;
     colors.table_row_border = invisible; // row separators stay off too
+    // Dark labels sit ~2:1 against the card by default; lift only dark so
+    // light keeps its restrained muted labels.
+    if dark {
+        let mut head = colors.foreground;
+        head.a = 0.6;
+        colors.table_head_foreground = head;
+    }
     colors.popover = glass_raised;
     colors.tab = glass;
     colors.tab_active = glass_raised;
