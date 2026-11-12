@@ -23,6 +23,8 @@ time = { workspace = true }
 reqwest = { workspace = true }
 dirs = { workspace = true }
 toml = { workspace = true }
+tokio = { workspace = true }
+pdf-extract = "0.12"
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -31,5 +33,10 @@ tokio = { workspace = true }
 
 [[bench]]
 name = "import_pipeline"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
+name = "topic_cluster"
 harness = false
 required-features = ["testing"]
