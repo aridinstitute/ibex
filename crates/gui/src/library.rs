@@ -29,8 +29,8 @@ use gpui_kit::component::table::{Column, DataTable, TableDelegate, TableEvent, T
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme as _, FocusTrapElement as _, FocusableExt as _, Icon, IconName, IndexPath,
-    Selectable as _, Sizable as _, Size, ThemeColor, ThemeMode, TitleBar, WindowExt as _, h_flex,
-    v_flex,
+    Selectable as _, Sizable as _, Size, TITLE_BAR_HEIGHT, ThemeColor, ThemeMode, TitleBar,
+    WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{Focusable as _, *};
@@ -230,7 +230,8 @@ fn membership_chip(label: String, cx: &App) -> Div {
         .min_h(px(20.))
         .rounded(px(6.))
         .border_1()
-        .border_color(cx.theme().border)
+        // theme.border is invisible (DataTable header seam); chips need a whisper.
+        .border_color(cx.theme().input)
         .child(div().pr_1().child(label))
 }
 
@@ -265,7 +266,7 @@ impl Render for CollectionDragGhost {
             .text_color(cx.theme().popover_foreground)
             .text_size(px(12.))
             .border_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().input)
             .child(self.name.clone())
     }
 }
@@ -697,10 +698,10 @@ impl LibraryDelegate {
             .h(Size::XSmall.table_row_height())
             .items_center()
             .px(pad.left)
-            .border_t_1()
+            // No top rule — a border_t under Title/Authors is the "weird line".
             .border_r_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+            .border_color(cx.theme().input)
+            .bg(rgba(0x00000000))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(|_, _, cx| cx.stop_propagation());
         let (Some(inputs), Some(field)) =
@@ -766,7 +767,7 @@ impl LibraryDelegate {
                         .w(px(1.))
                         .h_full()
                         .flex_shrink_0()
-                        .bg(cx.theme().border),
+                        .bg(cx.theme().input),
                 )
                 .child(
                     Input::new(&inputs.published_to)
@@ -1046,6 +1047,10 @@ impl TableDelegate for LibraryDelegate {
             .text_size(HEADER_TEXT_SIZE);
         let label = if col_ix == COL_KIND {
             label.justify_center()
+        } else if col_ix == COL_TITLE {
+            // Row titles sit after the 1rem expand-slot + gap_1; match it so
+            // "Title" starts above the first letter of each title.
+            label.pl(rems(1.25))
         } else {
             label
         };
@@ -1339,9 +1344,15 @@ impl TableDelegate for LibraryDelegate {
                 }
                 cell
             }
-            COL_CREATORS => cell
-                .text_color(muted)
-                .child(div().min_w_0().truncate().child(row.creators_label.clone())),
+            COL_CREATORS => {
+                let label = if row.creators_label.is_empty() {
+                    "—".to_owned()
+                } else {
+                    row.creators_label.clone()
+                };
+                cell.text_color(muted)
+                    .child(div().min_w_0().truncate().child(label))
+            }
             COL_PUBLISHED => cell
                 .text_color(muted)
                 .children(row.published_label.as_ref().map(|p| p.as_str().to_owned())),
@@ -5638,9 +5649,71 @@ impl LibraryApp {
         v_flex()
             .id("library-navigation")
             .size_full()
-            .p_2()
-            .overflow_y_scroll()
+            .overflow_hidden()
             .text_size(px(12.))
+            // Same vertical stack as the content column above the table card.
+            .child(
+                v_flex()
+                    .id("library-navigation-align")
+                    .test_support()
+                    .w_full()
+                    .flex_shrink_0()
+                    .child(
+                        h_flex()
+                            .id("toolbar-brand")
+                            .test_support()
+                            .h(TITLE_BAR_HEIGHT)
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap_1()
+                            .px_2()
+                            .ml(if cfg!(target_os = "macos") {
+                                px(68.)
+                            } else {
+                                px(0.)
+                            })
+                            .child(
+                                img("images/ibex-mark.png")
+                                    .w(px(18.))
+                                    .h(px(18.))
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(cx.theme().foreground)
+                                    .child("Ibex"),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .pt(px(CONTENT_TOP_PAD))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(TABLE_CHROME_H))
+                                    .flex_shrink_0(),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(CONTENT_GAP))
+                                    .flex_shrink_0(),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .id("library-navigation-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(
+                        v_flex()
+                            .px_2()
+                            .pb_2()
             .child(self.sidebar_row(
                 0,
                 SidebarNav::All,
@@ -5958,15 +6031,115 @@ impl LibraryApp {
                         })
                 },
             ))
-            .when_some(self.counts_error.as_ref(), |panel, error| {
-                panel.child(
-                    div()
-                        .px_2()
-                        .pt_2()
-                        .text_color(cx.theme().danger)
-                        .child(format!("Counts unavailable: {error}")),
-                )
-            })
+                            .when_some(self.counts_error.as_ref(), |panel, error| {
+                                panel.child(
+                                    div()
+                                        .px_2()
+                                        .pt_2()
+                                        .text_color(cx.theme().danger)
+                                        .child(format!("Counts unavailable: {error}")),
+                                )
+                            }),
+                    ),
+            )
+            // Sidebar toggle + theme live at the rail foot (not in the
+            // content TitleBar).
+            .child(self.render_left_panel_footer(cx))
+    }
+
+    fn render_left_panel_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let dark = cx.theme().is_dark();
+        let hairline = pane_hairline(dark);
+        let swatch_ring: Hsla = if dark {
+            rgba(0xffffff55).into()
+        } else {
+            rgba(0x00000033).into()
+        };
+        h_flex()
+            .id("left-panel-footer")
+            .test_support()
+            .flex_shrink_0()
+            .w_full()
+            .items_center()
+            .px_2()
+            .py_2()
+            // One group: panel toggle, accent swatch, theme toggle.
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1()
+                    .px_1()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(hairline)
+                    .id("toolbar-theme")
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        Button::new("toggle-left-panel")
+                            .ghost()
+                            .icon(if self.left_panel_open {
+                                Icon::new(AssetIconName::PanelLeftClose).with_size(px(12.))
+                            } else {
+                                Icon::new(AssetIconName::PanelLeftOpen).with_size(px(12.))
+                            })
+                            .tooltip(if self.left_panel_open {
+                                "Hide left panel ([)"
+                            } else {
+                                "Show left panel ([)"
+                            })
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.toggle_left_panel(cx)
+                            })),
+                    )
+                    .child(
+                        Popover::new("theme-colors-popover")
+                            .anchor(Anchor::BottomRight)
+                            .open(self.theme_editor_open)
+                            .track_focus(&self.theme_editor.focus_handle(cx))
+                            .on_open_change(cx.listener(|this, open: &bool, window, cx| {
+                                this.set_theme_editor_open(*open, window, cx);
+                            }))
+                            .trigger(
+                                Button::new("set-accent-color")
+                                    .ghost()
+                                    .tooltip("Theme colors")
+                                    .disabled(
+                                        self.import_state != ImportState::Idle
+                                            || self.edit.is_some()
+                                            || self.has_inline(cx),
+                                    )
+                                    .child(
+                                        div()
+                                            .size(px(10.))
+                                            .rounded_full()
+                                            .bg(cx.theme().primary)
+                                            .border_1()
+                                            .border_color(swatch_ring),
+                                    ),
+                            )
+                            .child(self.theme_editor.clone()),
+                    )
+                    .child(
+                        Button::new("toggle-theme")
+                            .ghost()
+                            .icon(if dark {
+                                symbol("sun.max", IconName::Sun).with_size(px(12.))
+                            } else {
+                                symbol("moon", IconName::Moon).with_size(px(12.))
+                            })
+                            .tooltip(if dark {
+                                "Switch to light theme"
+                            } else {
+                                "Switch to dark theme"
+                            })
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                cx.stop_propagation();
+                                let settings =
+                                    this.table.read(cx).delegate().settings.theme.clone();
+                                toggle_theme(&settings, cx);
+                            })),
+                    ),
+            )
     }
 
     /// The right-side sidebar: the edit form while one is open, the detail
@@ -6012,26 +6185,13 @@ impl LibraryApp {
                     let jev_pending = self.jev.as_ref().is_some_and(|jev| {
                         Some(jev.resource_id) == self.selected && jev.status == JevStatus::Pending
                     });
+                    // Negative lead cancels the ghost button's inner padding so
+                    // the first glyph shares the title's left edge. The faint
+                    // auto-classify action trails, so a disabled one doesn't
+                    // push the visible actions in from the title.
                     h_flex()
                         .gap_1()
-                        .child(
-                            Button::new("classify-jev")
-                                .ghost()
-                                .icon(
-                                    symbol("sparkles", AssetIconName::Sparkles)
-                                        .with_size(px(16.)),
-                                )
-                                .loading(jev_pending)
-                                .disabled(jev_pending || !has_key || favorited.is_none())
-                                .tooltip(if has_key {
-                                    "Auto-classify (⌘J)"
-                                } else {
-                                    "Set an OpenRouter API key in the command palette (⌘K) to auto-classify"
-                                })
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.classify_with_jev(window, cx)
-                                })),
-                        )
+                        .ml(rems(-0.625))
                         .child(
                             Button::new("toggle-favorite")
                                 .ghost()
@@ -6068,6 +6228,24 @@ impl LibraryApp {
                                 .accessibility_label("Add attachment")
                                 .disabled(self.selected.is_some_and(|id| self.attachment_pending.contains(&id)))
                                 .on_click(cx.listener(|this, _, window, cx| this.add_attachment(window, cx))),
+                        )
+                        .child(
+                            Button::new("classify-jev")
+                                .ghost()
+                                .icon(
+                                    symbol("sparkles", AssetIconName::Sparkles)
+                                        .with_size(px(16.)),
+                                )
+                                .loading(jev_pending)
+                                .disabled(jev_pending || !has_key || favorited.is_none())
+                                .tooltip(if has_key {
+                                    "Auto-classify (⌘J)"
+                                } else {
+                                    "Set an OpenRouter API key in the command palette (⌘K) to auto-classify"
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.classify_with_jev(window, cx)
+                                })),
                         )
                         .into_any_element()
                 });
@@ -6583,6 +6761,34 @@ fn padded_input(state: &Entity<InputState>) -> Input {
 /// without overwriting the user's preferred widths.
 /// Toolbar plus the row padding above the stacked right rail.
 const RAIL_CHROME: f32 = 88.;
+/// `pt` above the +/filter chrome in the content column.
+const CONTENT_TOP_PAD: f32 = 4.;
+/// Height of the +/filter row above the table card (small icon buttons).
+const TABLE_CHROME_H: f32 = 24.;
+/// Gap between +/filter chrome and the table card.
+const CONTENT_GAP: f32 = 8.;
+/// Shared corner radius for the library table card shell.
+const TABLE_CARD_RADIUS: f32 = 12.;
+/// Horizontal inset of rows inside the card shell.
+const TABLE_ROW_INSET: f32 = 5.;
+
+/// Phantom band matching the content column above the table card, so sidebar
+/// content shares the card's top line. Mirrors: TitleBar + pt + chrome + gap.
+/// Gap is an explicit trailing spacer (not `.gap`) so it still applies when
+/// this stack has no second content child.
+fn table_card_top_spacer() -> Div {
+    v_flex()
+        .w_full()
+        .flex_shrink_0()
+        .child(div().w_full().h(TITLE_BAR_HEIGHT).flex_shrink_0())
+        .child(
+            v_flex()
+                .w_full()
+                .pt(px(CONTENT_TOP_PAD))
+                .child(div().w_full().h(px(TABLE_CHROME_H)).flex_shrink_0())
+                .child(div().w_full().h(px(CONTENT_GAP)).flex_shrink_0()),
+        )
+}
 
 fn sidebar_target_widths(
     viewport: Pixels,
@@ -6611,13 +6817,13 @@ fn sidebar_target_widths(
     (px(left * scale), px(right * scale))
 }
 
-// Sidebar navigation is neutral; the table keeps its blue active-row tint.
+// Sidebar selection is a soft glass wash; the table keeps its blue active tint.
 fn sidebar_selected_background(theme: &ThemeColor) -> Hsla {
-    theme.accent
+    theme.primary.opacity(0.14)
 }
 
 /// Warm gold for favorite stars (outline and fill). Dark mode lifts the
-/// same hue so the glyph stays legible on the darker island surface.
+/// same hue so the glyph stays legible on translucent pane surfaces.
 fn favorite_star_color(dark: bool) -> Hsla {
     rgb(if dark { 0xf5c542 } else { 0xd4a017 }).into()
 }
@@ -6665,12 +6871,17 @@ const SIDEBAR_KIND_ORDER: [ResourceKind; 21] = [
     ResourceKind::ComputerProgram,
 ];
 
-const LIGHT_GRADIENT: (u32, u32) = (0xeae8e2, 0xd9dde5);
-const DARK_GRADIENT: (u32, u32) = (0x292722, 0x262c35);
+// Vivid cool atmosphere (not cream / purple-indigo / broadsheet). Light is a
+// bright mist into steel-blue; dark is deep ink into blue-slate — loud enough
+// to read through glass sheets.
+// Light stays restrained (cool grey wash). Dark keeps a deeper navy atmosphere.
+const LIGHT_GRADIENT: (u32, u32) = (0xf1f3f6, 0xe4e8ee);
+const DARK_GRADIENT: (u32, u32) = (0x0a0c12, 0x152033);
 // CSS angles rotate clockwise from up: 225° points toward the bottom-left.
 const WORKSPACE_GRADIENT_ANGLE: f32 = 225.;
 
 /// Mirror the pinned GPUI renderer's aspect-corrected linear-gradient projection.
+#[cfg(test)]
 fn workspace_gradient_fraction(x: f32, y: f32, width: f32, height: f32) -> f32 {
     let width = width.max(1.);
     let height = height.max(1.);
@@ -6684,8 +6895,8 @@ fn workspace_gradient_fraction(x: f32, y: f32, width: f32, height: f32) -> f32 {
     let span = if dx.abs() > dy.abs() { width } else { height };
     (0.5 + distance / span).clamp(0., 1.)
 }
-const ISLAND_RADIUS: Pixels = px(16.);
 
+#[cfg(test)]
 fn mix_rgb(from: Rgba, to: Rgba, amount: f32) -> Rgba {
     Rgba {
         r: from.r + (to.r - from.r) * amount,
@@ -6697,14 +6908,13 @@ fn mix_rgb(from: Rgba, to: Rgba, amount: f32) -> Rgba {
 
 /// A neutral wash from the top-right to the bottom-left end; a configured
 /// secondary replaces that end exactly. The accent lives in [`WorkspaceGlow`].
-/// Share the stops with the corner mask so its cutouts match the backdrop.
 fn workspace_gradient_stops(dark: bool, secondary: Option<u32>) -> (Rgba, Rgba) {
     let (start, end) = if dark { DARK_GRADIENT } else { LIGHT_GRADIENT };
     (rgb(start), secondary.map(rgb).unwrap_or(rgb(end)))
 }
 
 /// Gradient fraction at which the accent glow has fully dissolved.
-const GLOW_REACH: f32 = 0.4;
+const GLOW_REACH: f32 = 0.62;
 
 /// A vivid accent glow in the top-right corner that dissolves into the wash
 /// well before the middle. GPUI gradients carry only two stops, so the glow is
@@ -6719,7 +6929,8 @@ impl WorkspaceGlow {
     fn new(dark: bool, accent: Hsla) -> Self {
         Self {
             accent: accent.to_rgb(),
-            alpha: if dark { 0.35 } else { 0.25 },
+            // Dark keeps a vivid corner bloom; light stays quieter.
+            alpha: if dark { 0.55 } else { 0.16 },
         }
     }
 
@@ -6733,51 +6944,37 @@ impl WorkspaceGlow {
     }
 
     /// The opaque color the glow composited over the wash produces at `t`.
+    #[cfg(test)]
     fn over(self, stops: (Rgba, Rgba), t: f32) -> Rgba {
         let alpha = self.alpha * (1. - t / GLOW_REACH).max(0.);
         mix_rgb(mix_rgb(stops.0, stops.1, t), self.accent, alpha)
     }
 }
 
-/// GPUI's overflow clip is rectangular. Paint just the four regions outside
-/// the island's round outline over its square-edged children, without insetting
-/// the table or inspector. This canvas has no hitbox and cannot block clicks.
-fn island_corner_mask(stops: (Rgba, Rgba), glow: WorkspaceGlow) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let radius = f32::from(ISLAND_RADIUS);
-            let x0 = f32::from(bounds.origin.x);
-            let x1 = x0 + f32::from(bounds.size.width);
-            let y0 = f32::from(bounds.origin.y);
-            let y1 = y0 + f32::from(bounds.size.height);
-            let width = f32::from(window.viewport_size().width);
-            let height = f32::from(window.viewport_size().height);
-            for right in [false, true] {
-                let x = if right { x1 } else { x0 };
-                for bottom in [false, true] {
-                    let y = if bottom { y1 } else { y0 };
-                    let t = workspace_gradient_fraction(x, y, width, height);
-                    let color = Hsla::from(glow.over(stops, t));
-                    let sx = if right { -1. } else { 1. };
-                    let sy = if bottom { -1. } else { 1. };
-                    let at = |u: f32, v: f32| point(px(x + sx * u), px(y + sy * v));
-                    let mut path = PathBuilder::fill();
-                    path.move_to(at(0., 0.));
-                    path.line_to(at(radius, 0.));
-                    let control = radius * (1. - 0.552_284_8);
-                    path.cubic_bezier_to(at(0., radius), at(control, 0.), at(0., control));
-                    path.close();
-                    if let Ok(path) = path.build() {
-                        window.paint_path(path, color);
-                    }
-                }
-            }
-        },
-    )
-    .absolute()
-    .inset_0()
-    .size_full()
+/// Column panes stay fully clear — theme glass already paints the widgets.
+/// Extra fills made the detail rail read as a boxed island.
+fn pane_fill(_dark: bool) -> Hsla {
+    rgba(0x00000000).into()
+}
+
+/// Soft column guides only (search/theme chips). Pane chrome itself is borderless.
+fn pane_hairline(dark: bool) -> Hsla {
+    if dark {
+        rgba(0xffffff18).into()
+    } else {
+        rgba(0x00000014).into()
+    }
+}
+
+/// Full-window glass scrim — one sheet under chrome and body so the header
+/// and content read as a single frosted surface.
+fn window_glass(dark: bool) -> Hsla {
+    if dark {
+        rgba(0x0c101866).into()
+    } else {
+        // Slightly denser frost so the light wash does not shout through chrome.
+        rgba(0xffffff73).into()
+    }
 }
 impl Render for LibraryApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -6850,13 +7047,22 @@ impl Render for LibraryApp {
         // The accent caret stays visible on the pale selection tint.
         let editing = self.has_inline(cx);
 
-        let stops = workspace_gradient_stops(cx.theme().is_dark(), secondary);
+        let dark = cx.theme().is_dark();
+        let stops = workspace_gradient_stops(dark, secondary);
         let background = linear_gradient(
             WORKSPACE_GRADIENT_ANGLE,
             linear_color_stop(Hsla::from(stops.0), 0.),
             linear_color_stop(Hsla::from(stops.1), 1.),
         );
-        let glow = WorkspaceGlow::new(cx.theme().is_dark(), cx.theme().primary);
+        let glow = WorkspaceGlow::new(dark, cx.theme().primary);
+        let fill = pane_fill(dark);
+        let hairline = pane_hairline(dark);
+        let glass = window_glass(dark);
+        let search_fill: Hsla = if dark {
+            rgba(0xffffff18).into()
+        } else {
+            rgba(0xffffff66).into()
+        };
 
         v_flex()
             .size_full()
@@ -6975,276 +7181,44 @@ impl Render for LibraryApp {
                     cx.propagate();
                 }
             }))
-            // First child paints beneath the toolbar and body; it has no hitbox.
+            // Static accent glow (one continuous layer under chrome + body).
             .child(div().absolute().inset_0().bg(glow.background()))
+            // One glass sheet for the whole window — header and body share it.
+            .child(div().absolute().inset_0().bg(glass))
+            // A second soft wash breathes so the atmosphere has presence.
             .child(
-                // The toolbar doubles as the window's title bar; reserve space
-                // for the native traffic lights without adding a bottom rule.
-                TitleBar::new()
-                    .h(px(40.))
-                    .pl_0()
-                    .border_0()
-                    // Share the viewport backdrop instead of restarting the gradient here.
-                    .bg(transparent_black())
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .h_full()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                h_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    // Equal flex side regions keep search centered despite asymmetric controls.
-                                    // Keep edge insets on the controls, not these regions,
-                                    // so padding cannot offset the search from window center.
-                                    .items_center()
-                                    .child(
-                                        Button::new("toggle-left-panel")
-                                            .ghost()
-                                            .ml(if cfg!(target_os = "macos") {
-                                                px(80.)
-                                            } else {
-                                                px(12.)
-                                            })
-                                            .icon(if self.left_panel_open {
-                                                Icon::new(AssetIconName::PanelLeftClose)
-                                                    .with_size(px(12.))
-                                            } else {
-                                                Icon::new(AssetIconName::PanelLeftOpen)
-                                                    .with_size(px(12.))
-                                            })
-                                            .tooltip(if self.left_panel_open {
-                                                "Hide left panel ([)"
-                                            } else {
-                                                "Show left panel ([)"
-                                            })
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                this.toggle_left_panel(cx)
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("toggle-filters")
-                                            .ghost()
-                                            .icon(
-                                                symbol(
-                                                    "line.3.horizontal.decrease",
-                                                    IconName::Settings2,
-                                                )
-                                                .with_size(px(12.)),
-                                            )
-                                            .tooltip("Toggle filters")
-                                            .selected(filters_visible)
-                                            .when(filter_active, |button| {
-                                                button.text_color(cx.theme().primary)
-                                            })
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                this.toggle_filters(cx)
-                                            })),
-                                    ),
-                            )
-                            .when_some(search_input.as_ref(), |bar, input| {
-                                bar.child(
-                                    div()
-                                        .id("toolbar-search")
-                                        .w(px(440.))
-                                        .max_w(relative(0.5))
-                                        // Selecting text must not start dragging the window.
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .on_click(|_, _, cx| cx.stop_propagation())
-                                        .child(
-                                            Input::new(input)
-                                                // Input::h only affects multiline editors; constrain
-                                                // the single-line frame through its style instead.
-                                                .min_h(px(30.))
-                                                .rounded(px(8.))
-                                                .bg(cx.theme().muted)
-                                                .border_color(cx.theme().border)
-                                                .px(px(12.))
-                                                .py(px(6.))
-                                                .text_size(px(12.))
-                                                .prefix(
-                                                    Icon::new(IconName::Search)
-                                                        .with_size(px(13.))
-                                                        .text_color(cx.theme().muted_foreground),
-                                                )
-                                                .suffix(
-                                                    div()
-                                                        .pr_1()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child("/"),
-                                                )
-                                                .cleanable(true)
-                                                .w_full(),
-                                        ),
-                                )
-                            })
-                            .child(
-                                h_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .items_center()
-                                    .justify_end()
-                                    .child(
-                                        Button::new("add-resource")
-                                            .ghost()
-                                            .icon(Icon::new(IconName::Plus).with_size(px(12.)))
-                                            .loading(self.import_state != ImportState::Idle)
-                                            .disabled(self.import_state != ImportState::Idle)
-                                            .tooltip(match self.import_state {
-                                                ImportState::Idle => "Add resource",
-                                                ImportState::Choosing => "Choosing file…",
-                                                ImportState::Importing => "Importing…",
-                                            })
-                                            .dropdown_menu_with_anchor(Anchor::TopRight, {
-                                                let app = cx.entity().downgrade();
-                                                move |menu, window, _cx| {
-                                                    let Some(app) = app.upgrade() else {
-                                                        return menu;
-                                                    };
-                                                    menu.item(
-                                                        PopupMenuItem::new("Add by ISBN or DOI…")
-                                                            .on_click(window.listener_for(
-                                                                &app,
-                                                                |this, _, window, cx| {
-                                                                    if let Some(palette) = this
-                                                                        .open_palette(window, cx)
-                                                                    {
-                                                                        palette.update(
-                                                                        cx,
-                                                                        |palette, cx| {
-                                                                            palette.open_identifier(
-                                                                                window, cx,
-                                                                            )
-                                                                        },
-                                                                    );
-                                                                    }
-                                                                },
-                                                            )),
-                                                    )
-                                                    .item(
-                                                        PopupMenuItem::new("Import file…")
-                                                            .on_click(window.listener_for(
-                                                                &app,
-                                                                |this, _, window, cx| {
-                                                                    this.import_biblatex(window, cx)
-                                                                },
-                                                            )),
-                                                    )
-                                                }
-                                            }),
-                                    )
-                                    .child(
-                                        Button::new("open-documentation")
-                                            .ghost()
-                                            .small()
-                                            .icon(symbol(
-                                                "questionmark.circle",
-                                                AssetIconName::CircleQuestionMark,
-                                            ))
-                                            .accessibility_label("Open documentation")
-                                            .tooltip("Open documentation (F1)")
-                                            .on_click(cx.listener(|_, _, window, cx| {
-                                                cx.stop_propagation();
-                                                if let Err(error) = DocumentationWindow::open(cx) {
-                                                    window.push_notification(
-                                                        format!(
-                                                            "Could not open documentation: {error}"
-                                                        ),
-                                                        cx,
-                                                    );
-                                                }
-                                            })),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .items_center()
-                                            .mr(px(12.))
-                                            .gap_1()
-                                            .pl_2()
-                                            .rounded(px(8.))
-                                            .border_1()
-                                            .border_color(cx.theme().border)
-                                            .bg(cx.theme().background)
-                                            .id("toolbar-theme")
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                cx.stop_propagation()
-                                            })
-                                            .child(
-                                                Popover::new("theme-colors-popover")
-                                                    .anchor(Anchor::TopRight)
-                                                    .open(self.theme_editor_open)
-                                                    .track_focus(
-                                                        &self.theme_editor.focus_handle(cx),
-                                                    )
-                                                    .on_open_change(cx.listener(
-                                                        |this, open: &bool, window, cx| {
-                                                            this.set_theme_editor_open(
-                                                                *open, window, cx,
-                                                            );
-                                                        },
-                                                    ))
-                                                    .trigger(
-                                                        Button::new("set-accent-color")
-                                                            .ghost()
-                                                            .label("●")
-                                                            .text_color(cx.theme().primary)
-                                                            .tooltip("Theme colors")
-                                                            .disabled(
-                                                                self.import_state
-                                                                    != ImportState::Idle
-                                                                    || self.edit.is_some()
-                                                                    || self.has_inline(cx),
-                                                            ),
-                                                    )
-                                                    .child(self.theme_editor.clone()),
-                                            )
-                                            .child(
-                                                Button::new("toggle-theme")
-                                                    .ghost()
-                                                    .icon(if cx.theme().is_dark() {
-                                                        symbol("sun.max", IconName::Sun)
-                                                            .with_size(px(12.))
-                                                    } else {
-                                                        symbol("moon", IconName::Moon)
-                                                            .with_size(px(12.))
-                                                    })
-                                                    .tooltip(if cx.theme().is_dark() {
-                                                        "Switch to light theme"
-                                                    } else {
-                                                        "Switch to dark theme"
-                                                    })
-                                                    .on_click(cx.listener(
-                                                        |this, _, _window, cx| {
-                                                            cx.stop_propagation();
-                                                            let settings = this
-                                                                .table
-                                                                .read(cx)
-                                                                .delegate()
-                                                                .settings
-                                                                .theme
-                                                                .clone();
-                                                            toggle_theme(&settings, cx);
-                                                        },
-                                                    )),
-                                            ),
-                                    ),
-                            ),
+                div()
+                    .absolute()
+                    .inset_0()
+                    .bg(cx.theme().primary.opacity(if dark { 0.14 } else { 0.035 }))
+                    .with_animation(
+                        "workspace-glow-pulse",
+                        Animation::new(Duration::from_millis(3200))
+                            .repeat()
+                            .with_easing(ease_in_out),
+                        |el, t| {
+                            let breath = 0.25 + 0.75 * (std::f32::consts::PI * t).sin().abs();
+                            el.opacity(breath)
+                        },
                     ),
             )
             .child(
-                // Each pane owns its surface; the row's gutters reveal the
-                // window gradient without changing the table or inspector.
+                // Full-height rails: sidebars meet the window top; content
+                // column owns the TitleBar / search / actions (Later / Patreon /
+                // Notion pattern from the chrome options prototype).
                 h_flex()
+                    .id("workspace-body")
+                    .test_support()
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
                     .items_stretch()
-                    .gap_2()
-                    .p_2()
+                    .gap_0()
+                    .with_animation(
+                        "workspace-body-enter",
+                        Animation::new(Duration::from_millis(380)).with_easing(ease_in_out),
+                        |el, t| el.opacity(0.35 + 0.65 * t),
+                    )
                     .when(left_panel_width > px(0.5), |el| {
                         el.child(
                             div()
@@ -7254,10 +7228,7 @@ impl Render for LibraryApp {
                                 .flex_shrink_0()
                                 .h_full()
                                 .overflow_hidden()
-                                .rounded(ISLAND_RADIUS)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().background)
+                                .bg(fill)
                                 .child(self.render_left_panel(cx))
                                 .when(self.left_panel_open, |el| {
                                     el.child(self.sidebar_resize_handle(true, left_panel_width, cx))
@@ -7265,57 +7236,294 @@ impl Render for LibraryApp {
                         )
                     })
                     .child(
-                        // `h_flex` centers its children on the cross axis
-                        // instead of stretching them, so the wrapper must
-                        // claim the row's height itself: without `h_full`
-                        // it falls back to content height, every
-                        // percentage height below it (the table, its
-                        // scroll body, the rows list) collapses, and the
-                        // header-only strip floats mid-window with no
-                        // rows and no empty state.
-                        {
-                            let table = DataTable::new(&self.table)
-                                .with_size(Size::XSmall)
-                                .bordered(false)
-                                .stripe(false)
-                                // The table holds focus from the first frame (so
-                                // the detail-panel key works), which makes the
-                                // kit's keyboard focus ring draw on every arrow
-                                // key. The table fills this container edge to
-                                // edge, so only the ring's top edge is inside
-                                // the window, and it reads as a stray bar under
-                                // the toolbar. The row highlight already shows
-                                // where focus is; the ring adds nothing.
-                                .focus_ring(false)
-                                .when_some(header_row_height(filters_visible), |table, height| {
-                                    table.header_row_height(height)
-                                });
-                            let wrap = div()
-                                .id("library-grid-viewport")
-                                .test_support()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .relative()
-                                .rounded(ISLAND_RADIUS)
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .bg(cx.theme().background)
-                                .overflow_hidden();
-                            // While inline editing, keep Root Tab/TabPrev inside
-                            // the grid so focus cannot walk to toolbar/sidebar.
-                            if editing {
-                                wrap.track_focus(&self.inline_trap)
-                                    .focus_trap("inline-edit-trap", &self.inline_trap)
-                                    .child(table)
-                                    .child(island_corner_mask(stops, glow))
-                                    .into_any_element()
-                            } else {
-                                wrap.child(table)
-                                    .child(island_corner_mask(stops, glow))
-                                    .into_any_element()
-                            }
-                        },
+                        v_flex()
+                            .id("library-content-column")
+                            .test_support()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            // Slim search chrome only — panel/theme/+ live elsewhere.
+                            .child(
+                                TitleBar::new()
+                                    // Height comes from kit TITLE_BAR_HEIGHT (34);
+                                    // CONTENT_TITLE_BAR must stay in sync for align.
+                                    .pl_0()
+                                    .border_0()
+                                    .bg(transparent_black())
+                                    .child(
+                                        h_flex()
+                                            .w_full()
+                                            .h_full()
+                                            .items_center()
+                                            .gap_2()
+                                            .px_3()
+                                            .child(div().flex_1().min_w_0())
+                                            .when_some(search_input.as_ref(), |bar, input| {
+                                                bar.child(
+                                                    div()
+                                                        .id("toolbar-search")
+                                                        .w(px(360.))
+                                                        .max_w(relative(0.55))
+                                                        .on_mouse_down(
+                                                            MouseButton::Left,
+                                                            |_, _, cx| cx.stop_propagation(),
+                                                        )
+                                                        .on_click(|_, _, cx| cx.stop_propagation())
+                                                        .child(
+                                                            Input::new(input)
+                                                                .min_h(px(16.))
+                                                                .rounded(px(8.))
+                                                                .bg(search_fill)
+                                                                .border_color(hairline)
+                                                                .px(px(10.))
+                                                                .py(px(2.))
+                                                                .text_size(px(11.))
+                                                                .prefix(
+                                                                    Icon::new(IconName::Search)
+                                                                        .with_size(px(11.))
+                                                                        .text_color(
+                                                                            cx.theme()
+                                                                                .muted_foreground,
+                                                                        ),
+                                                                )
+                                                                .suffix(
+                                                                    div()
+                                                                        .pr_1()
+                                                                        .text_color(
+                                                                            cx.theme()
+                                                                                .muted_foreground,
+                                                                        )
+                                                                        .child("/"),
+                                                                )
+                                                                .cleanable(true)
+                                                                .w_full(),
+                                                        ),
+                                                )
+                                            })
+                                            .child(
+                                                h_flex()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .items_center()
+                                                    .justify_end()
+                                                    .child(
+                                                        Button::new("open-documentation")
+                                                            .ghost()
+                                                            .small()
+                                                            .icon(symbol(
+                                                                "questionmark.circle",
+                                                                AssetIconName::CircleQuestionMark,
+                                                            ))
+                                                            .accessibility_label(
+                                                                "Open documentation",
+                                                            )
+                                                            .tooltip("Open documentation (F1)")
+                                                            .on_click(cx.listener(
+                                                                |_, _, window, cx| {
+                                                                    cx.stop_propagation();
+                                                                    if let Err(error) =
+                                                                        DocumentationWindow::open(
+                                                                            cx,
+                                                                        )
+                                                                    {
+                                                                        window.push_notification(
+                                                                            format!(
+                                                                                "Could not open documentation: {error}"
+                                                                            ),
+                                                                            cx,
+                                                                        );
+                                                                    }
+                                                                },
+                                                            )),
+                                                    ),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .min_w_0()
+                                    .px_3()
+                                    .pb_3()
+                                    .pt(px(CONTENT_TOP_PAD))
+                                    // + and filters sit above the table card, not the TitleBar.
+                                    .child(
+                                        h_flex()
+                                            .id("library-table-chrome")
+                                            .test_support()
+                                            .w_full()
+                                            .h(px(TABLE_CHROME_H))
+                                            .flex_shrink_0()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(
+                                                Button::new("add-resource")
+                                                    .ghost()
+                                                    .small()
+                                                    .icon(
+                                                        Icon::new(IconName::Plus).with_size(px(12.)),
+                                                    )
+                                                    .label("Add")
+                                                    .loading(
+                                                        self.import_state != ImportState::Idle,
+                                                    )
+                                                    .disabled(
+                                                        self.import_state != ImportState::Idle,
+                                                    )
+                                                    .tooltip(match self.import_state {
+                                                        ImportState::Idle => "Add resource",
+                                                        ImportState::Choosing => "Choosing file…",
+                                                        ImportState::Importing => "Importing…",
+                                                    })
+                                                    .dropdown_menu_with_anchor(Anchor::TopLeft, {
+                                                        let app = cx.entity().downgrade();
+                                                        move |menu, window, _cx| {
+                                                            let Some(app) = app.upgrade() else {
+                                                                return menu;
+                                                            };
+                                                            menu.item(
+                                                                PopupMenuItem::new(
+                                                                    "Add by ISBN or DOI…",
+                                                                )
+                                                                .on_click(window.listener_for(
+                                                                    &app,
+                                                                    |this, _, window, cx| {
+                                                                        if let Some(palette) = this
+                                                                            .open_palette(
+                                                                                window, cx,
+                                                                            )
+                                                                        {
+                                                                            palette.update(
+                                                                                cx,
+                                                                                |palette, cx| {
+                                                                                    palette
+                                                                                        .open_identifier(
+                                                                                            window,
+                                                                                            cx,
+                                                                                        )
+                                                                                },
+                                                                            );
+                                                                        }
+                                                                    },
+                                                                )),
+                                                            )
+                                                            .item(
+                                                                PopupMenuItem::new("Import file…")
+                                                                    .on_click(window.listener_for(
+                                                                        &app,
+                                                                        |this, _, window, cx| {
+                                                                            this.import_biblatex(
+                                                                                window, cx,
+                                                                            )
+                                                                        },
+                                                                    )),
+                                                            )
+                                                        }
+                                                    }),
+                                            )
+                                            .child(
+                                                Button::new("toggle-filters")
+                                                    .ghost()
+                                                    .small()
+                                                    .icon(
+                                                        symbol(
+                                                            "line.3.horizontal.decrease",
+                                                            IconName::Settings2,
+                                                        )
+                                                        .with_size(px(12.)),
+                                                    )
+                                                    .tooltip("Toggle filters")
+                                                    .selected(filters_visible)
+                                                    .when(filter_active, |button| {
+                                                        button.text_color(cx.theme().primary)
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        |this, _, _window, cx| {
+                                                            this.toggle_filters(cx)
+                                                        },
+                                                    )),
+                                            )
+                                            .child(div().flex_1()),
+                                    )
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .h(px(CONTENT_GAP))
+                                            .flex_shrink_0(),
+                                    )
+                                    .child({
+                                        let table = DataTable::new(&self.table)
+                                            .with_size(Size::XSmall)
+                                            .bordered(false)
+                                            .stripe(false)
+                                            .focus_ring(false)
+                                            .when_some(
+                                                header_row_height(filters_visible),
+                                                |table, height| table.header_row_height(height),
+                                            );
+                                        // Rounded inset card: shell owns the fill; table
+                                        // tokens stay clear so content can't square the
+                                        // corners. overflow_hidden clips scroll children.
+                                        let table_shell: Hsla = if dark {
+                                            rgba(0xffffff0e).into()
+                                        } else {
+                                            // ~0.47 so the wash tints the card; not opaque.
+                                            rgba(0xffffff78).into()
+                                        };
+                                        // Shell owns the fill + radius. Inner clip
+                                        // repeats radius/overflow so row paint cannot
+                                        // square the corners (GPUI masks are axis-aligned,
+                                        // so keep table tokens clear and inset slightly).
+                                        let wrap = div()
+                                            .id("library-grid-viewport")
+                                            .test_support()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .min_h_0()
+                                            .relative()
+                                            .rounded(px(TABLE_CARD_RADIUS))
+                                            .bg(table_shell)
+                                            .overflow_hidden()
+                                            // Side inset floats the selection pill off the
+                                            // card edge instead of merging with it.
+                                            .px(px(TABLE_ROW_INSET))
+                                            .py(px(1.))
+                                            .child(
+                                                div()
+                                                    .size_full()
+                                                    .min_h_0()
+                                                    .rounded(px(TABLE_CARD_RADIUS - 1.))
+                                                    .overflow_hidden()
+                                                    .child(table),
+                                            )
+                                            .when(dark, |card| {
+                                                // Faint top highlight so the dark card
+                                                // catches the glow; inset past the corners.
+                                                card.child(
+                                                    div()
+                                                        .absolute()
+                                                        .top_0()
+                                                        .left(px(TABLE_CARD_RADIUS))
+                                                        .right(px(TABLE_CARD_RADIUS))
+                                                        .h(px(1.))
+                                                        .bg(rgba(0xffffff12)),
+                                                )
+                                            });
+                                        if editing {
+                                            wrap.track_focus(&self.inline_trap)
+                                                .focus_trap("inline-edit-trap", &self.inline_trap)
+                                                .into_any_element()
+                                        } else {
+                                            wrap.into_any_element()
+                                        }
+                                    }),
+                            )
+                            // When the left rail is closed, keep reopen + theme
+                            // at the bottom-left of the content column.
+                            .when(!self.left_panel_open, |col| {
+                                col.child(self.render_left_panel_footer(cx))
+                            }),
                     )
                     // Metadata ends at its fields. Notes fill the height left
                     // in the rail, and grow or shrink with the window.
@@ -7327,29 +7535,31 @@ impl Render for LibraryApp {
                                 .h_full()
                                 .w(sidebar_width)
                                 .flex_shrink_0()
+                                // No left rule / fill — detail is the same glass sheet.
+                                .bg(fill)
                                 .child(
                                     v_flex()
                                         .h_full()
                                         .w_full()
-                                        .gap_2()
+                                        .gap_0()
+                                        .child(
+                                            table_card_top_spacer()
+                                                .id("detail-align-spacer")
+                                                .test_support(),
+                                        )
                                         .when(self.detail_open, |column| {
                                             column.child(
                                                 div()
                                                     .relative()
                                                     .w_full()
                                                     .overflow_hidden()
-                                                    .rounded(ISLAND_RADIUS)
-                                                    .border_1()
-                                                    .border_color(cx.theme().border)
-                                                    .bg(cx.theme().background)
-                                                    .when(detail_limit.is_none(), |island| {
-                                                        island.flex_1().min_h_0()
+                                                    .when(detail_limit.is_none(), |pane| {
+                                                        pane.flex_1().min_h_0()
                                                     })
-                                                    .when(detail_limit.is_some(), |island| {
-                                                        island.flex_shrink_0()
+                                                    .when(detail_limit.is_some(), |pane| {
+                                                        pane.flex_shrink_0()
                                                     })
-                                                    .child(self.render_side_panel(detail_limit, cx))
-                                                    .child(island_corner_mask(stops, glow)),
+                                                    .child(self.render_side_panel(detail_limit, cx)),
                                             )
                                         })
                                         .when(notes_open, |column| {
@@ -7362,10 +7572,6 @@ impl Render for LibraryApp {
                                                     .flex_1()
                                                     .min_h_0()
                                                     .overflow_hidden()
-                                                    .rounded(ISLAND_RADIUS)
-                                                    .border_1()
-                                                    .border_color(cx.theme().border)
-                                                    .bg(cx.theme().background)
                                                     .child(
                                                         div()
                                                             .id("notes-island-scroll")
@@ -7376,8 +7582,7 @@ impl Render for LibraryApp {
                                                             .overflow_y_scroll()
                                                             .p_3()
                                                             .child(self.notes.clone()),
-                                                    )
-                                                    .child(island_corner_mask(stops, glow)),
+                                                    ),
                                             )
                                         }),
                                 )
@@ -8642,16 +8847,17 @@ mod sidebar_selection_tests {
     use gpui_kit::{Hsla, rgb};
 
     #[test]
-    fn selected_navigation_uses_neutral_surface_not_blue_list_selection() {
-        let neutral: Hsla = rgb(0xe7e7e7).into();
+    fn selected_navigation_uses_soft_primary_wash_not_list_selection() {
         let blue: Hsla = rgb(0x0064ff).into();
         let theme = ThemeColor {
-            accent: neutral,
+            primary: blue,
             list_active: blue,
             ..ThemeColor::default()
         };
-        assert_eq!(sidebar_selected_background(&theme), neutral);
-        assert_ne!(sidebar_selected_background(&theme), theme.list_active);
+        let selected = sidebar_selected_background(&theme);
+        assert_eq!(selected.h, blue.h);
+        assert!((selected.a - 0.14).abs() < 1e-6);
+        assert_ne!(selected, theme.list_active);
     }
 }
 
@@ -8678,12 +8884,12 @@ mod gradient_tests {
     #[test]
     fn wash_runs_neutral_to_the_exact_secondary_in_both_modes() {
         for dark in [false, true] {
-            let neutral = rgb(if dark { 0x292722 } else { 0xeae8e2 });
+            let neutral = rgb(if dark { 0x0a0c12 } else { 0xf1f3f6 });
             assert_eq!(
                 workspace_gradient_stops(dark, Some(0x102030)),
                 (neutral, rgb(0x102030))
             );
-            let end = rgb(if dark { 0x262c35 } else { 0xd9dde5 });
+            let end = rgb(if dark { 0x152033 } else { 0xe4e8ee });
             assert_eq!(workspace_gradient_stops(dark, None), (neutral, end));
         }
     }
@@ -8706,13 +8912,21 @@ mod gradient_tests {
             .map(f32::abs)
             .into_iter()
             .fold(0., f32::max);
-            assert!(shift > 0.1, "{corner:?}");
+            // Dark bloom is strong; light glow is intentionally quieter.
+            let min_shift = if dark { 0.1 } else { 0.04 };
+            assert!(shift > min_shift, "{corner:?} dark={dark}");
             assert_ne!(corner, rgb(0xff3b30));
-            // Beyond its reach the backdrop is the plain wash, ending exactly.
-            for t in [GLOW_REACH, 0.5, 1.] {
-                assert_eq!(glow.over(stops, t), mix_rgb(stops.0, stops.1, t));
-            }
-            assert_eq!(glow.over(stops, 1.), stops.1);
+            // Beyond its reach the backdrop is the plain wash (float mix ±1 channel).
+            let near = |a: gpui_kit::Rgba, b: gpui_kit::Rgba| {
+                (a.r - b.r).abs() < 2. / 255.
+                    && (a.g - b.g).abs() < 2. / 255.
+                    && (a.b - b.b).abs() < 2. / 255.
+            };
+            assert!(near(glow.over(stops, 1.), stops.1));
+            assert!(near(
+                glow.over(stops, GLOW_REACH),
+                mix_rgb(stops.0, stops.1, GLOW_REACH)
+            ));
         }
     }
 }
