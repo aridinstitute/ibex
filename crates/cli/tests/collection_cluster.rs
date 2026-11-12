@@ -127,7 +127,7 @@ fn cluster_preview_and_apply_groups_by_content() {
 }
 
 #[test]
-fn cluster_falls_back_to_title_and_subtitle_without_attachments() {
+fn cluster_falls_back_to_title_metadata_without_attachments() {
     let dir = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
         common::ibex()
@@ -138,8 +138,6 @@ fn cluster_falls_back_to_title_and_subtitle_without_attachments() {
             .unwrap()
     };
 
-    // resource add may not expose subtitle; use update if needed.
-    // Prefer creating via add + update fields available on CLI.
     let titles = [
         (
             "Deep Learning Foundations",
@@ -168,8 +166,7 @@ fn cluster_falls_back_to_title_and_subtitle_without_attachments() {
     ];
 
     for (title, abstract_text) in titles {
-        // Store topical words in the title when subtitle/abstract CLI is limited:
-        // put the topical phrase into the title itself for metadata fallback.
+        // CLI add has no abstract flag; encode topical words in the title.
         let created = run(&[
             "resource",
             "add",
@@ -192,4 +189,94 @@ fn cluster_falls_back_to_title_and_subtitle_without_attachments() {
     let out = String::from_utf8(preview.stdout).unwrap();
     assert!(out.contains("topic "), "{out}");
     assert!(out.contains("[metadata]"), "{out}");
+}
+
+#[test]
+fn cluster_apply_twice_reuses_collections() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        common::ibex()
+            .arg("--data")
+            .arg(dir.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let papers = [
+        (
+            "Neural nets",
+            "deep learning neural networks representation learning backpropagation layers",
+        ),
+        (
+            "CNN survey",
+            "convolutional neural networks deep learning image recognition layers",
+        ),
+        (
+            "Transformers",
+            "transformer attention neural networks deep learning language models",
+        ),
+        (
+            "Carbon sinks",
+            "climate change carbon sequestration forests greenhouse emissions",
+        ),
+        (
+            "Warming trends",
+            "climate change global warming temperature greenhouse emissions",
+        ),
+        (
+            "Ocean acid",
+            "climate change ocean acidification carbon dioxide greenhouse emissions",
+        ),
+    ];
+    for (title, body) in papers {
+        let path = dir.path().join(format!("{title}.txt"));
+        fs::write(&path, body).unwrap();
+        let created = run(&["resource", "add", "--title", title]);
+        assert!(created.status.success());
+        let id = String::from_utf8(created.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_owned();
+        assert!(
+            run(&[
+                "resource",
+                "update",
+                &id,
+                "--attach",
+                path.to_str().unwrap()
+            ])
+            .status
+            .success()
+        );
+    }
+
+    let first = run(&["collection", "cluster", "--min-size", "3", "--apply"]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_list = String::from_utf8(run(&["collection", "list", "--flat"]).stdout).unwrap();
+    let first_count = first_list.lines().filter(|l| !l.trim().is_empty()).count();
+
+    let second = run(&["collection", "cluster", "--min-size", "3", "--apply"]);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_out = String::from_utf8(second.stdout).unwrap();
+    assert!(
+        second_out.contains("reused"),
+        "expected reuse marker: {second_out}"
+    );
+    let second_list = String::from_utf8(run(&["collection", "list", "--flat"]).stdout).unwrap();
+    let second_count = second_list.lines().filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(
+        first_count, second_count,
+        "apply must not duplicate collections"
+    );
 }

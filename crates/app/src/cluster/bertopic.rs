@@ -7,6 +7,11 @@ use ibex_core::ResourceId;
 use super::text::TextSource;
 use super::{ClusterDocument, DEFAULT_KEYWORD_TERMS, DEFAULT_LABEL_TERMS, DEFAULT_MIN_TOPIC_SIZE};
 
+/// Cap on TF-IDF features (BerTopic-style `max_features`).
+pub const MAX_FEATURES: usize = 5_000;
+/// Never merge clusters farther apart than this cosine distance.
+pub const MERGE_DISTANCE_CEILING: f64 = 0.55;
+
 /// Tunables for the topic model.
 #[derive(Debug, Clone)]
 pub struct ClusterOptions {
@@ -48,7 +53,85 @@ pub struct TopicReport {
     pub outliers: Vec<TopicMember>,
 }
 
-/// Cluster documents into topics. Empty input yields an empty report.
+#[derive(Clone, Debug)]
+struct SparseVec {
+    /// Sorted feature indices.
+    indices: Vec<usize>,
+    values: Vec<f64>,
+}
+
+impl SparseVec {
+    fn empty() -> Self {
+        Self {
+            indices: Vec::new(),
+            values: Vec::new(),
+        }
+    }
+
+    fn from_map(map: &HashMap<usize, f64>) -> Self {
+        let mut pairs: Vec<(usize, f64)> = map.iter().map(|(&i, &v)| (i, v)).collect();
+        pairs.sort_by_key(|(i, _)| *i);
+        let mut indices = Vec::with_capacity(pairs.len());
+        let mut values = Vec::with_capacity(pairs.len());
+        for (i, v) in pairs {
+            indices.push(i);
+            values.push(v);
+        }
+        let mut v = Self { indices, values };
+        v.l2_normalize();
+        v
+    }
+
+    fn l2_normalize(&mut self) {
+        let norm = self.values.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if norm > 0.0 {
+            for x in &mut self.values {
+                *x /= norm;
+            }
+        }
+    }
+
+    fn cosine_distance(&self, other: &Self) -> f64 {
+        let mut i = 0usize;
+        let mut j = 0usize;
+        let mut dot = 0.0;
+        while i < self.indices.len() && j < other.indices.len() {
+            match self.indices[i].cmp(&other.indices[j]) {
+                std::cmp::Ordering::Equal => {
+                    dot += self.values[i] * other.values[j];
+                    i += 1;
+                    j += 1;
+                }
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+            }
+        }
+        (1.0 - dot).clamp(0.0, 2.0)
+    }
+
+    /// Size-weighted mean of two L2-normalized sparse vectors, then re-normalize.
+    fn merge_centroid(&self, other: &Self, self_n: f64, other_n: f64) -> Self {
+        let mut map: HashMap<usize, f64> = HashMap::new();
+        for (&i, &v) in self.indices.iter().zip(self.values.iter()) {
+            *map.entry(i).or_default() += v * self_n;
+        }
+        for (&i, &v) in other.indices.iter().zip(other.values.iter()) {
+            *map.entry(i).or_default() += v * other_n;
+        }
+        let total = self_n + other_n;
+        if total > 0.0 {
+            for v in map.values_mut() {
+                *v /= total;
+            }
+        }
+        Self::from_map(&map)
+    }
+}
+
+/// Cluster documents into topics.
+///
+/// Libraries smaller than `min_topic_size` yield every document as an outlier
+/// (no error). Empty input yields an empty report.
 pub fn cluster_documents(
     documents: &[ClusterDocument],
     opts: ClusterOptions,
@@ -61,10 +144,10 @@ pub fn cluster_documents(
         });
     }
     if documents.len() < min_topic_size {
-        return Err(format!(
-            "need at least {min_topic_size} resources with text to form a topic; found {}",
-            documents.len()
-        ));
+        return Ok(TopicReport {
+            topics: Vec::new(),
+            outliers: documents.iter().map(member_from).collect(),
+        });
     }
 
     let tokenized: Vec<Vec<String>> = documents.iter().map(|d| tokenize(&d.text.body)).collect();
@@ -82,35 +165,34 @@ pub fn cluster_documents(
 
     let mut topics = Vec::new();
     let mut outliers = Vec::new();
+
+    // Build class bags only for clusters that meet min size (real c-TF-IDF).
+    let mut class_members: Vec<Vec<usize>> = Vec::new();
     let mut cluster_ids: Vec<i32> = by_cluster.keys().copied().filter(|id| *id >= 0).collect();
     cluster_ids.sort_unstable();
-
     for cluster_id in cluster_ids {
-        let members_idx = by_cluster.get(&cluster_id).cloned().unwrap_or_default();
+        let members_idx = by_cluster.remove(&cluster_id).unwrap_or_default();
         if members_idx.len() < min_topic_size {
             for idx in members_idx {
                 outliers.push(member_from(&documents[idx]));
             }
             continue;
         }
-        let cluster_tokens: Vec<&[String]> = members_idx
-            .iter()
-            .map(|&i| tokenized[i].as_slice())
-            .collect();
-        let member_set: HashSet<usize> = members_idx.iter().copied().collect();
-        let other_tokens: Vec<&[String]> = tokenized
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !member_set.contains(i))
-            .map(|(_, t)| t.as_slice())
-            .collect();
-        let scored = c_tfidf_terms(
-            &cluster_tokens,
-            &other_tokens,
-            &vocab,
-            opts.keyword_terms.max(1),
-        );
-        let keywords: Vec<String> = scored.iter().map(|(t, _)| t.clone()).collect();
+        class_members.push(members_idx);
+    }
+    if let Some(outlier_idxs) = by_cluster.remove(&-1) {
+        for idx in outlier_idxs {
+            outliers.push(member_from(&documents[idx]));
+        }
+    }
+
+    let class_tokens: Vec<Vec<&[String]>> = class_members
+        .iter()
+        .map(|members| members.iter().map(|&i| tokenized[i].as_slice()).collect())
+        .collect();
+    let keyword_lists = c_tfidf_all_classes(&class_tokens, &vocab, opts.keyword_terms.max(1));
+
+    for (members_idx, keywords) in class_members.into_iter().zip(keyword_lists) {
         let label = label_from_keywords(&keywords, opts.label_terms.max(1));
         let members = members_idx
             .into_iter()
@@ -121,12 +203,6 @@ pub fn cluster_documents(
             keywords,
             members,
         });
-    }
-
-    if let Some(outlier_idxs) = by_cluster.get(&-1) {
-        for &idx in outlier_idxs {
-            outliers.push(member_from(&documents[idx]));
-        }
     }
 
     topics.sort_by(|a, b| {
@@ -159,29 +235,55 @@ fn label_from_keywords(keywords: &[String], n: usize) -> String {
 fn tokenize(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.chars().count() >= 3)
+        .filter(|w| !w.chars().all(|c| c.is_ascii_digit()))
         .map(str::to_lowercase)
-        .filter(|w| !STOPWORDS.iter().any(|s| s == w))
+        .filter(|w| !is_stopword(w))
         .collect()
 }
 
-fn tfidf_matrix(docs: &[Vec<String>]) -> (Vec<String>, Vec<Vec<f64>>) {
+fn is_stopword(w: &str) -> bool {
+    STOPWORDS.binary_search(&w).is_ok()
+}
+
+fn tfidf_matrix(docs: &[Vec<String>]) -> (Vec<String>, Vec<SparseVec>) {
     let n = docs.len() as f64;
     let mut df: HashMap<String, usize> = HashMap::new();
+    let mut tf_raw: HashMap<String, usize> = HashMap::new();
     for doc in docs {
         let unique: HashSet<&str> = doc.iter().map(String::as_str).collect();
         for term in unique {
             *df.entry(term.to_owned()).or_default() += 1;
         }
+        for term in doc {
+            *tf_raw.entry(term.clone()).or_default() += 1;
+        }
     }
 
-    let mut vocab: Vec<String> = df
+    let mut candidates: Vec<(String, usize, usize)> = df
         .iter()
-        .filter(|(_, count)| **count >= 2 && (**count as f64) < n * 0.9)
-        .map(|(term, _)| term.clone())
+        .filter(|(_, count)| **count >= 2 && (**count as f64) < n * 0.85)
+        .map(|(term, &count)| {
+            let raw = *tf_raw.get(term).unwrap_or(&0);
+            (term.clone(), count, raw)
+        })
         .collect();
-    if vocab.is_empty() {
-        vocab = df.keys().cloned().collect();
+    if candidates.is_empty() {
+        candidates = df
+            .iter()
+            .map(|(term, &count)| {
+                let raw = *tf_raw.get(term).unwrap_or(&0);
+                (term.clone(), count, raw)
+            })
+            .collect();
     }
+    // Prefer rarer-but-present terms; break ties by corpus frequency then name.
+    candidates.sort_by(|a, b| {
+        a.1.cmp(&b.1)
+            .then_with(|| b.2.cmp(&a.2))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    candidates.truncate(MAX_FEATURES);
+    let mut vocab: Vec<String> = candidates.into_iter().map(|(t, _, _)| t).collect();
     vocab.sort();
 
     let index: HashMap<&str, usize> = vocab
@@ -206,66 +308,66 @@ fn tfidf_matrix(docs: &[Vec<String>]) -> (Vec<String>, Vec<Vec<f64>>) {
                 *tf.entry(i).or_default() += 1.0;
             }
         }
-        let mut vec = vec![0.0; vocab.len()];
         let max_tf = tf.values().copied().fold(0.0_f64, f64::max).max(1.0);
-        for (i, count) in tf {
-            vec[i] = (count / max_tf) * idf[i];
+        for (i, count) in tf.iter_mut() {
+            *count = (*count / max_tf) * idf[*i];
         }
-        l2_normalize(&mut vec);
-        vectors.push(vec);
+        vectors.push(SparseVec::from_map(&tf));
     }
 
     (vocab, vectors)
 }
 
-fn l2_normalize(v: &mut [f64]) {
-    let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-    if norm > 0.0 {
-        for x in v.iter_mut() {
-            *x /= norm;
-        }
-    }
-}
-
-fn cosine_distance(a: &[f64], b: &[f64]) -> f64 {
-    let mut dot = 0.0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        dot += x * y;
-    }
-    (1.0 - dot).clamp(0.0, 2.0)
-}
-
-/// Cosine-distance ceiling: once clusters are this far apart and we are at or
-/// below the max topic budget, stop merging so well-separated topics survive.
-const MERGE_DISTANCE_CEILING: f64 = 0.55;
-
-/// Average-linkage agglomerative clustering on cosine distance.
+/// Centroid-linkage agglomerative clustering on cosine distance.
 ///
-/// Starts with one cluster per document and merges nearest pairs while either
-/// more than `⌊n / min_topic_size⌋` clusters remain, or the nearest pair is
-/// still closer than [`MERGE_DISTANCE_CEILING`]. Clusters smaller than
-/// `min_topic_size` are labeled `-1` (outliers).
-fn agglomerative_cluster(vectors: &[Vec<f64>], min_topic_size: usize) -> Vec<i32> {
+/// Merges the nearest pair while that pair is within [`MERGE_DISTANCE_CEILING`].
+/// Distant pairs are never forced together; undersized leftovers become
+/// outliers (`-1`).
+fn agglomerative_cluster(vectors: &[SparseVec], min_topic_size: usize) -> Vec<i32> {
     let n = vectors.len();
     if n == 0 {
         return Vec::new();
     }
 
-    let max_topics = (n / min_topic_size).clamp(1, n);
-    let dim = vectors.first().map(|v| v.len()).unwrap_or(0);
-
-    // Each entry is the member document indices for an active cluster.
     let mut clusters: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
-    let mut centroids: Vec<Vec<f64>> = vectors.to_vec();
+    let mut centroids: Vec<SparseVec> = vectors.to_vec();
+    // Flat upper-triangle distance cache: index(i,j) for i < j.
+    let mut dist = vec![0.0f64; n * n];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let d = centroids[i].cosine_distance(&centroids[j]);
+            dist[i * n + j] = d;
+            dist[j * n + i] = d;
+        }
+    }
+    let mut active: Vec<bool> = vec![true; n];
+    let mut next_id = n;
+    // Grow storage as merges create new cluster nodes.
+    let mut sizes: Vec<usize> = vec![1; n];
 
-    while clusters.len() > 1 {
+    loop {
         let mut best = f64::INFINITY;
         let mut best_pair = None;
-        for i in 0..clusters.len() {
-            for j in (i + 1)..clusters.len() {
-                let dist = cosine_distance(&centroids[i], &centroids[j]);
-                if dist < best {
-                    best = dist;
+        let live: Vec<usize> = (0..next_id)
+            .filter(|&i| active.get(i) == Some(&true))
+            .collect();
+        for a in 0..live.len() {
+            for b in (a + 1)..live.len() {
+                let i = live[a];
+                let j = live[b];
+                let d = if i < centroids.len() && j < centroids.len() {
+                    // Prefer cache when both indices fit the original square; for
+                    // newly allocated nodes recompute against live centroids.
+                    if i < n && j < n {
+                        dist[i * n + j]
+                    } else {
+                        centroids[i].cosine_distance(&centroids[j])
+                    }
+                } else {
+                    f64::INFINITY
+                };
+                if d < best {
+                    best = d;
                     best_pair = Some((i, j));
                 }
             }
@@ -273,33 +375,41 @@ fn agglomerative_cluster(vectors: &[Vec<f64>], min_topic_size: usize) -> Vec<i32
         let Some((i, j)) = best_pair else {
             break;
         };
-        // Past the budget, only keep merging tight pairs so distinct topics
-        // are not forced together.
-        if clusters.len() <= max_topics && best > MERGE_DISTANCE_CEILING {
+        if best > MERGE_DISTANCE_CEILING {
             break;
         }
 
-        let mut merged_members = clusters[i].clone();
-        merged_members.extend(clusters[j].iter().copied());
-        let sa = clusters[i].len() as f64;
-        let sb = clusters[j].len() as f64;
-        let mut merged_centroid = vec![0.0; dim];
-        for d in 0..dim {
-            merged_centroid[d] = (centroids[i][d] * sa + centroids[j][d] * sb) / (sa + sb);
-        }
-        l2_normalize(&mut merged_centroid);
+        let merged_members = {
+            let mut m = clusters[i].clone();
+            m.extend(clusters[j].iter().copied());
+            m
+        };
+        let merged_centroid =
+            centroids[i].merge_centroid(&centroids[j], sizes[i] as f64, sizes[j] as f64);
+        let merged_size = sizes[i] + sizes[j];
 
-        // Remove the higher index first so the lower index stays valid.
-        let (keep, drop) = if i < j { (i, j) } else { (j, i) };
-        clusters[keep] = merged_members;
-        centroids[keep] = merged_centroid;
-        clusters.remove(drop);
-        centroids.remove(drop);
+        // Ensure capacity for the new node.
+        while clusters.len() <= next_id {
+            clusters.push(Vec::new());
+            centroids.push(SparseVec::empty());
+            sizes.push(0);
+            active.push(false);
+        }
+        clusters[next_id] = merged_members;
+        centroids[next_id] = merged_centroid;
+        sizes[next_id] = merged_size;
+        active[next_id] = true;
+        active[i] = false;
+        active[j] = false;
+        next_id += 1;
     }
 
     let mut assignments = vec![-1i32; n];
     let mut next_label = 0i32;
-    for members in &clusters {
+    for (id, members) in clusters.iter().enumerate().take(next_id) {
+        if active.get(id) != Some(&true) {
+            continue;
+        }
         if members.len() < min_topic_size {
             continue;
         }
@@ -311,64 +421,78 @@ fn agglomerative_cluster(vectors: &[Vec<f64>], min_topic_size: usize) -> Vec<i32
     assignments
 }
 
-fn c_tfidf_terms(
-    cluster_docs: &[&[String]],
-    other_docs: &[&[String]],
+/// Class-based TF-IDF across all topic classes:
+/// `W(t,c) = tf(t,c) · log(1 + A / f(t))` where `A` is average words per class
+/// and `f(t)` is the number of classes containing `t`.
+fn c_tfidf_all_classes(
+    classes: &[Vec<&[String]>],
     vocab: &[String],
     top_k: usize,
-) -> Vec<(String, f64)> {
-    let mut tf: HashMap<&str, f64> = HashMap::new();
-    let mut cluster_words = 0.0;
-    for doc in cluster_docs {
-        for term in *doc {
-            *tf.entry(term.as_str()).or_default() += 1.0;
-            cluster_words += 1.0;
-        }
-    }
-    if cluster_words == 0.0 {
+) -> Vec<Vec<String>> {
+    if classes.is_empty() {
         return Vec::new();
     }
 
-    let mut other_df: HashMap<&str, f64> = HashMap::new();
-    for doc in other_docs {
-        let unique: HashSet<&str> = doc.iter().map(String::as_str).collect();
-        for term in unique {
-            *other_df.entry(term).or_default() += 1.0;
+    let mut class_tf: Vec<HashMap<&str, f64>> = Vec::with_capacity(classes.len());
+    let mut class_words: Vec<f64> = Vec::with_capacity(classes.len());
+    for docs in classes {
+        let mut tf: HashMap<&str, f64> = HashMap::new();
+        let mut words = 0.0;
+        for doc in docs {
+            for term in *doc {
+                *tf.entry(term.as_str()).or_default() += 1.0;
+                words += 1.0;
+            }
+        }
+        class_tf.push(tf);
+        class_words.push(words);
+    }
+
+    let a = class_words.iter().sum::<f64>() / classes.len() as f64;
+    let mut class_freq: HashMap<&str, f64> = HashMap::new();
+    for tf in &class_tf {
+        for term in tf.keys() {
+            *class_freq.entry(*term).or_default() += 1.0;
         }
     }
-    let other_n = other_docs.len().max(1) as f64;
-    let avg_words = cluster_words;
 
-    let mut scored: Vec<(String, f64)> = vocab
-        .iter()
-        .filter_map(|term| {
-            let freq = *tf.get(term.as_str())?;
-            if freq <= 0.0 {
-                return None;
-            }
-            let tf_norm = freq / cluster_words;
-            let clusters_with = 1.0 + other_df.get(term.as_str()).copied().unwrap_or(0.0);
-            let score = tf_norm * (1.0 + avg_words / clusters_with).ln();
-            let other_share = other_df.get(term.as_str()).copied().unwrap_or(0.0) / other_n;
-            let specificity = 1.0 - other_share.min(1.0);
-            Some((term.clone(), score * (0.5 + 0.5 * specificity)))
-        })
-        .collect();
-
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(top_k);
-    scored
+    let mut out = Vec::with_capacity(classes.len());
+    for (ci, tf) in class_tf.iter().enumerate() {
+        let words = class_words[ci].max(1.0);
+        let mut scored: Vec<(String, f64)> = vocab
+            .iter()
+            .filter_map(|term| {
+                let freq = *tf.get(term.as_str())?;
+                if freq <= 0.0 {
+                    return None;
+                }
+                let tf_norm = freq / words;
+                let f_t = class_freq
+                    .get(term.as_str())
+                    .copied()
+                    .unwrap_or(1.0)
+                    .max(1.0);
+                let score = tf_norm * (1.0 + a / f_t).ln();
+                Some((term.clone(), score))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(top_k);
+        out.push(scored.into_iter().map(|(t, _)| t).collect());
+    }
+    out
 }
 
+/// Sorted for binary search.
 const STOPWORDS: &[&str] = &[
-    "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her", "was", "one",
-    "our", "out", "has", "have", "been", "were", "they", "this", "that", "with", "from", "their",
-    "what", "which", "when", "who", "will", "each", "she", "how", "its", "may", "him", "his",
-    "than", "them", "these", "then", "into", "some", "could", "other", "also", "over", "such",
-    "only", "same", "both", "those", "after", "most", "through", "before", "between", "under",
-    "while", "where", "about", "would", "there", "being", "because", "should", "does", "doing",
-    "just", "more", "very", "your", "using", "used", "use", "based", "paper", "study", "results",
-    "method", "methods", "approach", "data", "analysis", "research",
+    "about", "after", "all", "also", "analysis", "and", "approach", "are", "based", "because",
+    "been", "before", "being", "between", "both", "but", "can", "could", "data", "does", "doing",
+    "each", "for", "from", "had", "has", "have", "her", "him", "his", "how", "into", "its", "just",
+    "may", "method", "methods", "more", "most", "not", "one", "only", "other", "our", "out",
+    "over", "paper", "research", "results", "same", "she", "should", "some", "study", "such",
+    "than", "that", "the", "their", "them", "then", "there", "these", "they", "this", "those",
+    "through", "under", "use", "used", "using", "very", "was", "were", "what", "when", "where",
+    "which", "while", "who", "will", "with", "would", "you", "your",
 ];
 
 #[cfg(test)]
@@ -398,7 +522,6 @@ mod tests {
         }
     }
 
-    /// Planted topic vocabularies used for purity / recovery checks.
     const PLANTED: &[&[&str]] = &[
         &[
             "neural",
@@ -438,7 +561,6 @@ mod tests {
         for (topic_i, vocab) in PLANTED.iter().enumerate() {
             for doc_i in 0..per_topic {
                 let id = ResourceId::generate();
-                // Rotate terms so docs share topic vocabulary without being identical.
                 let body = (0..6)
                     .map(|k| vocab[(doc_i + k) % vocab.len()])
                     .collect::<Vec<_>>()
@@ -475,7 +597,6 @@ mod tests {
         (topic_ids, outlier_ids)
     }
 
-    /// Weighted purity: majority planted label share inside each discovered topic.
     fn purity(report: &TopicReport, planted: &HashMap<ResourceId, usize>) -> f64 {
         let mut weighted = 0.0;
         let mut total = 0.0;
@@ -493,7 +614,6 @@ mod tests {
         if total == 0.0 { 0.0 } else { weighted / total }
     }
 
-    /// Average, over planted labels, of the largest fraction recovered in one topic.
     fn recovery(report: &TopicReport, planted: &HashMap<ResourceId, usize>) -> f64 {
         let mut by_planted: HashMap<usize, Vec<ResourceId>> = HashMap::new();
         for (id, label) in planted {
@@ -555,25 +675,23 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(
-            report.topics.len() >= 2,
-            "expected at least two topics, got {:?}",
-            report.topics.iter().map(|t| &t.label).collect::<Vec<_>>()
-        );
-        let labels = report
-            .topics
-            .iter()
-            .map(|t| t.label.to_lowercase())
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(
-            labels.contains("neural")
-                || labels.contains("learning")
-                || labels.contains("climate")
-                || labels.contains("carbon")
-                || labels.contains("greenhouse"),
-            "labels should reflect topic words: {labels}"
-        );
+        assert_eq!(report.topics.len(), 2, "topics={:?}", report.topics);
+        let mut saw_ml = false;
+        let mut saw_climate = false;
+        for topic in &report.topics {
+            let label = topic.label.to_lowercase();
+            if label.contains("neural") || label.contains("learning") || label.contains("network") {
+                saw_ml = true;
+            }
+            if label.contains("climate")
+                || label.contains("carbon")
+                || label.contains("greenhouse")
+                || label.contains("emissions")
+            {
+                saw_climate = true;
+            }
+        }
+        assert!(saw_ml && saw_climate, "labels={:?}", report.topics);
     }
 
     #[test]
@@ -589,47 +707,92 @@ mod tests {
         )
         .unwrap();
         let (topic_ids, outlier_ids) = partition_ids(&report);
-        assert_eq!(
-            topic_ids.len() + outlier_ids.len(),
-            docs.len(),
-            "every document must be assigned exactly once"
-        );
+        assert_eq!(topic_ids.len() + outlier_ids.len(), docs.len());
         assert!(
-            report.topics.len() >= 2,
-            "expected multiple topics, got {}",
-            report.topics.len()
+            report.topics.len() >= 3,
+            "expected three planted topics, got {:?}",
+            report
+                .topics
+                .iter()
+                .map(|t| (&t.label, t.members.len()))
+                .collect::<Vec<_>>()
         );
         for topic in &report.topics {
-            assert!(
-                topic.members.len() >= 4,
-                "min_topic_size violated: {}",
-                topic.members.len()
-            );
-            assert!(
-                !topic.keywords.is_empty(),
-                "topic {} missing keywords",
-                topic.label
-            );
+            assert!(topic.members.len() >= 4);
+            assert!(!topic.keywords.is_empty());
         }
         let p = purity(&report, &planted);
         let r = recovery(&report, &planted);
+        assert!(p >= 0.85, "purity {p:.3}");
+        assert!(r >= 0.70, "recovery {r:.3}");
+    }
+
+    #[test]
+    fn unrelated_subjects_are_not_forced_together() {
+        let docs = vec![
+            doc("Opera A", "opera soprano aria libretto bel canto orchestra"),
+            doc("Opera B", "opera tenor aria libretto bel canto orchestra"),
+            doc(
+                "Opera C",
+                "opera baritone aria libretto bel canto orchestra",
+            ),
+            doc(
+                "Volcano A",
+                "volcano magma eruption lava basalt seismology tephra",
+            ),
+            doc(
+                "Volcano B",
+                "volcano magma eruption lava basalt seismology tephra",
+            ),
+            doc(
+                "Volcano C",
+                "volcano magma eruption lava basalt seismology tephra",
+            ),
+            doc(
+                "Tax A",
+                "taxation fiscal revenue tariff subsidy levy budget",
+            ),
+            doc(
+                "Tax B",
+                "taxation fiscal revenue tariff subsidy levy budget",
+            ),
+            doc(
+                "Tax C",
+                "taxation fiscal revenue tariff subsidy levy budget",
+            ),
+            doc("Noise", "xylophone zebra quokka wallaby platypus wombat"),
+        ];
+        let report = cluster_documents(
+            &docs,
+            ClusterOptions {
+                min_topic_size: 3,
+                label_terms: 3,
+                keyword_terms: 5,
+            },
+        )
+        .unwrap();
         assert!(
-            p >= 0.85,
-            "purity {p:.3} below threshold; topics={:?}",
+            report.topics.len() >= 3,
+            "unrelated subjects must stay separate: {:?}",
             report
                 .topics
                 .iter()
                 .map(|t| (&t.label, t.members.len()))
                 .collect::<Vec<_>>()
         );
+        for topic in &report.topics {
+            assert!(topic.members.len() >= 3);
+            assert!(
+                topic.members.len() <= 3,
+                "topic unexpectedly merged: {} ({})",
+                topic.label,
+                topic.members.len()
+            );
+        }
+        let noise = docs.last().unwrap().resource_id;
         assert!(
-            r >= 0.70,
-            "recovery {r:.3} below threshold; topics={:?}",
-            report
-                .topics
-                .iter()
-                .map(|t| (&t.label, t.members.len()))
-                .collect::<Vec<_>>()
+            report.outliers.iter().any(|m| m.resource_id == noise),
+            "noise should be outlier"
         );
     }
 
@@ -649,7 +812,6 @@ mod tests {
     #[test]
     fn respects_min_topic_size_and_marks_noise_outliers() {
         let mut docs = planted_corpus(3).0;
-        // Unique singleton noise should not form its own topic at min_size=3.
         docs.push(doc(
             "Noise",
             "xylophone zebra quokka wallaby platypus wombat",
@@ -665,26 +827,28 @@ mod tests {
         .unwrap();
         let (topic_ids, outlier_ids) = partition_ids(&report);
         assert_eq!(topic_ids.len() + outlier_ids.len(), docs.len());
-        for topic in &report.topics {
-            assert!(topic.members.len() >= 3, "undersized topic {}", topic.label);
-        }
-        let noise = docs.last().unwrap().resource_id;
         assert!(
-            outlier_ids.contains(&noise),
-            "singleton noise should be an outlier, topics={:?}",
+            report.topics.len() >= 3,
+            "planted topics must not merge: {:?}",
             report
                 .topics
                 .iter()
                 .map(|t| (&t.label, t.members.len()))
                 .collect::<Vec<_>>()
         );
+        for topic in &report.topics {
+            assert!(topic.members.len() >= 3, "undersized topic {}", topic.label);
+        }
+        let noise = docs.last().unwrap().resource_id;
+        assert!(outlier_ids.contains(&noise));
     }
 
     #[test]
-    fn rejects_too_few_documents() {
+    fn small_library_returns_outliers_not_error() {
         let docs = vec![doc("Only", "lonely document about nothing much here")];
-        let err = cluster_documents(&docs, ClusterOptions::default()).unwrap_err();
-        assert!(err.contains("need at least"));
+        let report = cluster_documents(&docs, ClusterOptions::default()).unwrap();
+        assert!(report.topics.is_empty());
+        assert_eq!(report.outliers.len(), 1);
     }
 
     #[test]
@@ -706,9 +870,23 @@ mod tests {
     }
 
     #[test]
+    fn drops_numeric_tokens() {
+        let tokens = tokenize("model 2019 university climate carbon emissions");
+        assert!(!tokens.iter().any(|t| t == "2019"));
+        assert!(tokens.iter().any(|t| t == "climate"));
+    }
+
+    #[test]
     fn empty_corpus_ok() {
         let report = cluster_documents(&[], ClusterOptions::default()).unwrap();
         assert!(report.topics.is_empty());
         assert!(report.outliers.is_empty());
+    }
+
+    #[test]
+    fn stopwords_are_sorted_for_binary_search() {
+        let mut sorted = STOPWORDS.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(STOPWORDS, sorted.as_slice());
     }
 }

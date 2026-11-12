@@ -56,12 +56,13 @@ pub enum CollectionAction {
     ///
     /// Prefers extractable attachment text; otherwise uses title, subtitle,
     /// abstract, and keywords. Preview by default; pass --apply to create
-    /// collections and attach members.
+    /// collections and attach members. Re-applying reuses same-named
+    /// collections under the chosen parent instead of duplicating them.
     Cluster {
         /// Create collections and attach resources.
         #[arg(long)]
         apply: bool,
-        /// Minimum resources required to keep a topic.
+        /// Minimum resources required to keep a topic (at least 2).
         #[arg(long, default_value_t = DEFAULT_MIN_TOPIC_SIZE)]
         min_size: usize,
         /// Optional parent collection for newly created topics.
@@ -73,15 +74,6 @@ pub enum CollectionAction {
 }
 
 pub async fn run(state: &AppState, cmd: CollectionCmd) -> Result<()> {
-    if let CollectionAction::Cluster {
-        apply,
-        min_size,
-        parent,
-    } = &cmd.action
-    {
-        return cluster(state, *apply, *min_size, parent.as_deref()).await;
-    }
-
     let Outcome::ListCollectionForest(forest) = state
         .execute(Command::ListCollectionForest(ListCollectionForest))
         .await?
@@ -89,7 +81,13 @@ pub async fn run(state: &AppState, cmd: CollectionCmd) -> Result<()> {
         bail!("unexpected outcome from list_collection_forest");
     };
     match cmd.action {
-        CollectionAction::Cluster { .. } => unreachable!("handled above"),
+        CollectionAction::Cluster {
+            apply,
+            min_size,
+            parent,
+        } => {
+            return cluster(state, &forest, apply, min_size, parent.as_deref()).await;
+        }
         CollectionAction::Delete { id } => {
             let id = CollectionId::parse(&id).context("invalid collection id")?;
             let Outcome::DeleteCollection(_) = state
@@ -201,14 +199,28 @@ pub async fn run(state: &AppState, cmd: CollectionCmd) -> Result<()> {
 
 async fn cluster(
     state: &AppState,
+    forest: &[CollectionTreeNode],
     apply: bool,
     min_size: usize,
     parent: Option<&str>,
 ) -> Result<()> {
+    if min_size < 2 {
+        bail!("--min-size must be at least 2");
+    }
     let parent_id = parent
         .map(CollectionId::parse)
         .transpose()
         .context("invalid parent collection id")?;
+    if let Some(parent_id) = parent_id {
+        let mut found = false;
+        for root in forest {
+            find_collection(root, parent_id, &mut found);
+        }
+        if !found {
+            bail!("parent collection {parent_id} not found");
+        }
+    }
+
     let suggestion = suggest_clusters(
         state,
         SuggestClusters {
@@ -227,11 +239,13 @@ async fn cluster(
     if apply {
         let applied = apply_clusters(state, &suggestion, parent_id).await?;
         for (topic, created) in suggestion.report.topics.iter().zip(applied.iter()) {
+            let reused = if created.reused { "  reused" } else { "" };
             println!(
-                "{}  {}  ({} resources)",
+                "{}  {}  ({} resources){}",
                 created.collection.id,
                 created.collection.name.as_str(),
-                created.resource_ids.len()
+                created.resource_ids.len(),
+                reused
             );
             for member in &topic.members {
                 println!(
@@ -277,6 +291,16 @@ async fn cluster(
         eprintln!("preview only; pass --apply to create collections");
     }
     Ok(())
+}
+
+fn find_collection(node: &CollectionTreeNode, id: CollectionId, found: &mut bool) {
+    if node.collection.id == id {
+        *found = true;
+        return;
+    }
+    for child in &node.children {
+        find_collection(child, id, found);
+    }
 }
 
 fn source_label(source: &TextSource) -> &'static str {

@@ -269,7 +269,45 @@ async fn prefers_attachment_text_over_abstract() {
     let text = extract_document_text(&detail);
     assert_eq!(text.source, TextSource::Attachment);
     assert!(text.body.contains("neural"));
-    assert!(!text.body.contains("zebra"));
+    // Abstract is kept alongside attachment text for clustering signal.
+    assert!(text.body.contains("zebra") || text.body.contains("taxonomy"));
+}
+
+#[tokio::test]
+async fn apply_twice_reuses_collections() {
+    let store = MemoryStore::new();
+    let state = AppState::builder(store).surface(Surface::Test).build();
+    seed_two_topics(&state).await;
+
+    let suggestion = suggest_clusters(
+        &state,
+        SuggestClusters {
+            min_topic_size: 3,
+            ..SuggestClusters::default()
+        },
+    )
+    .await
+    .unwrap();
+    let first = apply_clusters(&state, &suggestion, None).await.unwrap();
+    assert!(!first.is_empty());
+    assert!(first.iter().all(|t| !t.reused));
+
+    let second = apply_clusters(&state, &suggestion, None).await.unwrap();
+    assert_eq!(second.len(), first.len());
+    assert!(second.iter().all(|t| t.reused));
+    for (a, b) in first.iter().zip(second.iter()) {
+        assert_eq!(a.collection.id, b.collection.id);
+        assert_eq!(a.collection.name, b.collection.name);
+    }
+
+    let Outcome::ListCollectionForest(forest) = state
+        .execute(Command::ListCollectionForest(ListCollectionForest))
+        .await
+        .unwrap()
+    else {
+        panic!("expected forest");
+    };
+    assert_eq!(forest.len(), first.len(), "must not duplicate root topics");
 }
 
 #[tokio::test]

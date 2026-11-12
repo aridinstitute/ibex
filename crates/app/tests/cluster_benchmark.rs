@@ -412,6 +412,7 @@ fn emit_e2e(r: &E2eResult) {
 }
 
 #[test]
+#[ignore = "opt-in timing harness; run with --ignored --nocapture"]
 fn record_algorithm_correctness_and_timings() {
     for n in sizes() {
         let result = run_algo(n);
@@ -420,6 +421,7 @@ fn record_algorithm_correctness_and_timings() {
 }
 
 #[tokio::test]
+#[ignore = "opt-in timing harness; run with --ignored --nocapture"]
 async fn record_e2e_suggest_apply_timings() {
     for n in sizes() {
         let result = run_e2e(n).await;

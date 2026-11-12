@@ -1,5 +1,7 @@
 //! Document text for topic clustering.
 
+use std::io::Read;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
 use ibex_core::{Attachment, ResourceDetail};
@@ -22,12 +24,14 @@ pub struct DocumentText {
 
 /// Soft cap so huge PDFs do not dominate clustering time or memory.
 pub const MAX_DOCUMENT_CHARS: usize = 50_000;
+/// Byte cap when reading attachments (before UTF-8 decode / truncate).
+pub const MAX_ATTACHMENT_BYTES: u64 = 2 * 1024 * 1024;
 
-const ATTACHMENT_TEXT_TYPES: &[&str] = &[
-    "txt", "md", "markdown", "text", "html", "htm", "xml", "csv", "tex", "bib", "json", "rst",
-];
+const PLAIN_TEXT_TYPES: &[&str] = &["txt", "md", "markdown", "text", "tex", "bib", "rst"];
+const MARKUP_TEXT_TYPES: &[&str] = &["html", "htm"];
 
-/// Prefer attachment content; fall back to bibliographic fields.
+/// Prefer attachment content (plus title/subtitle/abstract/keywords);
+/// fall back to bibliographic fields alone.
 pub fn extract_document_text(detail: &ResourceDetail) -> DocumentText {
     let mut attachment_parts = Vec::new();
     for attachment in &detail.attachments {
@@ -41,10 +45,7 @@ pub fn extract_document_text(detail: &ResourceDetail) -> DocumentText {
 
     if !attachment_parts.is_empty() {
         let mut parts = Vec::new();
-        push_field(&mut parts, detail.title.as_str());
-        if let Some(subtitle) = &detail.subtitle {
-            push_field(&mut parts, subtitle.as_str());
-        }
+        push_metadata_fields(&mut parts, detail);
         parts.extend(attachment_parts);
         return DocumentText {
             body: truncate(parts.join("\n\n")),
@@ -59,6 +60,8 @@ pub fn extract_document_text(detail: &ResourceDetail) -> DocumentText {
 }
 
 /// Read text from a single attachment when the type is supported.
+///
+/// PDF extraction panics are caught and treated as unreadable.
 pub fn extract_attachment_text(attachment: &Attachment) -> Option<String> {
     extract_path_text(&attachment.file_path, &attachment.attachment_type)
 }
@@ -66,39 +69,86 @@ pub fn extract_attachment_text(attachment: &Attachment) -> Option<String> {
 fn extract_path_text(path: &Path, attachment_type: &str) -> Option<String> {
     let kind = attachment_type.to_ascii_lowercase();
     if kind == "pdf" {
-        return pdf_extract::extract_text(path)
-            .ok()
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty());
+        return extract_pdf_text(path);
     }
-    if ATTACHMENT_TEXT_TYPES.iter().any(|t| *t == kind) {
-        return std::fs::read_to_string(path)
-            .ok()
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty());
+    if PLAIN_TEXT_TYPES.iter().any(|t| *t == kind) {
+        return read_capped_string(path).filter(|s| !s.trim().is_empty());
+    }
+    if MARKUP_TEXT_TYPES.iter().any(|t| *t == kind) {
+        return read_capped_string(path)
+            .map(|s| strip_tags(&s))
+            .filter(|s| !s.trim().is_empty());
     }
     None
 }
 
+fn extract_pdf_text(path: &Path) -> Option<String> {
+    let path = path.to_path_buf();
+    let result = catch_unwind(AssertUnwindSafe(|| pdf_extract::extract_text(&path)));
+    match result {
+        Ok(Ok(text)) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
+
+fn read_capped_string(path: &Path) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    let mut limited = (&mut file).take(MAX_ATTACHMENT_BYTES);
+    limited.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn strip_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn metadata_text(detail: &ResourceDetail) -> String {
     let mut parts = Vec::new();
-    push_field(&mut parts, detail.title.as_str());
+    push_metadata_fields(&mut parts, detail);
+    parts.join("\n")
+}
+
+fn push_metadata_fields(parts: &mut Vec<String>, detail: &ResourceDetail) {
+    push_field(parts, detail.title.as_str());
     if let Some(subtitle) = &detail.subtitle {
-        push_field(&mut parts, subtitle.as_str());
+        push_field(parts, subtitle.as_str());
     }
     if let Some(addon) = &detail.title_addon {
-        push_field(&mut parts, addon.as_str());
+        push_field(parts, addon.as_str());
     }
     if let Some(short) = &detail.short_title {
-        push_field(&mut parts, short.as_str());
+        push_field(parts, short.as_str());
     }
     if let Some(abstract_text) = &detail.abstract_text {
-        push_field(&mut parts, abstract_text);
+        push_field(parts, abstract_text);
     }
     for keyword in &detail.keywords {
-        push_field(&mut parts, keyword);
+        push_field(parts, keyword);
     }
-    parts.join("\n")
 }
 
 fn push_field(parts: &mut Vec<String>, value: &str) {
@@ -185,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn attachment_text_preferred_over_abstract() {
+    fn attachment_keeps_metadata_fields_alongside_body() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("notes.txt");
         std::fs::write(
@@ -194,7 +244,7 @@ mod tests {
         )
         .unwrap();
         let mut detail = detail_with("Plant Paper");
-        detail.abstract_text = Some("This abstract should be ignored.".into());
+        detail.abstract_text = Some("Keep this abstract for clustering.".into());
         detail.attachments = vec![Attachment {
             id: AttachmentId::generate(),
             attachment_type: "txt".into(),
@@ -205,7 +255,7 @@ mod tests {
         assert_eq!(text.source, TextSource::Attachment);
         assert!(text.body.contains("photosynthesis"));
         assert!(text.body.contains("Plant Paper"));
-        assert!(!text.body.contains("ignored"));
+        assert!(text.body.contains("Keep this abstract"));
     }
 
     #[test]
@@ -239,5 +289,46 @@ mod tests {
         let text = extract_document_text(&detail);
         assert_eq!(text.source, TextSource::Attachment);
         assert!(text.body.chars().count() <= MAX_DOCUMENT_CHARS);
+    }
+
+    #[test]
+    fn strips_html_tags_from_markup_attachments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page.html");
+        std::fs::write(
+            &path,
+            "<html><body><div class=\"x\">climate carbon emissions</div></body></html>",
+        )
+        .unwrap();
+        let text = extract_path_text(&path, "html").unwrap();
+        assert!(text.contains("climate"));
+        assert!(!text.contains("div"));
+        assert!(!text.contains("class"));
+    }
+
+    #[test]
+    fn pdf_extract_panic_is_swallowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.pdf");
+        // Not a valid PDF; extractors may error or panic — either must be None.
+        std::fs::write(&path, b"%PDF-not-really\njunk").unwrap();
+        assert!(extract_path_text(&path, "pdf").is_none());
+    }
+
+    #[test]
+    fn byte_cap_avoids_loading_entire_huge_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        let mut f = std::fs::File::create(&path).unwrap();
+        // Write more than the byte cap; reader must still succeed with a prefix.
+        let chunk = vec![b'a'; 64 * 1024];
+        let writes = (MAX_ATTACHMENT_BYTES as usize / chunk.len()) + 4;
+        for _ in 0..writes {
+            use std::io::Write;
+            f.write_all(&chunk).unwrap();
+        }
+        drop(f);
+        let text = read_capped_string(&path).unwrap();
+        assert!(text.len() as u64 <= MAX_ATTACHMENT_BYTES);
     }
 }
