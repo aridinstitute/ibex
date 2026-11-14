@@ -34,7 +34,7 @@ surrealdb = { version = "=3.3.4", default-features = false, features = ["kv-mem"
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 tempfile = "3"
 clap = { version = "4", features = ["derive", "env"] }
-gpui-kit = "0.8"
+gpui-kit = "0.9"
 dialoguer = "0.12.0"
 dirs = "7.0.0"
 anyhow = "1"
